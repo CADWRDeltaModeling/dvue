@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm>=6.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dvue"
+dynamic = ["version"]
+description = "Data Visualization User Interface and Editor"
+readme = "README.md"
+authors = [
+  {name = "Nicky Sandhu", email = "psandhu@water.ca.gov"}
+]
+maintainers = [
+  {name = "Nicky Sandhu", email = "psandhu@water.ca.gov"}
+]
+classifiers = [
+
+]
+license = {text = "MIT"}
+dependencies = [
+]
+
+[project.optional-dependencies]
+dev = [
+    "coverage",  # testing
+    "pytest",  # testing
+]
+
+[project.urls]
+#bugs = "https://github.com/{{cookiecutter.__gh_slug}}/issues"
+#changelog = "https://github.com/{{cookiecutter.__gh_slug}}/blob/master/changelog.md"
+#homepage = "https://github.com/dwr-psandhu/dvue"
+
+[tool.setuptools]
+packages = ["dvue"]
+
+[tool.setuptools.package-data]
+"*" = ["*.*"]
+
+[project.scripts]
+dvue = "dvue.cli:main"

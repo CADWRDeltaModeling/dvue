@@ -1,0 +1,45 @@
+{% set name = "dvue" %}
+{% set data = load_setup_py_data() %}
+
+package:
+  name:           "{{ name|lower }}"
+  version:        "{{ data['version'] }}"
+
+source:
+  path: ..
+
+build:
+  number: 0
+  noarch: python
+  script: python setup.py install --single-version-externally-managed --record=record.txt
+  entry_points:
+ {% for entry in data['entry_points']['console_scripts'] %}
+    - {{ entry.split('=')[0].strip() }} = {{ entry.split('=')[1].strip() }}
+  {% endfor %}  #skip:           true
+
+requirements:
+  build:
+    - python
+    - setuptools
+    - pytest-runner
+
+  run:
+    - python
+     # dependencies are defined in setup.py
+    {% for dep in data['install_requires'] %}
+    - {{ dep.lower() }}
+    {% endfor %}
+    {# raw is for ignoring templating with cookiecutter, leaving it for use with conda-build #}
+
+
+test:
+  imports:
+    - pydelmod
+  requires:
+    - pytest
+
+about:
+  home:           "https://github.com/CADWRDeltaModeling/pydelmod"
+  license: {{ data['license'] }}
+  license_file: LICENSE
+  summary:        "python package for Delta Modeling"

@@ -1,0 +1,30 @@
+name: dvue
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python
+  - pip
+  - numpy
+  - ipykernel
+  - click
+  - pandas
+  - xarray
+  # geo stuff
+  - pyogrio
+  - geopandas
+  # then plot stuff
+  - matplotlib
+  - jupyter_bokeh
+  - holoviews
+  - geoviews
+  - hvplot
+  - networkx
+  # for ui
+  - panel
+  # for caching
+  - diskcache
+# pip use the -e flag to install in editable mode as indicated below
+#  - pip:
+#     - -e .
+
