@@ -1,45 +1,57 @@
 {% set name = "dvue" %}
-{% set data = load_setup_py_data() %}
+{% set pyproject = load_file_data('../pyproject.toml', from_recipe_dir=True) %}
+{% set version = VERSION %}
+{% set project = pyproject['project'] %}
 
 package:
   name:           "{{ name|lower }}"
-  version:        "{{ data['version'] }}"
+  version:        "{{ version }}"
 
 source:
   path: ..
 
 build:
-  number: 0
+  script: {{ PYTHON }} -m pip install --no-build-isolation --no-deps --ignore-installed -vv .
   noarch: python
-  script: python setup.py install --single-version-externally-managed --record=record.txt
+  number: 0
   entry_points:
- {% for entry in data['entry_points']['console_scripts'] %}
-    - {{ entry.split('=')[0].strip() }} = {{ entry.split('=')[1].strip() }}
-  {% endfor %}  #skip:           true
-
+    {% for name, reference in project['scripts'].items() %}
+    - {{ name }} = {{ reference }}
+    {% endfor %}
 requirements:
   build:
     - python
-    - setuptools
-    - pytest-runner
 
-  run:
+  host:
     - python
-     # dependencies are defined in setup.py
-    {% for dep in data['install_requires'] %}
+    - pip
+    {% for dep in pyproject['build-system']['requires'] %}
     - {{ dep.lower() }}
     {% endfor %}
-    {# raw is for ignoring templating with cookiecutter, leaving it for use with conda-build #}
+  run:
+    - python
+    {% for dep in project['dependencies'] %}
+    - {{ dep.lower() }}
+    {% endfor %}
 
 
 test:
   imports:
-    - pydelmod
+    - dvue
+  source_files:
+    - tests
   requires:
+    {% for dep in project['optional-dependencies']['dev'] %}
+    - {{ dep.lower() }}
+    {% endfor %}
+  commands:
     - pytest
-
+    {% for name in project['scripts'] %}
+    - {{ name }}
+    {% endfor %}
+    - python -c "from dvue import __version__; assert __version__ == \"{{ version }}\"
 about:
-  home:           "https://github.com/CADWRDeltaModeling/pydelmod"
-  license: {{ data['license'] }}
+  home: "https://github.com/CADWRDeltaModeling/dvue"
+  license: {{ pyproject.get('license') }}
   license_file: LICENSE
-  summary:        "python package for Delta Modeling"
+  summary: "Data Visualization User interface and Editor"

@@ -24,6 +24,8 @@ dependencies:
   - panel
   # for caching
   - diskcache
+  # for dev
+  - setuptools_scm
   - sphinx
   - pytest
   - pytest-runner
