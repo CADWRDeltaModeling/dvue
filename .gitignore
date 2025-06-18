@@ -63,3 +63,4 @@ target/
 
 # hatch-vcs version file
 src/dvue/_version.py
+.DS_Store
