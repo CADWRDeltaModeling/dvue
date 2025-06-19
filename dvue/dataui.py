@@ -46,48 +46,151 @@ logger.setLevel(logging.INFO)
 
 
 class DataUIManager(param.Parameterized):
+    """
+    Base class for managing data catalogs for DataUI.
 
-    def get_widgets(self):
+    Subclass this to provide data and configuration for the DataUI interface.
+    You must override all methods that raise NotImplementedError.
+
+    Example:
+        class MyDataManager(DataUIManager):
+            def get_data_catalog(self):
+                # Return a DataFrame or GeoDataFrame
+                ...
+            def get_table_column_width_map(self):
+                ...
+            # Implement other required methods...
+
+    Methods you must override:
+        - get_data_catalog
+        - get_table_column_width_map
+        - get_table_filters
+        - build_station_name
+        - append_to_title_map
+        - create_title
+        - get_tooltips
+        - get_map_color_columns
+        - get_name_to_color
+        - get_map_marker_columns
+        - get_name_to_marker
+
+    Optional methods to override for customization:
+        - get_widgets
+        - get_data
+        - create_panel
+        - get_station_ids
+        - get_data_actions
+        - get_no_selection_message
+    """
+
+    @classmethod
+    def help(cls):
+        """
+        Print a summary of required methods and their purpose.
+        """
+        print(cls.__doc__)
+        for name, method in cls.__dict__.items():
+            if getattr(method, "__isabstractmethod__", False):
+                print(f"- {name}: {method.__doc__}")
+
+    def get_widgets(self) -> pn.pane.Markdown:
+        """
+        Return Panel widgets for additional controls. Override to provide custom widgets.
+        """
         return pn.pane.Markdown("No widgets available")
 
     # data related methods
-    def get_data_catalog(self):
-        """return a dataframe or geodataframe with the data catalog"""
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def get_data_catalog(self) -> pd.DataFrame:
+        """
+        Return a DataFrame or GeoDataFrame with the data catalog.
+
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement get_data_catalog() in your subclass."
+        )
 
     # display related support for tables
-    def get_table_columns(self):
+    def get_table_columns(self) -> list:
+        """
+        Return the list of columns to display in the table. By default, uses keys from get_table_column_width_map().
+        """
         return list(self.get_table_column_width_map().keys())
 
-    def get_table_column_width_map(self):
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def get_table_column_width_map(self) -> dict:
+        """
+        Return a dictionary mapping column names to width strings (e.g., '10%').
 
-    def get_table_filters(self):
-        raise NotImplementedError("This method should be implemented by subclasses")
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement get_table_column_width_map() in your subclass."
+        )
 
-    def get_data(self, df):
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def get_table_filters(self) -> dict:
+        """
+        Return a dictionary specifying filter widgets for each column.
 
-    def create_panel(self, df):
-        raise NotImplementedError("This method should be implemented by subclasses")
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement get_table_filters() in your subclass."
+        )
 
-    def get_station_ids(self, df):
+    def get_data(self, df: pd.DataFrame):
+        """
+        Return the data to be displayed for a given DataFrame. Override as needed.
+        """
+        raise NotImplementedError("Subclasses should implement get_data() if needed.")
+
+    def create_panel(self, df: pd.DataFrame):
+        """
+        Return a Panel object for displaying the data. Override as needed.
+        """
+        raise NotImplementedError(
+            "Subclasses should implement create_panel() if needed."
+        )
+
+    def get_station_ids(self, df: pd.DataFrame) -> list:
+        """
+        Return a list of unique station IDs from the DataFrame.
+        """
         return list((df.apply(self.build_station_name, axis=1).astype(str).unique()))
 
-    def build_station_name(self, r):
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def build_station_name(self, r: pd.Series) -> str:
+        """
+        Build a display name for a station from a row of the catalog.
 
-    # FIXME: this should not be here
-    def append_to_title_map(self, title_map, unit, r):
-        raise NotImplementedError("This method should be implemented by subclasses")
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement build_station_name() in your subclass."
+        )
 
-    # FIXME: this should not be here
-    def create_title(self, title_map, unit, r):
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def append_to_title_map(self, title_map: dict, unit: str, r: pd.Series):
+        """
+        Append information to a title map for display.
+
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement append_to_title_map() in your subclass."
+        )
+
+    def create_title(self, title_map: dict, unit: str, r: pd.Series) -> str:
+        """
+        Create a title string for display.
+
+        You must override this in your subclass.
+        """
+        raise NotImplementedError("You must implement create_title() in your subclass.")
 
     @lru_cache(maxsize=128)
-    def get_no_selection_message(self):
-        """return the message to be displayed when no selection is made"""
+    def get_no_selection_message(self) -> str:
+        """
+        Return the message to be displayed when no selection is made.
+        Reads from dataui.noselection.html.
+        """
         import os
 
         resource_path = os.path.join(
@@ -97,32 +200,58 @@ class DataUIManager(param.Parameterized):
             no_selection_message = file.read()
         return no_selection_message
 
-    def get_tooltips(self):
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def get_tooltips(self) -> list:
+        """
+        Return a list of tooltips for map features.
 
-    def get_map_color_columns(self):
-        """return the columns that can be used to color the map"""
-        raise NotImplementedError("This method should be implemented by subclasses")
+        You must override this in your subclass.
+        """
+        raise NotImplementedError("You must implement get_tooltips() in your subclass.")
 
-    def get_name_to_color(self):
-        """return a dictionary mapping column names to color names"""
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def get_map_color_columns(self) -> list:
+        """
+        Return the columns that can be used to color the map.
 
-    def get_map_marker_columns(self):
-        """return the columns that can be used to color the map"""
-        raise NotImplementedError("This method should be implemented by subclasses")
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement get_map_color_columns() in your subclass."
+        )
 
-    def get_name_to_marker(self):
-        """return a dictionary mapping column names to marker names"""
-        raise NotImplementedError("This method should be implemented by subclasses")
+    def get_name_to_color(self) -> dict:
+        """
+        Return a dictionary mapping column names to color names.
 
-    def get_data_actions(self):
-        """Return a list of default data actions."""
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement get_name_to_color() in your subclass."
+        )
+
+    def get_map_marker_columns(self) -> list:
+        """
+        Return the columns that can be used to set map marker types.
+
+        You must override this in your subclass.
+        """
+        raise NotImplementedError(
+            "You must implement get_map_marker_columns() in your subclass."
+        )
+
+    def get_name_to_marker(self) -> dict:
+        """
+        Return a dictionary mapping column names to marker names. Must be implemented by subclasses.
+        """
+        raise NotImplementedError("Subclasses must implement get_name_to_marker().")
+
+    def get_data_actions(self) -> list:
+        """
+        Return a list of default data actions. Override to customize available actions.
+        """
         plot_action = PlotAction()
         download_action = DownloadDataAction()
         permalink_action = PermalinkAction()
         download_catalog = DownloadDataCatalogAction()
-
         plot_button = dict(
             name="Plot",
             button_type="primary",
@@ -153,7 +282,6 @@ class DataUIManager(param.Parameterized):
             filename="catalog.csv",
             callback=download_catalog.callback,
         )
-
         return [plot_button, download_button, permalink_button, download_catalog_button]
 
 
