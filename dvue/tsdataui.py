@@ -22,7 +22,6 @@ from holoviews.plotting.util import process_cmap
 pn.extension("tabulator", notifications=True, design="native")
 #
 LINE_DASH_MAP = ["solid", "dashed", "dotted", "dotdash", "dashdot"]
-# FIXME: from vtools.functions.filter import cosine_lanczos
 
 
 def unique_preserve_order(seq):
@@ -52,9 +51,7 @@ def get_colors(stations, dfc):
 
 @lru_cache
 def get_categorical_color_maps():
-    cmaps = hv.plotting.util.list_cmaps(
-        records=True, category="Categorical", reverse=False
-    )
+    cmaps = hv.plotting.util.list_cmaps(records=True, category="Categorical", reverse=False)
     cmaps = {c.name + "." + c.provider: c for c in cmaps}
     return cmaps
 
@@ -113,9 +110,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         default=None, objects=[], doc="Column to use for color cycle"
     )
 
-    def __init__(
-        self, filename_column="FILE", file_number_column_name="FILE_NUM", **params
-    ):
+    def __init__(self, filename_column="FILE", file_number_column_name="FILE_NUM", **params):
         # modify catalog if filename_column is present to include file number if multiple files are present
         catalog = self.get_data_catalog()
         self.change_color_cycle()
@@ -125,10 +120,13 @@ class TimeSeriesDataUIManager(DataUIManager):
         if self.filename_column in catalog.columns:
             unique_files = catalog[self.filename_column].unique()
             if len(unique_files) > 1:
-                catalog[self.file_number_column_name] = catalog[
-                    self.filename_column
-                ].apply(lambda x: unique_files.tolist().index(x))
+                catalog[self.file_number_column_name] = catalog[self.filename_column].apply(
+                    lambda x: unique_files.tolist().index(x)
+                )
                 self.display_fileno = True
+        else:
+            self.file_number_column_name = None
+            self.display_fileno = False
         self.time_range = self.get_time_range(self.get_data_catalog())
         super().__init__(**params)
         table_columns = list(self.get_table_columns())
@@ -212,9 +210,7 @@ class TimeSeriesDataUIManager(DataUIManager):
     @param.depends("color_cycle_name", watch=True)
     def change_color_cycle(self):
         cmapinfo = get_categorical_color_maps()[self.color_cycle_name]
-        color_list = unique_preserve_order(
-            process_cmap(cmapinfo.name, provider=cmapinfo.provider)
-        )
+        color_list = unique_preserve_order(process_cmap(cmapinfo.name, provider=cmapinfo.provider))
         self.color_cycle = hv.Cycle(color_list)
 
     def get_widgets(self):
@@ -252,9 +248,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         transform_widgets = pn.Column(
             self.param.fill_gap,
             self.param.do_tidal_filter,
-            pn.Row(
-                self.param.sensible_range_yaxis, self.param.sensible_percentile_range
-            ),
+            pn.Row(self.param.sensible_range_yaxis, self.param.sensible_percentile_range),
         )
         widget_tabs = pn.Tabs(
             ("Time", control_widgets),
@@ -311,10 +305,11 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def get_table_column_width_map(self):
         column_width_map = self._get_table_column_width_map()
-        column_width_map[self.filename_column] = "10%"
-        if self.display_fileno:
-            column_width_map[self.file_number_column_name] = "5%"
-        self.adjust_column_width(column_width_map)
+        if self.filename_column:
+            column_width_map[self.filename_column] = "10%"
+            if self.display_fileno:
+                column_width_map[self.file_number_column_name] = "5%"
+            self.adjust_column_width(column_width_map)
         return column_width_map
 
     def get_color_style_mapping(self, unique_values):
@@ -322,17 +317,14 @@ class TimeSeriesDataUIManager(DataUIManager):
         Map unique values to colors.
         """
         color_df = get_color_dataframe(unique_values, self.color_cycle)
-        return {
-            value: color_df.loc[value].values.flatten()[0] for value in unique_values
-        }
+        return {value: color_df.loc[value].values.flatten()[0] for value in unique_values}
 
     def get_line_style_mapping(self, unique_values):
         """
         Map unique values to line dash styles.
         """
         return {
-            value: LINE_DASH_MAP[i % len(LINE_DASH_MAP)]
-            for i, value in enumerate(unique_values)
+            value: LINE_DASH_MAP[i % len(LINE_DASH_MAP)] for i, value in enumerate(unique_values)
         }
 
     def get_marker_style_mapping(self, unique_values):
@@ -342,17 +334,13 @@ class TimeSeriesDataUIManager(DataUIManager):
         from bokeh.core.enums import MarkerType
 
         marker_types = [None] + list(MarkerType)
-        return {
-            value: marker_types[i % len(marker_types)]
-            for i, value in enumerate(unique_values)
-        }
+        return {value: marker_types[i % len(marker_types)] for i, value in enumerate(unique_values)}
 
     def _process_curve_data(self, data, r, time_range):
         """Process time series data based on index type and apply transformations."""
         if isinstance(data.index, pd.PeriodIndex):
             data = data[
-                (data.index.start_time >= time_range[0])
-                & (data.index.end_time <= time_range[1])
+                (data.index.start_time >= time_range[0]) & (data.index.end_time <= time_range[1])
             ]
         else:  # Assume DatetimeIndex
             data = data[(data.index >= time_range[0]) & (data.index <= time_range[1])]
@@ -434,9 +422,7 @@ class TimeSeriesDataUIManager(DataUIManager):
 
         # Calculate progress increment
         total_rows = len(df)
-        progress_per_row = 40 / max(
-            total_rows, 1
-        )  # We'll use 50-90% range for the iteration
+        progress_per_row = 40 / max(total_rows, 1)  # We'll use 50-90% range for the iteration
 
         # Process each row
         for i, (_, row) in enumerate(df.iterrows()):
@@ -448,9 +434,7 @@ class TimeSeriesDataUIManager(DataUIManager):
 
                 # Create curve
                 file_index = (
-                    file_index_map.get(row[self.filename_column], "")
-                    if self.display_fileno
-                    else ""
+                    file_index_map.get(row[self.filename_column], "") if self.display_fileno else ""
                 )
                 curve = self.create_curve(data, row, unit, file_index=file_index)
 
@@ -508,9 +492,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         if df.empty:
             return current_range
         else:
-            new_range = (
-                df.iloc[:, 0].quantile(list(self.sensible_percentile_range)).values
-            )
+            new_range = df.iloc[:, 0].quantile(list(self.sensible_percentile_range)).values
             scaleval = new_range[1] - new_range[0]
             new_range = [
                 new_range[0] - scaleval * factor,
@@ -583,9 +565,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         combinations = {}
         for i, (_, row) in enumerate(curves_data):
             color_val = (
-                row[self.color_cycle_column]
-                if color_map and self.color_cycle_column
-                else None
+                row[self.color_cycle_column] if color_map and self.color_cycle_column else None
             )
             line_style_val = (
                 row[self.dashed_line_cycle_column]
@@ -599,9 +579,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             combinations[combo_key].append(i)
 
         # Check for duplicate combinations
-        has_style_duplicates = any(
-            len(indices) > 1 for indices in combinations.values()
-        )
+        has_style_duplicates = any(len(indices) > 1 for indices in combinations.values())
 
         return combinations, has_duplicates, has_style_duplicates
 
@@ -635,9 +613,7 @@ class TimeSeriesDataUIManager(DataUIManager):
 
         # Apply line style if needed
         if has_duplicates and line_map and self.dashed_line_cycle_column:
-            curve_opts["line_dash"] = line_map.get(
-                row[self.dashed_line_cycle_column], "solid"
-            )
+            curve_opts["line_dash"] = line_map.get(row[self.dashed_line_cycle_column], "solid")
 
         # Apply basic styling
         styled_curve = curve.opts(opts.Curve(**curve_opts))
@@ -645,9 +621,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Add markers only when there are multiple curves with the same color and line style
         if marker_map and self.marker_cycle_column:
             # Get the combo key for this curve
-            current_color = (
-                row[self.color_cycle_column] if self.color_cycle_column else None
-            )
+            current_color = row[self.color_cycle_column] if self.color_cycle_column else None
             current_line_style = (
                 row[self.dashed_line_cycle_column]
                 if has_duplicates and self.dashed_line_cycle_column
@@ -656,10 +630,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             combo_key = (current_color, current_line_style)
 
             # Only add markers if this specific style combination appears multiple times
-            if (
-                combo_key in style_combinations
-                and len(style_combinations[combo_key]) > 1
-            ):
+            if combo_key in style_combinations and len(style_combinations[combo_key]) > 1:
                 marker_style = marker_map.get(row[self.marker_cycle_column], None)
                 if marker_style is not None:
                     scatter = hv.Scatter(curve.data, label=curve.label).opts(
@@ -690,14 +661,10 @@ class TimeSeriesDataUIManager(DataUIManager):
             style_maps = self._prepare_style_maps(df)
 
             # Create data layout
-            layout_map, station_map, range_map, title_map = self.create_layout(
-                df, time_range
-            )
+            layout_map, station_map, range_map, title_map = self.create_layout(df, time_range)
 
             if len(layout_map) == 0:
-                return hv.Div(self.get_no_selection_message()).opts(
-                    sizing_mode="stretch_both"
-                )
+                return hv.Div(self.get_no_selection_message()).opts(sizing_mode="stretch_both")
 
             # Build visualization layout
             overlays = []

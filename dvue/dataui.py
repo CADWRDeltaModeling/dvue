@@ -106,9 +106,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement get_data_catalog() in your subclass."
-        )
+        raise NotImplementedError("You must implement get_data_catalog() in your subclass.")
 
     # display related support for tables
     def get_table_columns(self) -> list:
@@ -133,9 +131,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement get_table_filters() in your subclass."
-        )
+        raise NotImplementedError("You must implement get_table_filters() in your subclass.")
 
     def get_data(self, df: pd.DataFrame):
         """
@@ -147,9 +143,7 @@ class DataUIManager(param.Parameterized):
         """
         Return a Panel object for displaying the data. Override as needed.
         """
-        raise NotImplementedError(
-            "Subclasses should implement create_panel() if needed."
-        )
+        raise NotImplementedError("Subclasses should implement create_panel() if needed.")
 
     def get_station_ids(self, df: pd.DataFrame) -> list:
         """
@@ -163,9 +157,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement build_station_name() in your subclass."
-        )
+        raise NotImplementedError("You must implement build_station_name() in your subclass.")
 
     def append_to_title_map(self, title_map: dict, unit: str, r: pd.Series):
         """
@@ -173,9 +165,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement append_to_title_map() in your subclass."
-        )
+        raise NotImplementedError("You must implement append_to_title_map() in your subclass.")
 
     def create_title(self, title_map: dict, unit: str, r: pd.Series) -> str:
         """
@@ -193,9 +183,7 @@ class DataUIManager(param.Parameterized):
         """
         import os
 
-        resource_path = os.path.join(
-            os.path.dirname(__file__), "dataui.noselection.html"
-        )
+        resource_path = os.path.join(os.path.dirname(__file__), "dataui.noselection.html")
         with open(resource_path, "r") as file:
             no_selection_message = file.read()
         return no_selection_message
@@ -214,9 +202,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement get_map_color_columns() in your subclass."
-        )
+        raise NotImplementedError("You must implement get_map_color_columns() in your subclass.")
 
     def get_name_to_color(self) -> dict:
         """
@@ -224,9 +210,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement get_name_to_color() in your subclass."
-        )
+        raise NotImplementedError("You must implement get_name_to_color() in your subclass.")
 
     def get_map_marker_columns(self) -> list:
         """
@@ -234,9 +218,7 @@ class DataUIManager(param.Parameterized):
 
         You must override this in your subclass.
         """
-        raise NotImplementedError(
-            "You must implement get_map_marker_columns() in your subclass."
-        )
+        raise NotImplementedError("You must implement get_map_marker_columns() in your subclass.")
 
     def get_name_to_marker(self) -> dict:
         """
@@ -307,19 +289,13 @@ class DataUI(param.Parameterized):
         objects=[],
         doc="Options for the map color category selection",
     )
-    show_map_colors = param.Boolean(
-        default=True, doc="Show map colors for selected category"
-    )
+    show_map_colors = param.Boolean(default=True, doc="Show map colors for selected category")
     map_marker_category = param.Selector(
         objects=[],
         doc="Options for the map marker category selection",
     )
-    show_map_markers = param.Boolean(
-        default=False, doc="Show map markers for selected category"
-    )
-    map_default_span = param.Number(
-        default=15000, doc="Default span for map zoom in meters"
-    )
+    show_map_markers = param.Boolean(default=False, doc="Show map markers for selected category")
+    map_default_span = param.Number(default=15000, doc="Default span for map zoom in meters")
     map_non_selection_alpha = param.Number(default=0.2, doc="Non selection alpha")
     map_point_size = param.Number(default=10, doc="Point size for map")
 
@@ -332,22 +308,16 @@ class DataUI(param.Parameterized):
         doc="Use regex for table filtering instead of 'like' functionality",
     )
 
-    def __init__(
-        self, dataui_manager, crs=ccrs.PlateCarree(), station_id_column=None, **kwargs
-    ):
+    def __init__(self, dataui_manager, crs=ccrs.PlateCarree(), station_id_column=None, **kwargs):
         self._crs = crs
         self._station_id_column = station_id_column
         super().__init__(**kwargs)
         self._dataui_manager = dataui_manager
         self._dataui_manager._dataui = self  # insert a reference to self in the dataui_manager for progress bar updates for example
         self._dfcat = self._dataui_manager.get_data_catalog()
-        self.param.map_color_category.objects = (
-            self._dataui_manager.get_map_color_columns()
-        )
+        self.param.map_color_category.objects = self._dataui_manager.get_map_color_columns()
         self.map_color_category = self.param.map_color_category.objects[0]
-        self.param.map_marker_category.objects = (
-            self._dataui_manager.get_map_marker_columns()
-        )
+        self.param.map_marker_category.objects = self._dataui_manager.get_map_marker_columns()
         self.map_marker_category = self.param.map_marker_category.objects[0]
         self._dfmapcat = self._get_map_catalog()
 
@@ -359,9 +329,7 @@ class DataUI(param.Parameterized):
             else:
                 self._station_select = streams.Selection1D(source=self._map_features)
         else:
-            warnings.warn(
-                "No geolocation data found in catalog. Not displaying map of stations."
-            )
+            warnings.warn("No geolocation data found in catalog. Not displaying map of stations.")
 
     def _get_map_catalog(self):
         if (
@@ -373,7 +341,8 @@ class DataUI(param.Parameterized):
                 dfx = dfx.dropna(subset=["geometry"])
                 dfx = dfx.set_crs(self._dfcat.crs)
             else:
-                dfx = dfx.dropna(subset=["Latitude", "Longitude"])  # FIXME: ?
+                pass
+                # dfx = dfx.dropna(subset=["Latitude", "Longitude"])  # FIXME: ?
         else:
             dfx = self._dfcat
         return dfx
@@ -386,15 +355,15 @@ class DataUI(param.Parameterized):
         # check if the dfmap is a geodataframe
         try:
             if isinstance(dfmap, gpd.GeoDataFrame):
-                geom_type = dfmap.geometry.iloc[0].geom_type
-                if geom_type == "Point":
+                geom_type = str.lower(str(dfmap.geometry.iloc[0].geom_type))
+                if "point" in geom_type:
                     self._map_features = gv.Points(dfmap, crs=crs)
                 elif geom_type == "LineString":
                     self._map_features = gv.Path(dfmap, crs=crs)
-                elif geom_type == "Polygon":
+                elif "polygon" in geom_type:
                     self._map_features = gv.Polygons(dfmap, crs=crs)
                 else:  # pragma: no cover
-                    raise "Unknown geometry type " + geom_type
+                    raise ValueError("Unknown geometry type " + geom_type)
         except Exception as e:
             logger.error(f"Error building map of features: {e}")
             self._map_features = gv.Points(dfmap, crs=crs)
@@ -431,9 +400,7 @@ class DataUI(param.Parameterized):
             )
         else:
             raise "Unknown map feature type " + str(type(self._map_features))
-        self._map_features = self._map_features.opts(
-            active_tools=["wheel_zoom"], responsive=True
-        )
+        self._map_features = self._map_features.opts(active_tools=["wheel_zoom"], responsive=True)
         return self._map_features
 
     def update_map_features(
@@ -474,18 +441,14 @@ class DataUI(param.Parameterized):
                 current_view = current_view.loc[current_view.is_valid]
             current_table_selected = self._dfcat.iloc[selection]
             current_selected = current_table_selected
-        current_selection = current_view.index.get_indexer(
-            current_selected.index
-        ).tolist()
+        current_selection = current_view.index.get_indexer(current_selected.index).tolist()
         try:
             if len(query) > 0:
                 current_view = current_view.query(query)
         except Exception as e:
             str_stack = full_stack()
             logger.error(str_stack)
-            notifications.error(
-                f"Error while fetching data for {str_stack}", duration=0
-            )
+            notifications.error(f"Error while fetching data for {str_stack}", duration=0)
         self.map_color_category = color_by
         self.show_map_colors = show_color_by
         self._map_features = self.build_map_of_features(current_view, self._crs)
@@ -511,11 +474,10 @@ class DataUI(param.Parameterized):
             return
         idcol = self._station_id_column
         table = self.display_table
+
         if idcol and idcol in self._dfcat.columns:
             # get station ids from the _map_features being displayed
-            stations_map_selected = (
-                self._map_features.dframe().iloc[index][idcol].unique()
-            )
+            stations_map_selected = self._map_features.dframe().iloc[index][idcol].unique()
             # get the stations selected in table already
             stations_table_selected = table.selected_dataframe[idcol].unique()
             # get stations in stations_map_selected that are not in stations_selected
@@ -532,9 +494,7 @@ class DataUI(param.Parameterized):
             ].index
 
             # Then convert to integer positions (iloc indices)
-            keep_selected_from_map = list(
-                map(int, self._dfcat.index.get_indexer(matching_indices))
-            )
+            keep_selected_from_map = list(map(int, self._dfcat.index.get_indexer(matching_indices)))
             i_selected_indices = list(
                 map(int, self._dfcat.index.get_indexer(current_view_selected_indices))
             )
@@ -562,9 +522,7 @@ class DataUI(param.Parameterized):
                         import asyncio
 
                         pn.state.curdoc.add_next_tick_callback(
-                            lambda: asyncio.create_task(
-                                self._hide_progress_after_delay()
-                            )
+                            lambda: asyncio.create_task(self._hide_progress_after_delay())
                         )
                         if sio:
                             return sio
@@ -654,16 +612,10 @@ class DataUI(param.Parameterized):
                 sizing_mode="stretch_both",
             )
         )
-        gspec = pn.GridStack(
-            sizing_mode="stretch_both", allow_resize=True, allow_drag=False
-        )
+        gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=True, allow_drag=False)
         gspec[0, 0:5] = self._action_panel
-        gspec[1:5, 0:10] = fullscreen.FullScreen(
-            pn.Row(self.display_table, scroll=True)
-        )
-        gspec[6:15, 0:10] = fullscreen.FullScreen(
-            pn.Row(self._display_panel, scroll=True)
-        )
+        gspec[1:5, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
+        gspec[6:15, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
         self._main_panel = gspec
         return gspec
 
@@ -695,9 +647,7 @@ class DataUI(param.Parameterized):
             return about_text
 
     def create_about_button(self, template):
-        about_btn = pn.widgets.Button(
-            name="About App", button_type="primary", icon="info-circle"
-        )
+        about_btn = pn.widgets.Button(name="About App", button_type="primary", icon="info-circle")
 
         def about_callback(event):
             template.open_modal()
@@ -708,22 +658,14 @@ class DataUI(param.Parameterized):
     def _create_main_view(self):
         """Create the main view content based on the current view_type"""
         if self.view_type == "table":
-            gspec = pn.GridStack(
-                sizing_mode="stretch_both", allow_resize=False, allow_drag=False
-            )
+            gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
             gspec[0, 0:5] = self._action_panel
-            gspec[1:15, 0:10] = fullscreen.FullScreen(
-                pn.Row(self.display_table, scroll=True)
-            )
+            gspec[1:15, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
             return gspec
         elif self.view_type == "display":
-            gspec = pn.GridStack(
-                sizing_mode="stretch_both", allow_resize=False, allow_drag=False
-            )
+            gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
             gspec[0, 0:5] = self._action_panel
-            gspec[1:15, 0:10] = fullscreen.FullScreen(
-                pn.Row(self._display_panel, scroll=True)
-            )
+            gspec[1:15, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
             return gspec
         else:  # combined view
             return pn.Column(
@@ -746,9 +688,7 @@ class DataUI(param.Parameterized):
             self.progress_bar.indeterminate = True
         else:
             self.progress_bar.indeterminate = False
-            self.progress_bar.value = max(
-                0, min(100, value)
-            )  # Ensure value is between 0-100
+            self.progress_bar.value = max(0, min(100, value))  # Ensure value is between 0-100
 
     def hide_progress(self):
         """Hide the progress bar."""
@@ -805,9 +745,7 @@ class DataUI(param.Parameterized):
             stack_str = full_stack()
             logger.error(stack_str)
             if pn.state.notifications is not None:
-                pn.state.notifications.error(
-                    "Error displaying map: " + str(stack_str), duration=0
-                )
+                pn.state.notifications.error("Error displaying map: " + str(stack_str), duration=0)
         finally:
             self._display_panel.loading = False
             # Hide progress after a short delay to show completion
@@ -931,9 +869,7 @@ class DataUI(param.Parameterized):
         nav_buttons = pn.Row(self.create_view_navigation())
 
         # Create the initial main view based on URL hash
-        self._main_view = pn.Column(
-            self._create_main_view(), sizing_mode="stretch_both"
-        )
+        self._main_view = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
 
         template = pn.template.VanillaTemplate(
             title=title,
