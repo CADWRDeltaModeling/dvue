@@ -1,0 +1,36 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "ex_tsdataui",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "panel",
+            "justMyCode": false,
+            "args": [
+                "serve",
+                "--autoreload",
+                "--dev",
+                "--show",
+                "examples/ex_tsdataui.py"
+            ]
+        },
+        {
+            "name": "ex_basic_tsdataui",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "panel",
+            "justMyCode": false,
+            "args": [
+                "serve",
+                "--autoreload",
+                "--dev",
+                "--show",
+                "examples/ex_basic_tsdataui.py"
+            ]
+        },
+    ]
+}

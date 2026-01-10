@@ -88,7 +88,7 @@ class TimeSeriesDataUIManager(DataUIManager):
     sensible_percentile_range = param.Range(
         default=(0.01, 0.99), bounds=(0, 1), step=0.01, doc="Percentile range"
     )
-    file_number_column_name = param.String(default="FILE_NUM")
+    file_number_column_name = param.String(default="FILE_NUM", allow_None=True)
     color_cycle_name = param.Selector(
         objects=list(get_categorical_color_maps().keys()),
         default="glasbey_dark.colorcet",

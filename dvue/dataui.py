@@ -23,6 +23,7 @@ import panel as pn
 from panel.io import location
 
 pn.extension("tabulator", notifications=True, design="native")
+pn.extension("gridstack")  # for GridStack layout
 #
 from . import fullscreen
 from .actions import (
