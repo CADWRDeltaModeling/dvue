@@ -1,0 +1,41 @@
+name: Python Package using Conda
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 5
+
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Required for setuptools_scm to read version from git history
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Add conda to system path
+      run: |
+        # $CONDA is an environment variable pointing to the root of the miniconda directory
+        echo $CONDA/bin >> $GITHUB_PATH
+
+    - name: Conda build package and upload to anaconda.org
+      env:
+        ANACONDA_CHANNEL_UPLOAD_TOKEN: ${{ secrets.ANACONDA_CHANNEL_UPLOAD_TOKEN }}
+      run: |
+        conda create -n build_dvue -y conda-build conda-verify anaconda-client
+        source $CONDA/etc/profile.d/conda.sh
+        conda activate build_dvue
+
+        # Build and upload - conda_build.sh handles versioning via git describe
+        conda config --set anaconda_upload yes
+        chmod +x ./conda_build.sh
+        ./conda_build.sh -c cadwr-dms -c conda-forge --user cadwr-dms --token "$ANACONDA_CHANNEL_UPLOAD_TOKEN"
+
+        # Clean up
+        conda activate
+        conda remove -n build_dvue --all

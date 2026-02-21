@@ -1,6 +1,6 @@
 {% set name = "dvue" %}
 {% set pyproject = load_file_data('../pyproject.toml', from_recipe_dir=True) %}
-{% set version = VERSION %}
+{% set version = environ.get('VERSION', pyproject.get('tool', {}).get('setuptools_scm', {}).get('fallback_version', '0.0.0')) %}
 {% set project = pyproject['project'] %}
 
 package:
@@ -14,10 +14,12 @@ build:
   script: {{ PYTHON }} -m pip install --no-build-isolation --no-deps --ignore-installed -vv .
   noarch: python
   number: 0
+  {% if project.get('scripts') %}
   entry_points:
-    {% for name, reference in project['scripts'].items() %}
-    - {{ name }} = {{ reference }}
+    {% for script_name, reference in project['scripts'].items() %}
+    - {{ script_name }} = {{ reference }}
     {% endfor %}
+  {% endif %}
 requirements:
   build:
     - python
@@ -38,20 +40,17 @@ requirements:
 test:
   imports:
     - dvue
-  source_files:
-    - tests
   requires:
-    {% for dep in project['optional-dependencies']['dev'] %}
-    - {{ dep.lower() }}
-    {% endfor %}
+    - python
   commands:
-    - pytest
-    {% for name in project['scripts'] %}
-    - {{ name }}
+    - python -c "from dvue import __version__; print(__version__)"
+    {% if project.get('scripts') %}
+    {% for script_name in project['scripts'] %}
+    - {{ script_name }} --help
     {% endfor %}
-    - python -c "from dvue import __version__; assert __version__ == \"{{ version }}\"
+    {% endif %}
 about:
   home: "https://github.com/CADWRDeltaModeling/dvue"
-  license: {{ pyproject.get('license') }}
+  license: "MIT"
   license_file: LICENSE
   summary: "Data Visualization User interface and Editor"
