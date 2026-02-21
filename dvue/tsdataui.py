@@ -317,7 +317,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         Map unique values to colors.
         """
         color_df = get_color_dataframe(unique_values, self.color_cycle)
-        return {value: color_df.loc[value].values.flatten()[0] for value in unique_values}
+        return {value: color_df.at[value, "color"] for value in unique_values}
 
     def get_line_style_mapping(self, unique_values):
         """
