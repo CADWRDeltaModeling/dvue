@@ -22,7 +22,8 @@ from holoviews.plotting.util import process_cmap
 pn.extension("tabulator", notifications=True, design="native")
 #
 LINE_DASH_MAP = ["solid", "dashed", "dotted", "dotdash", "dashdot"]
-
+#
+from vtools.functions.filter import cosine_lanczos # FIXME: move this to the specific repo that needs it.
 
 def unique_preserve_order(seq):
     seen = set()
