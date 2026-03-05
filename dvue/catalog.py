@@ -144,6 +144,34 @@ class DataReference:
                 return False
         return True
 
+    def ref_key(self) -> str:
+        """Return a string key derived from this reference's metadata attributes.
+
+        The default implementation joins all string-representable attribute values
+        with ``"_"`` separators, sanitising spaces and non-identifier characters
+        to underscores.  The result is intended to be a valid Python identifier
+        so it can be used as a variable name inside :class:`MathDataReference`
+        expression strings.
+
+        Override in subclasses to produce a more readable, domain-specific key
+        from a chosen subset of attributes.
+
+        Examples
+        --------
+        >>> ref = DataReference(df, name="r", station="A", variable="wind", interval="hourly")
+        >>> ref.ref_key()
+        'A_wind_hourly'
+        """
+        parts = []
+        for value in self._attributes.values():
+            if not isinstance(value, (str, int, float, bool)):
+                continue
+            sanitized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip())
+            sanitized = sanitized.strip("_")
+            if sanitized:
+                parts.append(sanitized)
+        return "_".join(parts)
+
     # ------------------------------------------------------------------
     # Data loading
     # ------------------------------------------------------------------

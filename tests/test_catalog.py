@@ -176,6 +176,45 @@ class TestDataReference:
         assert ref.has_attribute("tag")
         assert not ref.has_attribute("nope")
 
+    # ------------------------------------------------------------------
+    # ref_key
+    # ------------------------------------------------------------------
+
+    def test_ref_key_default_joins_attribute_values(self, simple_df):
+        ref = DataReference(simple_df, name="r", station="A", variable="wind", interval="hourly")
+        assert ref.ref_key() == "A_wind_hourly"
+
+    def test_ref_key_sanitizes_spaces(self, simple_df):
+        ref = DataReference(simple_df, name="r", station_name="Station A")
+        assert ref.ref_key() == "Station_A"
+
+    def test_ref_key_sanitizes_special_chars(self, simple_df):
+        ref = DataReference(simple_df, name="r", unit="m/s")
+        assert ref.ref_key() == "m_s"
+
+    def test_ref_key_includes_numeric_attributes(self, simple_df):
+        ref = DataReference(simple_df, name="r", year=2020)
+        assert ref.ref_key() == "2020"
+
+    def test_ref_key_skips_complex_types(self, simple_df):
+        class _Blob:
+            pass
+
+        ref = DataReference(simple_df, name="r", station="A", blob=_Blob())
+        assert ref.ref_key() == "A"
+
+    def test_ref_key_empty_when_no_attributes(self, simple_df):
+        ref = DataReference(simple_df, name="r")
+        assert ref.ref_key() == ""
+
+    def test_ref_key_override_in_subclass(self, simple_df):
+        class CustomRef(DataReference):
+            def ref_key(self) -> str:
+                return self.get_attribute("station", "") + "_custom"
+
+        ref = CustomRef(simple_df, name="r", station="A")
+        assert ref.ref_key() == "A_custom"
+
     def test_set_attribute_chainable(self, simple_df):
         ref = DataReference(simple_df, name="r")
         result = ref.set_attribute("a", 1).set_attribute("b", 2)

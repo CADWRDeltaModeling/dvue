@@ -57,11 +57,11 @@ class DataProvider(param.Parameterized):
 
     Catalog integration
     -------------------
-    The preferred approach is to override the :attr:`catalog` property to
+    The preferred approach is to override the :attr:`data_catalog` property to
     return a :class:`~dvue.catalog.DataCatalog`.  When set:
 
     * :meth:`get_data_catalog` automatically calls
-      ``catalog.to_dataframe().reset_index()``.
+      ``data_catalog.to_dataframe().reset_index()``.
     * :meth:`get_data_reference` automatically looks up
       :class:`~dvue.catalog.DataReference` objects by name.
     * :meth:`get_data` automatically yields ``ref.getData()`` for each
@@ -70,7 +70,11 @@ class DataProvider(param.Parameterized):
     Manual override
     ---------------
     Override :meth:`get_data_catalog` and :meth:`get_data` directly for
-    full control without a DataCatalog.
+    full control without a DataCatalog.  This is the pattern used by
+    existing subclasses such as ``TimeSeriesDataUIManager`` subclasses that
+    store the catalog as a plain :class:`pandas.DataFrame` attribute and
+    override ``get_data_catalog()`` to return it directly — that pattern
+    continues to work unchanged.
 
     Example – catalog-based provider
     ---------------------------------
@@ -86,7 +90,7 @@ class DataProvider(param.Parameterized):
                 )
 
             @property
-            def catalog(self):
+            def data_catalog(self):
                 return self._catalog
 
         provider = HydroProvider("/data/hydro")
@@ -96,12 +100,19 @@ class DataProvider(param.Parameterized):
     """
 
     @property
-    def catalog(self) -> DataCatalog | None:
+    def data_catalog(self) -> DataCatalog | None:
         """Return the underlying :class:`~dvue.catalog.DataCatalog`, or ``None``.
 
         Override this property to expose a :class:`~dvue.catalog.DataCatalog`
         to the UI layer.  When ``None`` (the default), :meth:`get_data_catalog`
         and :meth:`get_data` must be overridden manually.
+
+        .. note::
+            This property is intentionally named ``data_catalog`` (not
+            ``catalog``) so that subclasses remain free to use ``self.catalog``
+            as a plain instance attribute — which is the established pattern
+            for :class:`~dvue.tsdataui.TimeSeriesDataUIManager` subclasses
+            that store the catalog as a :class:`pandas.DataFrame`.
         """
         return None
 
@@ -119,9 +130,9 @@ class DataProvider(param.Parameterized):
         Raises
         ------
         NotImplementedError
-            When neither :attr:`catalog` nor a subclass override are provided.
+            When neither :attr:`data_catalog` nor a subclass override are provided.
         """
-        cat = self.catalog
+        cat = self.data_catalog
         if cat is not None:
             return cat.to_dataframe().reset_index()
         raise NotImplementedError(
@@ -150,13 +161,13 @@ class DataProvider(param.Parameterized):
         Raises
         ------
         NotImplementedError
-            When :attr:`catalog` is not set and this method is not overridden.
+            When :attr:`data_catalog` is not set and this method is not overridden.
         KeyError
             When the resolved name is not in the catalog.
         ValueError
             When the reference name cannot be determined from *row*.
         """
-        cat = self.catalog
+        cat = self.data_catalog
         if cat is None:
             raise NotImplementedError(
                 "Override get_data_reference() or implement the catalog property in your subclass."
@@ -235,10 +246,11 @@ class DataUIManager(DataProvider):
     -------------------------------------------------
     Override **one** of the following strategies:
 
-    * Set :attr:`~DataProvider.catalog` property → automatic DataFrame + data
-      retrieval from a :class:`~dvue.catalog.DataCatalog`.
+    * Set :attr:`~DataProvider.data_catalog` property → automatic DataFrame +
+      data retrieval from a :class:`~dvue.catalog.DataCatalog`.
     * Override :meth:`~DataProvider.get_data_catalog` directly → supply your
-      own DataFrame.
+      own DataFrame (the established pattern for
+      :class:`~dvue.tsdataui.TimeSeriesDataUIManager` subclasses).
 
     Additional overrides available:
 

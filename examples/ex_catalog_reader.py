@@ -6,7 +6,7 @@ This file demonstrates:
    PatternCSVDirectoryReader.
 2. Writing a minimal custom DataCatalogReader for a new source type.
 3. Connecting a DataCatalog to a DataUIManager (and DataUI) via the
-   DataProvider.catalog property.
+   DataProvider.data_catalog property.
 4. Using DataProvider standalone (no UI) for scripted data access.
 
 Run individual sections with ``# %%`` in VS Code (Jupyter-style cells).
@@ -111,7 +111,7 @@ class HydroProvider(DataProvider):
         self._cat = DataCatalog().add_source(data_store)
 
     @property
-    def catalog(self) -> DataCatalog:
+    def data_catalog(self) -> DataCatalog:
         return self._cat
 
     def build_station_name(self, r: pd.Series) -> str:
@@ -158,7 +158,7 @@ for ts_df in provider.get_data(df_meta):
 #
 #     # ── DataProvider (data layer) ──────────────────────────────────────────
 #     @property
-#     def catalog(self) -> DataCatalog:
+#     def data_catalog(self) -> DataCatalog:
 #         return self._catalog
 #
 #     def build_station_name(self, r):
