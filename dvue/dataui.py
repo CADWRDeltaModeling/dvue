@@ -40,48 +40,231 @@ import logging
 
 import urllib.parse
 from .utils import full_stack
+from .catalog import DataCatalog, DataReference, CatalogView  # noqa: F401 – exposed for subclasses
 
 # setup logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-class DataUIManager(param.Parameterized):
+class DataProvider(param.Parameterized):
+    """Data-access base class for DataUI.
+
+    Separates the **data-oriented** contract from view-oriented concerns.
+    Subclass this when you only need the data layer without the full
+    :class:`DataUIManager` view-configuration API (e.g. scripts, notebooks,
+    automated pipelines).
+
+    Catalog integration
+    -------------------
+    The preferred approach is to override the :attr:`catalog` property to
+    return a :class:`~dvue.catalog.DataCatalog`.  When set:
+
+    * :meth:`get_data_catalog` automatically calls
+      ``catalog.to_dataframe().reset_index()``.
+    * :meth:`get_data_reference` automatically looks up
+      :class:`~dvue.catalog.DataReference` objects by name.
+    * :meth:`get_data` automatically yields ``ref.getData()`` for each
+      selected row.
+
+    Manual override
+    ---------------
+    Override :meth:`get_data_catalog` and :meth:`get_data` directly for
+    full control without a DataCatalog.
+
+    Example – catalog-based provider
+    ---------------------------------
+    ::
+
+        class HydroProvider(DataProvider):
+            def __init__(self, data_dir, **params):
+                super().__init__(**params)
+                self._catalog = (
+                    DataCatalog()
+                    .add_reader(PatternCSVDirectoryReader("{name}__{stationid}__{source}"))
+                    .add_source(data_dir)
+                )
+
+            @property
+            def catalog(self):
+                return self._catalog
+
+        provider = HydroProvider("/data/hydro")
+        df = provider.get_data_catalog()   # pandas DataFrame from catalog metadata
+        ref = provider.get_data_reference(df.iloc[0])
+        data = ref.getData()               # actual time-series DataFrame
     """
-    Base class for managing data catalogs for DataUI.
 
-    Subclass this to provide data and configuration for the DataUI interface.
-    You must override all methods that raise NotImplementedError.
+    @property
+    def catalog(self) -> DataCatalog | None:
+        """Return the underlying :class:`~dvue.catalog.DataCatalog`, or ``None``.
 
-    Example:
-        class MyDataManager(DataUIManager):
-            def get_data_catalog(self):
-                # Return a DataFrame or GeoDataFrame
-                ...
-            def get_table_column_width_map(self):
-                ...
-            # Implement other required methods...
+        Override this property to expose a :class:`~dvue.catalog.DataCatalog`
+        to the UI layer.  When ``None`` (the default), :meth:`get_data_catalog`
+        and :meth:`get_data` must be overridden manually.
+        """
+        return None
 
-    Methods you must override:
-        - get_data_catalog
-        - get_table_column_width_map
-        - get_table_filters
-        - build_station_name
-        - append_to_title_map
-        - create_title
-        - get_tooltips
-        - get_map_color_columns
-        - get_name_to_color
-        - get_map_marker_columns
-        - get_name_to_marker
+    def get_data_catalog(self) -> pd.DataFrame:
+        """Return the data catalog as a :class:`pandas.DataFrame`.
 
-    Optional methods to override for customization:
-        - get_widgets
-        - get_data
-        - create_panel
-        - get_station_ids
-        - get_data_actions
-        - get_no_selection_message
+        This DataFrame drives the UI table and optional map.  When
+        :attr:`catalog` is set the default implementation calls
+        ``catalog.to_dataframe().reset_index()`` so that the reference name
+        appears as a regular ``'name'`` column that :meth:`get_data_reference`
+        can use for lookup.
+
+        Override to provide or transform the DataFrame directly.
+
+        Raises
+        ------
+        NotImplementedError
+            When neither :attr:`catalog` nor a subclass override are provided.
+        """
+        cat = self.catalog
+        if cat is not None:
+            return cat.to_dataframe().reset_index()
+        raise NotImplementedError(
+            "Override get_data_catalog() or implement the catalog property in your subclass."
+        )
+
+    def get_data_reference(self, row: pd.Series) -> DataReference:
+        """Return the :class:`~dvue.catalog.DataReference` for *row*.
+
+        Default: resolves the reference name from the ``'name'`` column of
+        *row* (present when the catalog DataFrame was built with
+        ``reset_index()``) or from the row's string index value, then returns
+        ``catalog.get(name)``.
+
+        Override for non-standard row → reference mappings.
+
+        Parameters
+        ----------
+        row : pd.Series
+            A row from the DataFrame returned by :meth:`get_data_catalog`.
+
+        Returns
+        -------
+        DataReference
+
+        Raises
+        ------
+        NotImplementedError
+            When :attr:`catalog` is not set and this method is not overridden.
+        KeyError
+            When the resolved name is not in the catalog.
+        ValueError
+            When the reference name cannot be determined from *row*.
+        """
+        cat = self.catalog
+        if cat is None:
+            raise NotImplementedError(
+                "Override get_data_reference() or implement the catalog property in your subclass."
+            )
+        # When built via catalog.to_dataframe().reset_index(), 'name' is a column.
+        # When built without reset_index(), 'name' is the DataFrame index.
+        if "name" in row.index:
+            ref_name = row["name"]
+        elif isinstance(row.name, str):
+            ref_name = row.name
+        else:
+            raise ValueError(
+                "Cannot determine reference name from catalog row. "
+                "Ensure the catalog DataFrame has a 'name' column or a string index."
+            )
+        return cat.get(ref_name)
+
+    def get_data(self, df: pd.DataFrame):
+        """Yield data :class:`pandas.DataFrame` objects for each selected row.
+
+        Default: calls :meth:`get_data_reference` then ``.getData()`` for
+        each row.  Override for custom retrieval or transformation logic
+        (e.g. time-range slicing, unit conversion).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            A subset of the catalog DataFrame (selected rows from the UI
+            table).
+
+        Yields
+        ------
+        pd.DataFrame
+        """
+        for _, row in df.iterrows():
+            yield self.get_data_reference(row).getData()
+
+    def create_panel(self, df: pd.DataFrame):
+        """Return a Panel object for displaying the selected data.
+
+        Override to provide a custom visualisation.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The selected rows from the catalog table.
+
+        Raises
+        ------
+        NotImplementedError
+        """
+        raise NotImplementedError("Override create_panel() in your subclass.")
+
+    def get_station_ids(self, df: pd.DataFrame) -> list:
+        """Return a list of unique station display names from the catalog."""
+        return list((df.apply(self.build_station_name, axis=1).astype(str).unique()))
+
+    def build_station_name(self, r: pd.Series) -> str:
+        """Build a display name for a station row.  Override in your subclass."""
+        raise NotImplementedError("Override build_station_name() in your subclass.")
+
+
+class DataUIManager(DataProvider):
+    """
+    Full manager for DataUI: data layer + view layer.
+
+    Combines :class:`DataProvider` (data access) with view-layer configuration
+    for table display, map visualisation, and interactive widgets.
+    Subclass :class:`DataProvider` alone when you only need the data layer.
+
+    You **must** override all abstract methods in both layers that are relevant
+    to your application.  Methods marked as optional may be left as-is or
+    overridden for customisation.
+
+    Data-layer methods (inherited from DataProvider)
+    -------------------------------------------------
+    Override **one** of the following strategies:
+
+    * Set :attr:`~DataProvider.catalog` property → automatic DataFrame + data
+      retrieval from a :class:`~dvue.catalog.DataCatalog`.
+    * Override :meth:`~DataProvider.get_data_catalog` directly → supply your
+      own DataFrame.
+
+    Additional overrides available:
+
+    * :meth:`~DataProvider.get_data_reference` – custom row → DataReference
+      mapping.
+    * :meth:`~DataProvider.get_data` – custom data loading / transformation.
+    * :meth:`~DataProvider.create_panel` – custom visualisation panel.
+    * :meth:`~DataProvider.build_station_name` – station display name from row.
+
+    View-layer methods (must override)
+    -----------------------------------
+    * :meth:`get_table_column_width_map`
+    * :meth:`get_table_filters`
+    * :meth:`append_to_title_map`
+    * :meth:`create_title`
+    * :meth:`get_tooltips`
+    * :meth:`get_map_color_columns`
+    * :meth:`get_name_to_color`
+    * :meth:`get_map_marker_columns`
+    * :meth:`get_name_to_marker`
+
+    Optional view-layer overrides
+    ------------------------------
+    * :meth:`get_widgets`
+    * :meth:`get_data_actions`
+    * :meth:`get_no_selection_message`
     """
 
     @classmethod
@@ -100,16 +283,10 @@ class DataUIManager(param.Parameterized):
         """
         return pn.pane.Markdown("No widgets available")
 
-    # data related methods
-    def get_data_catalog(self) -> pd.DataFrame:
-        """
-        Return a DataFrame or GeoDataFrame with the data catalog.
+    # ------------------------------------------------------------------
+    # Table / view configuration
+    # ------------------------------------------------------------------
 
-        You must override this in your subclass.
-        """
-        raise NotImplementedError("You must implement get_data_catalog() in your subclass.")
-
-    # display related support for tables
     def get_table_columns(self) -> list:
         """
         Return the list of columns to display in the table. By default, uses keys from get_table_column_width_map().
@@ -133,32 +310,6 @@ class DataUIManager(param.Parameterized):
         You must override this in your subclass.
         """
         raise NotImplementedError("You must implement get_table_filters() in your subclass.")
-
-    def get_data(self, df: pd.DataFrame):
-        """
-        Return the data to be displayed for a given DataFrame. Override as needed.
-        """
-        raise NotImplementedError("Subclasses should implement get_data() if needed.")
-
-    def create_panel(self, df: pd.DataFrame):
-        """
-        Return a Panel object for displaying the data. Override as needed.
-        """
-        raise NotImplementedError("Subclasses should implement create_panel() if needed.")
-
-    def get_station_ids(self, df: pd.DataFrame) -> list:
-        """
-        Return a list of unique station IDs from the DataFrame.
-        """
-        return list((df.apply(self.build_station_name, axis=1).astype(str).unique()))
-
-    def build_station_name(self, r: pd.Series) -> str:
-        """
-        Build a display name for a station from a row of the catalog.
-
-        You must override this in your subclass.
-        """
-        raise NotImplementedError("You must implement build_station_name() in your subclass.")
 
     def append_to_title_map(self, title_map: dict, unit: str, r: pd.Series):
         """
