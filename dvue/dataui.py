@@ -511,7 +511,25 @@ class DataUI(param.Parameterized):
             dfx = self._dfcat
         return dfx
 
-    def build_map_of_features(self, dfmap, crs):
+    def build_map_of_features(
+        self,
+        dfmap,
+        crs,
+        show_color_by=None,
+        color_by=None,
+        non_selection_alpha=None,
+        point_size=None,
+    ):
+        # Fall back to current param values when called without explicit arguments (e.g. from __init__)
+        if show_color_by is None:
+            show_color_by = self.show_map_colors
+        if color_by is None:
+            color_by = self.map_color_category
+        if non_selection_alpha is None:
+            non_selection_alpha = self.map_non_selection_alpha
+        if point_size is None:
+            point_size = self.map_point_size
+
         tooltips = self._dataui_manager.get_tooltips()
         # if station_id column is defined then consolidate the self._dfcat into a single row per station
         # this is useful when we have multiple rows per station
@@ -531,9 +549,9 @@ class DataUI(param.Parameterized):
         except Exception as e:
             logger.error(f"Error building map of features: {e}")
             self._map_features = gv.Points(dfmap, crs=crs)
-        if self.show_map_colors:
+        if show_color_by:
             self._map_features = self._map_features.opts(
-                color=dim(self.map_color_category).categorize(
+                color=dim(color_by).categorize(
                     self._dataui_manager.get_name_to_color(), default="blue"
                 )
             )
@@ -543,15 +561,15 @@ class DataUI(param.Parameterized):
             self._map_features = self._map_features.opts(
                 opts.Points(
                     tools=["tap", hover, "lasso_select", "box_select"],
-                    nonselection_alpha=self.map_non_selection_alpha,  # nonselection_color='gray',
-                    size=10,
+                    nonselection_alpha=non_selection_alpha,
+                    size=point_size,
                 )
             )
         elif isinstance(self._map_features, gv.Path):
             self._map_features = self._map_features.opts(
                 opts.Path(
                     tools=["tap", hover, "lasso_select", "box_select"],
-                    nonselection_alpha=self.map_non_selection_alpha,  # nonselection_color='gray',
+                    nonselection_alpha=non_selection_alpha,
                     line_width=2,
                 )
             )
@@ -559,7 +577,7 @@ class DataUI(param.Parameterized):
             self._map_features = self._map_features.opts(
                 opts.Polygons(
                     tools=["tap", hover, "lasso_select", "box_select"],
-                    nonselection_alpha=self.map_non_selection_alpha,  # nonselection_color='gray',
+                    nonselection_alpha=non_selection_alpha,
                 )
             )
         else:
@@ -576,6 +594,9 @@ class DataUI(param.Parameterized):
         query,
         filters,
         selection,
+        map_default_span,
+        map_non_selection_alpha,
+        map_point_size,
     ):
         """Update the map features based on the selection in the table or filters or query. Also updates if the color or marker by columns are changed"""
         query = query.strip()
@@ -613,9 +634,17 @@ class DataUI(param.Parameterized):
             str_stack = full_stack()
             logger.error(str_stack)
             notifications.error(f"Error while fetching data for {str_stack}", duration=0)
-        self.map_color_category = color_by
-        self.show_map_colors = show_color_by
-        self._map_features = self.build_map_of_features(current_view, self._crs)
+        # Pass values directly to build_map_of_features instead of assigning to self params,
+        # which would fire param events on the same params pn.bind is watching and create a
+        # reactive cycle that Panel would suppress.
+        self._map_features = self.build_map_of_features(
+            current_view,
+            self._crs,
+            show_color_by=show_color_by,
+            color_by=color_by,
+            non_selection_alpha=map_non_selection_alpha,
+            point_size=map_point_size,
+        )
         if isinstance(self._map_features, gv.Points):
             if show_marker_by:
                 self._map_features = self._map_features.opts(
@@ -627,7 +656,7 @@ class DataUI(param.Parameterized):
                 self._map_features = self._map_features.opts(marker="circle")
         with param.discard_events(self._station_select):
             self._map_features = self._map_features.opts(
-                default_span=self.map_default_span,  # for max zoom this is the default span in meters
+                default_span=map_default_span,  # for max zoom this is the default span in meters
                 selected=current_selection,
             )
         return self._map_features
@@ -983,18 +1012,57 @@ class DataUI(param.Parameterized):
                 self.param.map_point_size,
                 self.param.query,
             )
-            self._map_function = hv.DynamicMap(
-                pn.bind(
-                    self.update_map_features,
-                    show_color_by=self.param.show_map_colors,
-                    color_by=self.param.map_color_category,
-                    show_marker_by=self.param.show_map_markers,
-                    marker_by=self.param.map_marker_category,
-                    query=self.param.query,
-                    filters=self.display_table.param.filters,
-                    selection=self.display_table.param.selection,
-                )
+            # Use HoloViews streams.Params instead of pn.bind so that ALL param
+            # changes (including color/marker category) are routed through
+            # HoloViews' own rendering pipeline.  pn.bind only triggers a Panel
+            # pane swap; it does NOT instruct Bokeh to recreate the
+            # CategoricalColorMapper/marker glyph, so color/marker opts changes
+            # appear to have no effect.  streams.Params guarantees a full
+            # HoloViews renderer refresh on every param change.
+            _self_stream = streams.Params(
+                parameterized=self,
+                parameters=[
+                    "show_map_colors",
+                    "map_color_category",
+                    "show_map_markers",
+                    "map_marker_category",
+                    "query",
+                    "map_default_span",
+                    "map_non_selection_alpha",
+                    "map_point_size",
+                ],
             )
+            _table_stream = streams.Params(
+                parameterized=self.display_table,
+                parameters=["filters", "selection"],
+            )
+
+            def _map_callback(
+                show_map_colors,
+                map_color_category,
+                show_map_markers,
+                map_marker_category,
+                query,
+                map_default_span,
+                map_non_selection_alpha,
+                map_point_size,
+                filters,
+                selection,
+            ):
+                return self.update_map_features(
+                    show_color_by=show_map_colors,
+                    color_by=map_color_category,
+                    show_marker_by=show_map_markers,
+                    marker_by=map_marker_category,
+                    query=query,
+                    filters=filters,
+                    selection=selection,
+                    map_default_span=map_default_span,
+                    map_non_selection_alpha=map_non_selection_alpha,
+                    map_point_size=map_point_size,
+                )
+
+            self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream, _table_stream])
             self._station_select.source = self._map_function
             self._station_select.param.watch_values(self.select_data_catalog, "index")
             map_tooltip = pn.widgets.TooltipIcon(
