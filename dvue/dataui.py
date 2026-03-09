@@ -391,9 +391,7 @@ class DataUIManager(DataProvider):
         raise NotImplementedError("Subclasses must implement get_name_to_marker().")
 
     def get_data_actions(self) -> list:
-        """
-        Return a list of default data actions. Override to customize available actions.
-        """
+        """Return a list of default data actions. Override to customize available actions."""
         plot_action = PlotAction()
         download_action = DownloadDataAction()
         permalink_action = PermalinkAction()

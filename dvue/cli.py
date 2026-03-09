@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Console script for pydelmod."""
+"""Console script for dvue."""
 import sys
 import click
 import panel as pn
@@ -14,10 +14,13 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 def main():
     pass
 
+
 @click.command()
 def show_version():
     import dvue
+
     click.echo(dvue.__version__)
+
 
 main.add_command(show_version)
 

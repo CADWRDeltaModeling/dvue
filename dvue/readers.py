@@ -1,19 +1,27 @@
 """Sample DataCatalogReader implementations for dvue.
 
-This module provides concrete, ready-to-use :class:`~dvue.catalog.DataCatalogReader`
-implementations as starting points for building custom readers.
+This module provides two concrete :class:`~dvue.catalog.DataCatalogReader`
+implementations that cover the most common CSV file source patterns:
 
-Included readers
-----------------
-CSVDirectoryReader
-    Reads every ``*.csv`` file in a directory (or a single CSV file).
+``CSVDirectoryReader``
+    Reads every ``*.csv`` file from a directory (or a single CSV file).
     Each file becomes a :class:`~dvue.catalog.DataReference` named after
     the file stem.
 
-PatternCSVDirectoryReader
+``PatternCSVDirectoryReader``
     Reads CSV files from a directory and extracts structured metadata
-    (e.g. station ID, source agency) from each filename using a
-    ``{field}`` placeholder pattern.
+    (e.g. variable, station ID, agency) from each filename via ``{field}``
+    placeholder patterns.
+
+These implementations serve both as ready-to-use readers and as reference
+examples for writing custom readers.
+
+See Also
+--------
+``examples/ex_readers.py``  — fully self-contained runnable demonstration of
+CSVDirectoryReader, PatternCSVDirectoryReader, a custom InMemoryDataReader,
+unified catalogs from multiple readers, and MathDataReference expressions
+over the unified catalog.
 
 Writing a custom reader
 -----------------------
@@ -26,28 +34,23 @@ abstract methods, then register the reader with the catalog:
 
     class MyDatabaseReader(DataCatalogReader):
         def can_handle(self, source):
-            # Return True for the source types this reader accepts
             return isinstance(source, MyDBConnection)
 
         def read(self, source):
-            refs = []
-            for table in source.list_tables():
-                ref = DataReference(
+            return [
+                DataReference(
                     lambda t=table: source.query_table(t),
                     name=table,
                     database=source.name,
                 )
-                refs.append(ref)
-            return refs
+                for table in source.list_tables()
+            ]
 
     # Register globally (affects all new DataCatalog instances)
     DataCatalog.register_reader(MyDatabaseReader())
 
-    # Or register on a single catalog instance
+    # Or register on a single catalog instance only
     catalog = DataCatalog().add_reader(MyDatabaseReader())
-    catalog.add_source(my_db_connection)
-
-See :class:`~dvue.catalog.DataCatalogReader` for the full API contract.
 """
 
 from __future__ import annotations

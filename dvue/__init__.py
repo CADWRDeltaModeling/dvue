@@ -11,13 +11,18 @@ from .actions import (
     DownloadDataAction,
     DownloadDataCatalogAction,
 )
+from .math_ref_editor import MathRefEditorAction
 from .fullscreen import FullScreen
 from .catalog import (
     DataReference,
     CatalogView,
-    MathDataReference,
     DataCatalogReader,
     DataCatalog,
+)
+from .math_reference import (
+    MathDataReference,
+    MathDataCatalogReader,
+    save_math_refs,
 )
 from .readers import (
     CSVDirectoryReader,
@@ -32,6 +37,7 @@ __all__ = [
     "PermalinkAction",
     "DownloadDataAction",
     "DownloadDataCatalogAction",
+    "MathRefEditorAction",
     "FullScreen",
     # Catalog core
     "DataReference",
@@ -39,6 +45,9 @@ __all__ = [
     "MathDataReference",
     "DataCatalogReader",
     "DataCatalog",
+    # Math ref persistence
+    "MathDataCatalogReader",
+    "save_math_refs",
     # Sample reader implementations (dvue.readers)
     "CSVDirectoryReader",
     "PatternCSVDirectoryReader",

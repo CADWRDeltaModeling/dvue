@@ -38,6 +38,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for "argument not supplied" (distinct from None).
+_UNSET = object()
+
 # ---------------------------------------------------------------------------
 # DataReference
 # ---------------------------------------------------------------------------
@@ -308,261 +311,10 @@ class DataReference:
 
 
 # ---------------------------------------------------------------------------
-# MathDataReference – safe expression evaluation namespace
-# ---------------------------------------------------------------------------
-
-#: Safe built-ins available inside MathDataReference expressions.
-#: NumPy vectorised functions work element-wise on pandas Series/arrays.
-_MATH_NAMESPACE: Dict[str, Any] = {
-    "__builtins__": {},
-    # Libraries (advanced use)
-    "np": np,
-    "pd": pd,
-    "math": math,
-    # Vectorised scalar functions
-    "abs": np.abs,
-    "sin": np.sin,
-    "cos": np.cos,
-    "tan": np.tan,
-    "arcsin": np.arcsin,
-    "arccos": np.arccos,
-    "arctan": np.arctan,
-    "arctan2": np.arctan2,
-    "exp": np.exp,
-    "log": np.log,
-    "log2": np.log2,
-    "log10": np.log10,
-    "sqrt": np.sqrt,
-    "ceil": np.ceil,
-    "floor": np.floor,
-    "round": np.round,
-    "clip": np.clip,
-    "where": np.where,
-    "min": np.minimum,
-    "max": np.maximum,
-    "sum": np.sum,
-    "mean": np.mean,
-    "std": np.std,
-    "diff": np.diff,
-    "cumsum": np.cumsum,
-    # Constants
-    "pi": math.pi,
-    "e": math.e,
-    "nan": float("nan"),
-    "inf": float("inf"),
-}
-
-# Tokens that are part of the expression namespace, not variable names
-_RESERVED_TOKENS: frozenset = frozenset(_MATH_NAMESPACE) | {
-    "True",
-    "False",
-    "None",
-    "and",
-    "or",
-    "not",
-    "in",
-    "is",
-}
-
-
-class MathDataReference(DataReference):
-    """A :class:`DataReference` whose data is computed from a mathematical
-    expression evaluated over other :class:`DataReference` objects.
-
-    Variables in the expression are resolved from *variable_map* first, then
-    from an optionally attached :class:`DataCatalog`.  The expression is
-    executed in a namespace that exposes NumPy ufuncs (``sin``, ``exp``,
-    ``sqrt``, ``where``, …) so they can be used directly.
-
-    Parameters
-    ----------
-    expression : str
-        An arithmetic expression string, e.g. ``"A + B * 2"`` or
-        ``"sqrt(X**2 + Y**2)"``.  Variable names must be valid Python
-        identifiers matching keys in *variable_map* or names in the catalog.
-    variable_map : dict, optional
-        ``{variable_name: DataReference}`` explicit mapping.
-    catalog : DataCatalog, optional
-        Used to look up variables not present in *variable_map*.
-    name : str, optional
-        Identifier for this reference.
-    cache : bool, optional
-        Cache the evaluated result.  Defaults to ``False`` because referenced
-        data may change between calls.
-    **attributes
-        Metadata.
-
-    Notes
-    -----
-    Operator overloading is available on all :class:`DataReference` subclasses::
-
-        combined = ref_a + ref_b * 2          # MathDataReference
-        normalised = (ref_signal - ref_base) / ref_scale
-
-    Examples
-    --------
-    >>> a = DataReference(df_a, name="A")
-    >>> b = DataReference(df_b, name="B")
-    >>> expr = MathDataReference("A + B", variable_map={"A": a, "B": b})
-    >>> expr.getData()
-    >>> mag = MathDataReference("sqrt(X**2 + Y**2)", variable_map={"X": rx, "Y": ry})
-    """
-
-    def __init__(
-        self,
-        expression: str,
-        variable_map: Optional[Dict[str, DataReference]] = None,
-        catalog: Optional["DataCatalog"] = None,
-        name: str = "",
-        cache: bool = False,
-        **attributes: Any,
-    ) -> None:
-        super().__init__(source=None, name=name, cache=cache, **attributes)
-        self.expression = expression
-        self._variable_map: Dict[str, DataReference] = dict(variable_map or {})
-        self._catalog = catalog
-
-    # ------------------------------------------------------------------
-    # Configuration helpers
-    # ------------------------------------------------------------------
-
-    def set_catalog(self, catalog: "DataCatalog") -> "MathDataReference":
-        """Attach a catalog for variable resolution (chainable)."""
-        self._catalog = catalog
-        return self
-
-    def set_variable(self, var_name: str, ref: DataReference) -> "MathDataReference":
-        """Map *var_name* to a :class:`DataReference` (chainable)."""
-        self._variable_map[var_name] = ref
-        return self
-
-    # ------------------------------------------------------------------
-    # Variable resolution and expression evaluation
-    # ------------------------------------------------------------------
-
-    def _resolve_variables(self) -> Dict[str, Any]:
-        """Parse the expression and resolve each identifier to a Series or DataFrame."""
-        tokens = set(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b", self.expression))
-        tokens -= _RESERVED_TOKENS
-
-        resolved: Dict[str, Any] = {}
-        for tok in tokens:
-            ref: Optional[DataReference] = None
-
-            if tok in self._variable_map:
-                ref = self._variable_map[tok]
-            elif self._catalog is not None and tok in self._catalog:
-                ref = self._catalog.get(tok)
-
-            if ref is None:
-                # Unknown identifier – let eval() raise a NameError naturally
-                continue
-
-            data = ref.getData()
-            if isinstance(data, pd.DataFrame):
-                # Unwrap single-column DataFrames to Series for scalar arithmetic
-                resolved[tok] = data.iloc[:, 0] if len(data.columns) == 1 else data
-            else:
-                resolved[tok] = data
-
-        return resolved
-
-    def _load_data(self) -> pd.DataFrame:
-        variables = self._resolve_variables()
-
-        if not variables:
-            raise ValueError(
-                f"No variables could be resolved for expression {self.expression!r}. "
-                "Populate variable_map or call set_catalog()."
-            )
-
-        ns = {**_MATH_NAMESPACE, **variables}
-        try:
-            result = eval(self.expression, ns)  # noqa: S307
-        except Exception as exc:
-            raise ValueError(f"Failed to evaluate expression {self.expression!r}: {exc}") from exc
-
-        if isinstance(result, pd.DataFrame):
-            return result
-        if isinstance(result, pd.Series):
-            return result.to_frame(name=self.name or "result")
-        # Scalar result
-        return pd.DataFrame({"result": [result]})
-
-    # ------------------------------------------------------------------
-    # Arithmetic operators (override parent to preserve expression trees)
-    # ------------------------------------------------------------------
-
-    def __add__(self, other: Any) -> "MathDataReference":
-        return self._compose(other, "+")
-
-    def __radd__(self, other: Any) -> "MathDataReference":
-        return self._compose_r(other, "+")
-
-    def __sub__(self, other: Any) -> "MathDataReference":
-        return self._compose(other, "-")
-
-    def __rsub__(self, other: Any) -> "MathDataReference":
-        return self._compose_r(other, "-")
-
-    def __mul__(self, other: Any) -> "MathDataReference":
-        return self._compose(other, "*")
-
-    def __rmul__(self, other: Any) -> "MathDataReference":
-        return self._compose_r(other, "*")
-
-    def __truediv__(self, other: Any) -> "MathDataReference":
-        return self._compose(other, "/")
-
-    def __rtruediv__(self, other: Any) -> "MathDataReference":
-        return self._compose_r(other, "/")
-
-    def __pow__(self, other: Any) -> "MathDataReference":
-        return self._compose(other, "**")
-
-    def __neg__(self) -> "MathDataReference":
-        return MathDataReference(
-            f"-({self.expression})",
-            variable_map=dict(self._variable_map),
-            catalog=self._catalog,
-        )
-
-    def _compose(self, other: Any, op: str) -> "MathDataReference":
-        """Build ``(self.expression) OP other``."""
-        if isinstance(other, MathDataReference):
-            new_expr = f"({self.expression}) {op} ({other.expression})"
-            new_vars = {**self._variable_map, **other._variable_map}
-            catalog = self._catalog or other._catalog
-        elif isinstance(other, DataReference):
-            vname = other.name or f"_v{id(other) & 0xFFFFFF}"
-            new_expr = f"({self.expression}) {op} {vname}"
-            new_vars = {**self._variable_map, vname: other}
-            catalog = self._catalog
-        else:
-            new_expr = f"({self.expression}) {op} ({other!r})"
-            new_vars = dict(self._variable_map)
-            catalog = self._catalog
-        return MathDataReference(new_expr, variable_map=new_vars, catalog=catalog)
-
-    def _compose_r(self, other: Any, op: str) -> "MathDataReference":
-        """Build ``other OP (self.expression)``."""
-        if isinstance(other, DataReference):
-            vname = other.name or f"_v{id(other) & 0xFFFFFF}"
-            new_expr = f"{vname} {op} ({self.expression})"
-            new_vars = {**self._variable_map, vname: other}
-            catalog = self._catalog
-        else:
-            new_expr = f"({other!r}) {op} ({self.expression})"
-            new_vars = dict(self._variable_map)
-            catalog = self._catalog
-        return MathDataReference(new_expr, variable_map=new_vars, catalog=catalog)
-
-    def __repr__(self) -> str:
-        return f"MathDataReference(name={self.name!r}, " f"expression={self.expression!r})"
-
-
-# ---------------------------------------------------------------------------
-# Module-level helper functions for DataReference operator overloading
+# Module-level helpers for DataReference operator overloading.
+# MathDataReference is defined in dvue.math_reference and imported at the
+# bottom of this module.  These functions reference it by name via the module
+# globals, so the lazy bottom-import is sufficient.
 # ---------------------------------------------------------------------------
 
 
@@ -865,6 +617,10 @@ class DataCatalog:
         Criteria keys may use either raw attribute names or their canonical
         equivalents (defined in *schema_map*); both resolve correctly.
 
+        The special key ``name`` is matched against the reference's
+        :attr:`~DataReference.name` attribute (not stored in ``_attributes``)
+        so that ``catalog.search(name="my_ref")`` works as expected.
+
         Each criterion value may be:
 
         * a **scalar** – exact equality check.
@@ -873,11 +629,25 @@ class DataCatalog:
         Examples
         --------
         >>> catalog.search(variable="temperature")
+        >>> catalog.search(name="my_ref")
         >>> catalog.search(year=lambda y: int(y) >= 2020)
         >>> catalog.search(variable="temperature", unit="degC")
         """
+        # Pop ``name`` before schema translation – it lives on ref.name, not _attributes.
+        name_criterion = criteria.pop("name", _UNSET)
         raw_criteria = self._to_raw_criteria(criteria)
-        return [r for r in self._references.values() if r.matches(**raw_criteria)]
+
+        results = []
+        for r in self._references.values():
+            if name_criterion is not _UNSET:
+                if callable(name_criterion):
+                    if not name_criterion(r.name):
+                        continue
+                elif r.name != name_criterion:
+                    continue
+            if r.matches(**raw_criteria):
+                results.append(r)
+        return results
 
     def _to_raw_criteria(self, criteria: Dict[str, Any]) -> Dict[str, Any]:
         """Translate canonical criteria keys back to raw attribute names."""
@@ -1177,4 +947,25 @@ from .readers import (  # noqa: E402, F401
     _pattern_to_regex,
     CSVDirectoryReader,
     PatternCSVDirectoryReader,
+)
+
+
+# ---------------------------------------------------------------------------
+# Re-exports from dvue.math_reference
+# ---------------------------------------------------------------------------
+# MathDataReference, MathDataCatalogReader, and save_math_refs live in
+# dvue.math_reference (their canonical location).  They are imported here so
+# that existing code using ``from dvue.catalog import MathDataReference``
+# continues to work without modification.
+#
+# NOTE: this import MUST remain at the bottom of this module so that
+# DataReference (defined above) is already in the catalog namespace when
+# math_reference.py runs ``from .catalog import DataReference``.
+
+from .math_reference import (  # noqa: E402, F401
+    MathDataReference,
+    MathDataCatalogReader,
+    save_math_refs,
+    _MATH_NAMESPACE,
+    _RESERVED_TOKENS,
 )

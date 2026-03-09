@@ -18,8 +18,10 @@ class PlotAction:
             # Check if there's a selection
             if not dataui.display_table.selection or len(dataui.display_table.selection) == 0:
                 if pn.state.notifications is not None:
-                    pn.state.notifications.warning('Please select at least one row from the table.', duration=3000)
-                logger.warning('No rows selected for plotting')
+                    pn.state.notifications.warning(
+                        "Please select at least one row from the table.", duration=3000
+                    )
+                logger.warning("No rows selected for plotting")
                 return
 
             # Get selected data
@@ -51,12 +53,10 @@ class PlotAction:
         except Exception as e:
             stack_str = full_stack()
             logger.error(stack_str)
-            dataui._display_panel.objects = [pn.pane.Markdown("```"+stack_str+"```")]
+            dataui._display_panel.objects = [pn.pane.Markdown("```" + stack_str + "```")]
             # Handle the case where notifications might be None
             if pn.state.notifications is not None:
-                pn.state.notifications.error(
-                    "Error updating plots: " + str(stack_str), duration=0
-                )
+                pn.state.notifications.error("Error updating plots: " + str(stack_str), duration=0)
             else:
                 # Log error when notifications is not available
                 logger.error(f"Could not display notification: {str(stack_str)}")
@@ -91,8 +91,10 @@ class DownloadDataAction:
             # Check if there's a selection
             if not dataui.display_table.selection or len(dataui.display_table.selection) == 0:
                 if pn.state.notifications is not None:
-                    pn.state.notifications.warning('Please select at least one row from the table.', duration=3000)
-                logger.warning('No rows selected for download')
+                    pn.state.notifications.warning(
+                        "Please select at least one row from the table.", duration=3000
+                    )
+                logger.warning("No rows selected for download")
                 return None
 
             dfselected = dataui.display_table.value.iloc[dataui.display_table.selection]
@@ -100,9 +102,7 @@ class DownloadDataAction:
             # Update progress to 30%
             dataui.set_progress(30)
 
-            dfdata = pd.concat(
-                [df for df in dataui._dataui_manager.get_data(dfselected)], axis=1
-            )
+            dfdata = pd.concat([df for df in dataui._dataui_manager.get_data(dfselected)], axis=1)
 
             # Update progress to 70%
             dataui.set_progress(70)
@@ -118,9 +118,7 @@ class DownloadDataAction:
         except Exception as e:
             logger.error(f"Error downloading data: {e}")
             if pn.state.notifications is not None:
-                pn.state.notifications.error(
-                    "Error downloading data: " + str(e), duration=0
-                )
+                pn.state.notifications.error("Error downloading data: " + str(e), duration=0)
             return None
         finally:
             dataui._display_panel.loading = False
@@ -165,3 +163,9 @@ class PermalinkAction:
     def callback(self, event, dataui):
         # Implement permalink action callback here
         pass
+
+
+# MathRefEditorAction has moved to dvue.math_ref_editor.  Re-exported here
+# for backward compatibility with code that does
+# ``from dvue.actions import MathRefEditorAction``.
+from .math_ref_editor import MathRefEditorAction  # noqa: E402, F401

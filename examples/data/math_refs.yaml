@@ -1,0 +1,21 @@
+- name: water_level__RIO001__usgs__ft
+  expression: water_level__RIO001__usgs * (3.28084)
+  variable: water_level
+  unit: ft
+  stationid: RIO001
+- name: bias_water_level__RIO001
+  expression: water_level__RIO001__usgs - model_RIO001
+  variable: water_level_bias
+  stationid: RIO001
+- name: wl_diff__RIO001__CSJ001
+  expression: water_level__RIO001__usgs - water_level__CSJ001__cdec
+  variable: water_level_diff
+- name: cumulative_flow__RIO001
+  variable: flow
+  unit: ft3
+  stationid: RIO001
+  expression: cumsum(flow__RIO001__usgs)
+- name: multi_station_anomaly
+  variable: water_level_anomaly
+  expression: water_level__RIO001__usgs - model_RIO001 + 0.5 * (water_level__CSJ001__cdec
+    - model_CSJ001)

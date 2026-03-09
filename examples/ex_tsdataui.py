@@ -35,10 +35,12 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import holoviews as hv
+from pathlib import Path
 from shapely.geometry import Point
 
 from dvue import dataui, tsdataui
 from dvue.catalog import DataCatalog, DataReference, MathDataReference
+from dvue import MathDataCatalogReader, save_math_refs, MathRefEditorAction
 
 # %% -- [2] Station metadata and synthetic data generator ---------------------
 STATIONS = [
@@ -286,12 +288,13 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
     def get_table_column_width_map(self):
         return {
             "station_id": "6%",
-            "station_name": "14%",
-            "variable": "18%",
-            "unit": "8%",
-            "interval": "8%",
-            "start_year": "8%",
-            "max_year": "8%",
+            "station_name": "12%",
+            "variable": "14%",
+            "unit": "6%",
+            "interval": "6%",
+            "start_year": "6%",
+            "max_year": "6%",
+            "expression": "44%",
         }
 
     def get_table_columns(self):
@@ -311,6 +314,7 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
                 "interval",
                 "start_year",
                 "max_year",
+                "expression",
             ]
         }
 
@@ -358,6 +362,55 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
 
 # %% -- [5] Launch the UI -----------------------------------------------------
 exmgr = ExampleTimeSeriesDataUIManager(catalog)
-ui = dataui.DataUI(exmgr, station_id_column="station_id")
+
+# -- [5a] Persist math refs to YAML and reload --------------------------------
+#
+# save_math_refs() writes every MathDataReference in the catalog to a YAML
+# file.  MathDataCatalogReader loads them back, wiring each expression to the
+# parent catalog so variable names resolve at getData() time.
+
+MATH_REFS_FILE = Path(__file__).parent / "data" / "math_refs_tsdataui.yaml"
+MATH_REFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+save_math_refs(catalog, MATH_REFS_FILE)
+print(f"\nMath refs saved to: {MATH_REFS_FILE}")
+
+# Round-trip: load into a fresh catalog that already has the raw refs.
+catalog_reloaded = DataCatalog()
+for ref in catalog.list():
+    if not isinstance(ref, MathDataReference):
+        catalog_reloaded.add(ref)
+catalog_reloaded.add_reader(MathDataCatalogReader(parent_catalog=catalog_reloaded))
+catalog_reloaded.add_source(str(MATH_REFS_FILE))
+print(f"Reloaded catalog: {catalog_reloaded}")
+print("MathDataReferences after reload:")
+for ref in catalog_reloaded.list():
+    if isinstance(ref, MathDataReference):
+        print(f"  {ref.name!r}: {ref.expression!r}")
+
+# -- [5b] Wire up the Math Ref editor action ----------------------------------
+#
+# MathRefEditorAction opens an inline editor panel when the user selects a
+# MathDataReference row and clicks "Math Ref", or creates a new one from
+# scratch. Wire it into get_data_actions() via a subclass override.
+
+
+class EditableExampleTSDataUIManager(ExampleTimeSeriesDataUIManager):
+    """Extends the example manager with a Math Ref editor action."""
+
+    def get_data_actions(self):
+        actions = super().get_data_actions()
+        math_action = MathRefEditorAction()
+        actions.append(dict(
+            name="Math Ref",
+            button_type="warning",
+            icon="math-function",
+            action_type="display",
+            callback=math_action.callback,
+        ))
+        return actions
+
+
+exmgr_editable = EditableExampleTSDataUIManager(catalog)
+ui = dataui.DataUI(exmgr_editable, station_id_column="station_id")
 ui.create_view(title="Example Time Series Data UI (DataCatalog + MathDataReference)").servable()
 # %%
