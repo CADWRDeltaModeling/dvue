@@ -459,26 +459,45 @@ class MathDataCatalogReader(DataCatalogReader):
 
     YAML format
     -----------
-    ::
+    The recommended approach is to use ``search_map`` to resolve every variable
+    alias by catalog attributes rather than by a hardcoded catalog key.  This
+    keeps expressions portable and decouples them from internal naming
+    conventions::
 
+        # Unit conversion: single catalog match → result is a Series.
+        - name: Station_A__wind_speed_mph__hourly
+          expression: obs * 2.23694
+          station_name: Station A
+          variable: wind_speed_mph
+          unit: mph
+          interval: hourly
+          search_map:
+            obs:
+              station_name: Station A
+              variable: wind_speed
+              interval: hourly
+
+        # Multi-station aggregate: _require_single: false concatenates all
+        # matching references into a DataFrame (axis=1 join).
+        - name: mean_wind_speed__all_stations__hourly
+          expression: ws.mean(axis=1)
+          variable: mean_wind_speed
+          unit: m/s
+          interval: hourly
+          search_map:
+            ws:
+              variable: wind_speed
+              interval: hourly
+              _require_single: false
+
+    As a fallback, omitting ``search_map`` causes each expression token to be
+    looked up directly by name in the parent catalog::
+
+        # Direct catalog-name lookup (legacy / simple cases only).
         - name: bias_water_level__RIO001
           expression: "water_level_usgs - model_RIO001"
           variable: water_level_bias
           unit: m
-
-        - name: net_flow_delta
-          expression: "inflow - outflow"
-          # search_map: resolve variables by catalog attributes at getData() time.
-          # Optionally annotate each variable with _require_single: false to
-          # concat all matches (default is true → first result only).
-          search_map:
-            inflow:
-              variable: discharge
-              location: upstream
-              _require_single: false
-            outflow:
-              variable: discharge
-              location: downstream
     """
 
     def __init__(

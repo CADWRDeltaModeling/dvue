@@ -1,21 +1,74 @@
-- name: water_level__RIO001__usgs__ft
-  expression: water_level__RIO001__usgs * (3.28084)
-  variable: water_level
-  unit: ft
-  stationid: RIO001
-- name: bias_water_level__RIO001
-  expression: water_level__RIO001__usgs - model_RIO001
-  variable: water_level_bias
-  stationid: RIO001
-- name: wl_diff__RIO001__CSJ001
-  expression: water_level__RIO001__usgs - water_level__CSJ001__cdec
-  variable: water_level_diff
-- name: cumulative_flow__RIO001
-  variable: flow
-  unit: ft3
-  stationid: RIO001
-  expression: cumsum(flow__RIO001__usgs)
-- name: multi_station_anomaly
-  variable: water_level_anomaly
-  expression: water_level__RIO001__usgs - model_RIO001 + 0.5 * (water_level__CSJ001__cdec
-    - model_CSJ001)
+# math_refs.yaml — example MathDataReference specs using search_map.
+#
+# Variables in each expression are short aliases resolved against the catalog
+# at getData() time via the search_map block.  This avoids hardcoding catalog
+# key strings inside the expression and makes references portable across
+# instances that share the same attribute schema.
+#
+# Setting _require_single: false on a search_map entry concatenates every
+# matching reference into a single DataFrame (axis=1 join), so multi-station
+# expressions work without listing individual station names explicitly.
+#
+# Attributes outside of name / expression / search_map are stored as
+# metadata on the resulting MathDataReference and appear as columns when
+# the catalog is exported with DataCatalog.to_dataframe().
+
+# -- 1. Unit conversion: wind speed m/s → mph (single station) ---------------
+- name: Station_A__wind_speed_mph__hourly
+  expression: obs * 2.23694
+  station_id: '1'
+  station_name: Station A
+  variable: wind_speed_mph
+  unit: mph
+  interval: hourly
+  search_map:
+    obs:
+      station_name: Station A
+      variable: wind_speed
+      interval: hourly
+
+# -- 2. Cumulative precipitation (single station) ----------------------------
+- name: Station_B__precip_cumulative__hourly
+  expression: cumsum(p)
+  station_id: '2'
+  station_name: Station B
+  variable: precip_cumulative
+  unit: mm
+  interval: hourly
+  search_map:
+    p:
+      station_name: Station B
+      variable: precipitation
+      interval: hourly
+
+# -- 3. Cross-station wind-speed difference (two explicit stations) -----------
+- name: wind_diff__A_minus_C__hourly
+  expression: ws_a - ws_c
+  variable: wind_diff_A_minus_C
+  unit: m/s
+  interval: hourly
+  search_map:
+    ws_a:
+      station_name: Station A
+      variable: wind_speed
+      interval: hourly
+    ws_c:
+      station_name: Station C
+      variable: wind_speed
+      interval: hourly
+
+# -- 4. Multi-station mean wind speed (all matching stations) -----------------
+#
+# _require_single: false tells the resolver to concat all matching references
+# into a DataFrame.  ws.mean(axis=1) then computes the column-wise mean so
+# the result is a single Series regardless of how many stations match.
+- name: mean_wind_speed__all_stations__hourly
+  expression: ws.mean(axis=1)
+  variable: mean_wind_speed
+  unit: m/s
+  interval: hourly
+  search_map:
+    ws:
+      variable: wind_speed
+      interval: hourly
+      _require_single: false

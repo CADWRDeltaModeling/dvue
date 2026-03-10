@@ -45,18 +45,20 @@ class MathRefEditorAction:
 
     The catalog is retrieved from ``dataui._dataui_manager.data_catalog``.
 
-    Search-map syntax
-    -----------------
-    Each line in the *Search Map* text area has the form::
+    Search map
+    ----------
+    The **Search Map** section shows one row per expression variable.  Each
+    row contains:
 
-        var_name: attr=val, attr=val
+    * **Alias** — the short identifier used inside the expression (e.g. ``obs``).
+    * **Join all** checkbox — when enabled, *all* catalog entries that match
+      the criteria are concatenated column-wise instead of taking the first
+      result only (equivalent to ``require_single=False``).
+    * **Catalog criteria** — comma-separated ``attr=val`` pairs that are
+      passed to :meth:`~dvue.catalog.DataCatalog.search` at ``getData()`` time.
 
-    Append ``[multi]`` after the variable name to request that **all**
-    matching catalog entries are fetched and joined by index (instead of
-    taking only the first result)::
-
-        inflow[multi]: variable=discharge, location=upstream
-        outflow: variable=discharge, location=downstream
+    Click **+ Add variable** to append a new row; click the **✕** button on any
+    row to remove it.
 
     Usage
     -----
@@ -153,7 +155,6 @@ class MathRefEditorAction:
         pre_name = ""
         pre_expr = ""
         pre_attrs = ""
-        pre_search = ""
         is_edit = False
 
         selected = dataui.display_table.selection
@@ -169,29 +170,20 @@ class MathRefEditorAction:
                 is_edit = True
                 pre_name = ref.name
                 pre_expr = ref.expression
-                extra = {k: v for k, v in ref.attributes.items() if k != "expression"}
+                # Only put primitive values in the text area – non-primitives like
+                # Shapely geometry objects cannot round-trip through plain text.
+                extra = {
+                    k: v
+                    for k, v in ref.attributes.items()
+                    if k != "expression" and isinstance(v, (str, int, float, bool, type(None)))
+                }
                 pre_attrs = "\n".join(f"{k}: {v}" for k, v in extra.items())
-                if ref._search_map:
-                    pre_search = self._render_search_map(
-                        ref._search_map, ref._search_require_single
-                    )
-
         # ── Build the editor form ─────────────────────────────────────────────
         title_md = pn.pane.Markdown("### Math Reference Editor", sizing_mode="stretch_width")
         help_md = pn.pane.Markdown(
             "**Expression** — use NumPy functions (`cumsum`, `sqrt`, `abs`, `where`, …) "
-            "and variable names that match reference names in the catalog or entries in "
-            "the Search Map below.\n\n"
-            "**Attributes** — one `key: value` pair per line (e.g. `variable: flow`).\n\n"
-            "**Search Map** — one `var: attr=val, attr=val` pair per line.  "
-            "Each variable is resolved by searching the catalog at `getData()` time.  "
-            "Append `[multi]` to the variable name to join *all* matching results "
-            "by index (default: first result only).\n\n"
-            "*Example:*\n"
-            "```\n"
-            "inflow[multi]: variable=discharge, location=upstream\n"
-            "outflow: variable=discharge, location=downstream\n"
-            "```",
+            "plus variable aliases defined in the Search Map.\n\n"
+            "**Attributes** — one `key: value` pair per line (e.g. `variable: flow`).",
             sizing_mode="stretch_width",
         )
         name_input = pn.widgets.TextInput(
@@ -211,15 +203,104 @@ class MathRefEditorAction:
             placeholder="variable: water_level_bias\nstationid: RIO001\nunit: m",
             height=110,
         )
-        search_map_input = pn.widgets.TextAreaInput(
-            name="Search Map  (var[multi]: attr=val, attr=val — one variable per line)",
-            value=pre_search,
-            placeholder=(
-                "inflow[multi]: variable=discharge, location=upstream\n"
-                "outflow: variable=discharge, location=downstream"
-            ),
-            height=120,
+        # ── Search Map: dynamic row editor ─────────────────────────────────────
+        sm_rows: list = []  # list of (var_inp, multi_cb, crit_inp, data_row)
+
+        sm_header_md = pn.pane.Markdown(
+            "**Search Map** — one row per expression variable.  "
+            "Each alias is resolved against the catalog at `getData()` time using the criteria.",
+            sizing_mode="stretch_width",
         )
+        sm_col_labels = pn.Row(
+            pn.pane.Markdown("**Alias**", width=134, margin=(0, 4, 0, 4)),
+            pn.pane.Markdown("**Join all**", width=88, margin=(0, 4, 0, 4)),
+            pn.pane.Markdown(
+                "**Catalog criteria** (`attr=val, attr=val …`)",
+                sizing_mode="stretch_width",
+                margin=(0, 4, 0, 4),
+            ),
+            pn.pane.Markdown("", width=46),
+            margin=(2, 0, 0, 0),
+        )
+        add_var_btn = pn.widgets.Button(
+            name="+ Add variable",
+            button_type="default",
+            icon="plus",
+            width=170,
+            height=34,
+            margin=(6, 4, 4, 4),
+        )
+        search_map_section = pn.Column(
+            sm_header_md,
+            sm_col_labels,
+            # dynamic rows are inserted before add_var_btn
+            add_var_btn,
+            sizing_mode="stretch_width",
+            styles={"border": "1px solid #ddd", "border-radius": "4px", "padding": "8px"},
+        )
+
+        def _add_sm_row(
+            var_name: str = "", criteria_str: str = "", keep_single: bool = True
+        ) -> None:
+            _var_inp = pn.widgets.TextInput(
+                value=var_name,
+                placeholder="alias (e.g. obs)",
+                sizing_mode="fixed",
+                width=130,
+                margin=(2, 4, 4, 4),
+            )
+            _multi_cb = pn.widgets.Checkbox(
+                name="Join all",
+                value=not keep_single,
+                width=84,
+                margin=(8, 4, 0, 4),
+            )
+            _crit_inp = pn.widgets.TextInput(
+                value=criteria_str,
+                placeholder="attr=val, attr=val",
+                sizing_mode="stretch_width",
+                margin=(2, 4, 4, 4),
+            )
+            _rm_btn = pn.widgets.Button(
+                name="✕",
+                button_type="light",
+                width=40,
+                height=34,
+                margin=(4, 4, 4, 4),
+                styles={"color": "#c00", "font-weight": "bold"},
+            )
+            _data_row = pn.Row(
+                _var_inp,
+                _multi_cb,
+                _crit_inp,
+                _rm_btn,
+                sizing_mode="stretch_width",
+                margin=(2, 0),
+            )
+            _row_ref = [_data_row]
+
+            def _on_rm(ev: Any) -> None:
+                for _i, (_v, _m, _c, _r) in enumerate(sm_rows):
+                    if _r is _row_ref[0]:
+                        sm_rows.pop(_i)
+                        break
+                search_map_section.objects = [
+                    _o for _o in search_map_section.objects if _o is not _row_ref[0]
+                ]
+
+            _rm_btn.on_click(_on_rm)
+            sm_rows.append((_var_inp, _multi_cb, _crit_inp, _data_row))
+            # Insert the new row before the add_var_btn (always the last item)
+            search_map_section.insert(len(search_map_section.objects) - 1, _data_row)
+
+        add_var_btn.on_click(lambda _e: _add_sm_row())
+
+        # Pre-populate rows when editing an existing MathDataReference.
+        if is_edit and ref is not None and getattr(ref, "_search_map", None):
+            for _sm_var, _sm_crit in ref._search_map.items():
+                _sm_keep = ref._search_require_single.get(_sm_var, True)
+                _sm_crit_str = ", ".join(f"{k}={v}" for k, v in _sm_crit.items())
+                _add_sm_row(_sm_var, _sm_crit_str, _sm_keep)
 
         # ── Catalog attribute browser ─────────────────────────────────────────
         try:
@@ -273,7 +354,8 @@ class MathRefEditorAction:
             name_input,
             expr_input,
             attrs_input,
-            search_map_input,
+            pn.layout.Divider(),
+            search_map_section,
             pn.layout.Divider(),
             attr_browser_md,
             catalog_names,
@@ -298,26 +380,55 @@ class MathRefEditorAction:
                 return
             try:
                 attrs = self._parse_attrs(attrs_input.value)
-                search_map, search_req = self._parse_search_map(search_map_input.value)
+                # Build search_map from the dynamic row widgets.
+                search_map: Dict[str, Dict[str, str]] = {}
+                search_req: Dict[str, bool] = {}
+                for _vi, _mc, _ci, _dr in sm_rows:
+                    _sv = _vi.value.strip()
+                    _sc = _ci.value.strip()
+                    if not _sv or not _sc:
+                        continue
+                    _criteria: Dict[str, str] = {}
+                    for _part in _sc.split(","):
+                        _part = _part.strip()
+                        if "=" in _part:
+                            _k, _, _v = _part.partition("=")
+                            _criteria[_k.strip()] = _v.strip()
+                    if _criteria:
+                        search_map[_sv] = _criteria
+                        search_req[_sv] = not _mc.value  # require_single = not join_all
                 # Remove an existing entry with the same name so the update lands cleanly.
                 try:
                     catalog.remove(name)
                     action_word = "Updated"
                 except KeyError:
                     action_word = "Created"
-                ref = MathDataReference(
+                new_ref = MathDataReference(
                     expression=expr,
                     name=name,
                     search_map=search_map if search_map else None,
                     search_require_single=search_req if search_req else None,
                     **attrs,
                 )
-                ref.set_catalog(catalog)
-                catalog.add(ref)
-                # Refresh the table
+                new_ref.set_catalog(catalog)
+                # When updating an existing ref, preserve non-primitive attributes
+                # (e.g. Shapely geometry) that cannot round-trip through the text area.
+                if is_edit and ref is not None:
+                    for _k, _v in ref.attributes.items():
+                        if (
+                            not isinstance(_v, (str, int, float, bool, type(None)))
+                            and _k not in new_ref.attributes
+                        ):
+                            new_ref.set_attribute(_k, _v)
+                catalog.add(new_ref)
+                # Refresh the table – guard against get_data_catalog() failures
+                # (e.g. if the manager builds a GeoDataFrame and new refs lack geometry).
                 if hasattr(dataui, "_dfcat"):
-                    dataui._dfcat = manager.get_data_catalog()
-                    dataui.display_table.value = dataui._dfcat[manager.get_table_columns()]
+                    try:
+                        dataui._dfcat = manager.get_data_catalog()
+                        dataui.display_table.value = dataui._dfcat[manager.get_table_columns()]
+                    except Exception as _te:
+                        logger.warning("Could not refresh table after save: %s", _te)
                 status_md.object = f"✅ **{action_word}** `{name}` in catalog."
             except Exception as exc:
                 logger.exception("MathRefEditorAction save error")
