@@ -99,6 +99,10 @@ Pre-built action handlers:
 - `DownloadDataCatalogAction`: Export full catalog to CSV
 - `PermalinkAction`: Create shareable URLs
 
+### Math References
+
+`MathDataReference` lets you define derived series as Python expressions evaluated over other catalog entries — with full NumPy support and a built-in interactive editor. See **[README-mathref.md](README-mathref.md)** for the full guide including YAML format, the in-UI editor, load/save workflow, and code examples.
+
 ### FullScreen
 
 Component for adding fullscreen capability to any Panel object.
@@ -155,7 +159,10 @@ The `examples/` directory contains complete working examples:
   - Interactive map with station locations
   - Multiple variables and intervals
   - Bidirectional map/table selection
+  - Math Reference editor with YAML load/save
   - Complete implementation reference
+
+See **[README-mathref.md](README-mathref.md)** for the full Math Reference guide.
 
 Run any example with:
 ```bash

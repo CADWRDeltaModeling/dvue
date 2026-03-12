@@ -24,7 +24,7 @@ pn.extension("tabulator", notifications=True, design="native")
 LINE_DASH_MAP = ["solid", "dashed", "dotted", "dotdash", "dashdot"]
 #
 try:
-    from vtools.functions.filter import cosine_lanczos
+    from vtools.functions.filter import cosine_lanczos #IMPROVEMENT NEEDED
     _VTOOLS_AVAILABLE = True
 except ImportError:
     _VTOOLS_AVAILABLE = False
