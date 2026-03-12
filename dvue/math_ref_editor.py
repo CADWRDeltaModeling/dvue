@@ -6,6 +6,7 @@ inline editor inside the DataUI display panel.  Users can:
 * Create a new :class:`~dvue.math_reference.MathDataReference` from scratch.
 * Edit an existing one selected from the catalog table.
 * Save the resulting math references to a YAML file for later reuse.
+* Load math references from a YAML file directly into the live catalog.
 
 The editor supports:
 
@@ -42,6 +43,10 @@ class MathRefEditorAction:
        catalog and refreshes the table.
     3. On **Save to YAML**, writes all current math refs in the catalog to a
        YAML file via :func:`~dvue.math_reference.save_math_refs`.
+    4. On **Load from YAML**, reads a YAML file via
+       :class:`~dvue.math_reference.MathDataCatalogReader` and merges the
+       resulting :class:`~dvue.math_reference.MathDataReference` objects into
+       the live catalog, then refreshes the table.
 
     The catalog is retrieved from ``dataui._dataui_manager.data_catalog``.
 
@@ -75,6 +80,21 @@ class MathRefEditorAction:
             ))
             return actions
     """
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    def __init__(self, default_yaml_path: str = "") -> None:
+        """Create the action.
+
+        Parameters
+        ----------
+        default_yaml_path : str, optional
+            Pre-fills the YAML path inputs in the editor so the user does not
+            have to type the path manually.
+        """
+        self._default_yaml_path = default_yaml_path
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -336,20 +356,33 @@ class MathRefEditorAction:
         status_md = pn.pane.Markdown("", sizing_mode="stretch_width")
         save_btn = pn.widgets.Button(name="Save", button_type="success", icon="device-floppy")
         cancel_btn = pn.widgets.Button(name="Cancel", button_type="default", icon="x")
+        # Single shared path input used by both Save and Load actions.
         yaml_path_input = pn.widgets.TextInput(
             name="YAML file path",
+            value=self._default_yaml_path,
             placeholder="e.g. math_refs.yaml",
-            width=320,
+            sizing_mode="stretch_width",
         )
         save_yaml_btn = pn.widgets.Button(
-            name="Save all math refs to YAML",
+            name="Save to YAML",
             button_type="primary",
             icon="file-export",
-            width=220,
+            width=150,
+        )
+        load_from_yaml_btn = pn.widgets.Button(
+            name="Load from YAML",
+            button_type="primary",
+            icon="file-import",
+            width=150,
         )
 
         editor_panel = pn.Column(
             title_md,
+            pn.layout.Divider(),
+            pn.pane.Markdown("#### YAML file"),
+            yaml_path_input,
+            pn.Row(load_from_yaml_btn, save_yaml_btn),
+            pn.layout.Divider(),
             help_md,
             name_input,
             expr_input,
@@ -362,9 +395,6 @@ class MathRefEditorAction:
             pn.layout.Divider(),
             status_md,
             pn.Row(save_btn, cancel_btn),
-            pn.layout.Divider(),
-            pn.pane.Markdown("#### Save math refs to YAML"),
-            pn.Row(yaml_path_input, save_yaml_btn),
             sizing_mode="stretch_width",
             width=580,
         )
@@ -446,12 +476,47 @@ class MathRefEditorAction:
                 logger.exception("MathRefEditorAction YAML save error")
                 status_md.object = f"❌ **YAML save error:** {exc}"
 
+        def _on_load_yaml(event: Any) -> None:
+            path = yaml_path_input.value.strip()
+            if not path:
+                status_md.object = "⚠️ **YAML path is required.**"
+                return
+            try:
+                reader = MathDataCatalogReader(parent_catalog=catalog)
+                refs = reader.read(path)
+                added = 0
+                for r in refs:
+                    # Update semantics: remove any existing ref with the same
+                    # name before re-adding so callers get the latest version.
+                    try:
+                        catalog.remove(r.name)
+                    except KeyError:
+                        pass
+                    catalog.add(r)
+                    added += 1
+                if hasattr(dataui, "_dfcat"):
+                    try:
+                        dataui._dfcat = manager.get_data_catalog()
+                        new_cols = manager.get_table_columns()
+                        dataui.display_table.value = dataui._dfcat[new_cols]
+                        # Refresh widths and header filters so the expression
+                        # column appears correctly after a first-time load.
+                        dataui.display_table.widths = manager.get_table_column_width_map()
+                        dataui.display_table.header_filters = manager.get_table_filters()
+                    except Exception as _te:
+                        logger.warning("Could not refresh table after load: %s", _te)
+                status_md.object = f"✅ **Loaded** {added} math ref(s) from `{path}`."
+            except Exception as exc:
+                logger.exception("MathRefEditorAction YAML load error")
+                status_md.object = f"❌ **YAML load error:** {exc}"
+
         def _on_cancel(event: Any) -> None:
             editor_panel.objects = [pn.pane.Markdown("*Editor closed.*")]
 
         save_btn.on_click(_on_save)
         cancel_btn.on_click(_on_cancel)
         save_yaml_btn.on_click(_on_save_yaml)
+        load_from_yaml_btn.on_click(_on_load_yaml)
 
         # Show editor as a new tab in the display panel.
         if len(dataui._display_panel.objects) > 0 and isinstance(

@@ -1,0 +1,140 @@
+# math_refs_search_map.yaml
+#
+# Demonstrates the search_map pattern: each variable in an expression is
+# assigned a short alias that is resolved by catalog attribute criteria at
+# getData() time.  This keeps expressions portable and independent of
+# internal naming conventions (catalog key names).
+#
+# Format per entry:
+#   expression  -- Python expression; aliases defined in search_map are
+#                  substituted with the matching DataReference's data.
+#   search_map  -- dict of alias → {attr: val, …} catalog criteria.
+#   _require_single: false  -- include inside a criteria block to concatenate
+#                              ALL matching references (axis=1 join) instead
+#                              of taking only the first result.
+#
+# Load this file via the "Math Ref" editor ("Load from YAML") or in code:
+#   catalog.add_reader(MathDataCatalogReader(parent_catalog=catalog))
+#   catalog.add_source("math_refs_search_map.yaml")
+
+# -- Example 1: Unit conversion with a single alias ---------------------------
+# obs → first catalog entry where station_name=Station A, variable=wind_speed,
+#        interval=hourly.  Expression is station-agnostic: swap the search_map
+#        criteria to apply the same conversion to any other station.
+- name: wind_speed_mph__A__hourly
+  expression: obs * 2.23694
+  station_id: '1'
+  station_name: Station A
+  variable: wind_speed_mph
+  unit: mph
+  interval: hourly
+  start_year: '2020'
+  max_year: '2021'
+  search_map:
+    obs:
+      station_name: Station A
+      variable: wind_speed
+      interval: hourly
+
+# -- Example 2: Cross-station difference with two aliases ---------------------
+# ws_b and ws_a are resolved independently.  Changing only the search_map
+# criteria (not the expression) would swap any pair of stations.
+- name: wind_diff_B_minus_A__hourly
+  expression: ws_b - ws_a
+  station_id: '2'
+  station_name: Station B
+  variable: wind_diff_B_minus_A
+  unit: m/s
+  interval: hourly
+  start_year: '2020'
+  max_year: '2021'
+  search_map:
+    ws_b:
+      station_name: Station B
+      variable: wind_speed
+      interval: hourly
+    ws_a:
+      station_name: Station A
+      variable: wind_speed
+      interval: hourly
+
+# -- Example 3: Normalised precipitation (z-score / anomaly) ------------------
+# obs resolves to Station B / precipitation / hourly.
+# The expression computes a standardised anomaly: (x - mean) / std.
+- name: precip_anomaly__B__hourly
+  expression: (obs - obs.mean()) / obs.std()
+  station_id: '2'
+  station_name: Station B
+  variable: precip_anomaly
+  unit: ''
+  interval: hourly
+  start_year: '2020'
+  max_year: '2021'
+  search_map:
+    obs:
+      station_name: Station B
+      variable: precipitation
+      interval: hourly
+
+# -- Example 4: Multi-station mean with _require_single: false ----------------
+# ws resolves to ALL catalog entries where variable=wind_speed + interval=hourly
+# (one per station).  They are concatenated into a DataFrame (axis=1 join by
+# timestamp index) so ws.mean(axis=1) produces the mean across all stations.
+- name: mean_wind_speed__all_stations__hourly
+  expression: ws.mean(axis=1)
+  station_id: ''
+  station_name: All Stations
+  variable: mean_wind_speed
+  unit: m/s
+  interval: hourly
+  start_year: '2020'
+  max_year: '2021'
+  search_map:
+    ws:
+      variable: wind_speed
+      interval: hourly
+      _require_single: false
+
+# -- Example 5: Chain via catalog name (MathDataReference → MathDataReference) --
+# References wind_speed_mph__A__hourly, itself a MathDataReference defined
+# above in this same file.  No search_map is needed: the expression token
+# matches the catalog key directly and is resolved via the catalog name-lookup
+# path at getData() time.
+#
+# This works because MathDataCatalogReader.read() creates *all* MathDataReference
+# objects first and only then adds them to the catalog.  By the time getData()
+# is called every ref is already present, so the chain resolves correctly
+# regardless of the order entries appear in the YAML.
+- name: wind_speed_mph__A__hourly__cumsum
+  expression: cumsum(wind_speed_mph__A__hourly)
+  station_id: '1'
+  station_name: Station A
+  variable: wind_speed_mph_cumsum
+  unit: mph
+  interval: hourly
+  start_year: '2020'
+  max_year: '2021'
+
+# -- Example 6: Chain via search_map attributes (MathDataReference → MathDataReference) --
+# References wind_speed_mph__A__hourly through its metadata attributes rather
+# than its catalog key name.  The alias mph_wind is resolved by searching the
+# catalog for variable=wind_speed_mph + station_name=Station A + interval=hourly,
+# which matches the MathDataReference created in Example 1.
+#
+# Using search_map for chaining is more portable: the expression stays the same
+# even if the upstream ref is renamed or rebuilt, as long as its attributes
+# still match the criteria.
+- name: wind_speed_mph__A__hourly__pct_of_mean
+  expression: mph_wind / mph_wind.mean() * 100
+  station_id: '1'
+  station_name: Station A
+  variable: wind_speed_mph_pct_of_mean
+  unit: '%'
+  interval: hourly
+  start_year: '2020'
+  max_year: '2021'
+  search_map:
+    mph_wind:
+      station_name: Station A
+      variable: wind_speed_mph
+      interval: hourly

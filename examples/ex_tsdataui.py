@@ -7,11 +7,22 @@ This file demonstrates:
 1. Wrapping in-memory DataFrames in DataReference objects and indexing them
    in a DataCatalog -- one reference per station / variable / interval.
 
-2. Creating derived series via three MathDataReference patterns:
+2. Loading derived series (MathDataReferences) from YAML files via
+   MathDataCatalogReader.  Two YAML files are included:
 
-   a. Operator overloading  --  wind speed  m/s -> mph         (ref * 2.23694)
-   b. Expression string     --  cumulative precipitation        (cumsum(...))
-   c. Multi-var operators   --  cross-station wind anomaly      (ref_A - ref_C)
+   ``math_refs_tsdataui.yaml`` — direct name-lookup style:
+     expressions reference catalog keys by their full name.
+
+   ``math_refs_search_map.yaml`` — search_map / alias style:
+     each expression variable is a short alias (``obs``, ``ws_a``, …)
+     resolved at getData() time by catalog attribute criteria, making
+     expressions portable and independent of naming conventions:
+
+       a. Unit conversion:   ``obs * 2.23694``  (obs → wind_speed A hourly)
+       b. Cross-station diff: ``ws_b - ws_a``    (each resolved by station attr)
+       c. Normalised anomaly: ``(obs - obs.mean()) / obs.std()``
+       d. Multi-station mean: ``ws.mean(axis=1)`` (ws → all wind_speed hourly,
+          joined into a DataFrame with ``_require_single: false``)
 
 3. Connecting the catalog to a TimeSeriesDataUIManager by:
    * Overriding the ``data_catalog`` property  -> returns the DataCatalog
@@ -22,12 +33,8 @@ This file demonstrates:
      the matching DataReference or MathDataReference, then slices to the
      selected time window.
 
-MathDataReference expressions are evaluated in a namespace that exposes NumPy
-functions (``cumsum``, ``sqrt``, ``abs``, ``sin``, ``cos``, ``log``, ``exp``,
-``clip``, ``where``, ``pi``, ``e``, and the full ``np`` / ``pd`` / ``math``
-modules) alongside variables resolved from ``variable_map`` or a ``catalog``.
-The arithmetic operators (``+``, ``-``, ``*``, ``/``, ``**``) automatically
-construct MathDataReference objects so derived signals compose algebraically.
+4. Using MathRefEditorAction to create, edit, save, and **load** math refs
+   interactively without restarting the kernel.
 """
 
 # %% -- [1] Imports -----------------------------------------------------------
@@ -40,7 +47,7 @@ from shapely.geometry import Point
 
 from dvue import dataui, tsdataui
 from dvue.catalog import DataCatalog, DataReference, MathDataReference
-from dvue import MathDataCatalogReader, save_math_refs, MathRefEditorAction
+from dvue import MathDataCatalogReader, MathRefEditorAction
 
 # %% -- [2] Station metadata and synthetic data generator ---------------------
 STATIONS = [
@@ -122,96 +129,7 @@ for stn in STATIONS:
             catalog.add(ref)
 
 
-# -- 3b. MathDataReference -- operator overloading: m/s -> mph ---------------
-#
-# DataReference.__mul__ (and all other arithmetic operators) automatically
-# constructs a MathDataReference whose expression string uses the operand's
-# .name as the variable identifier.  Because StationDataReference.ref_key()
-# produces valid Python identifiers, the generated expression string is
-# syntactically correct without any further sanitisation.
-#
-# Generated expression: "Station_A__wind_speed__hourly * (2.23694)"
-
-wind_a_h = catalog.search(station_name="Station A", variable="wind_speed", interval="hourly")[0]
-
-wind_a_mph: MathDataReference = wind_a_h * 2.23694
-wind_a_mph.name = "Station_A__wind_speed_mph__hourly"
-for attr, val in [
-    ("station_id", "1"),
-    ("station_name", "Station A"),
-    ("variable", "wind_speed_mph"),
-    ("unit", "mph"),
-    ("interval", "hourly"),
-    ("start_year", "2020"),
-    ("max_year", "2021"),
-    ("geometry", Point(-118.25, 34.05)),
-]:
-    wind_a_mph.set_attribute(attr, val)
-catalog.add(wind_a_mph)
-
-
-# -- 3c. MathDataReference -- expression string: cumulative precipitation -----
-#
-# The expression is a Python string evaluated in a namespace that exposes
-# NumPy functions: cumsum, sqrt, abs, sin, cos, log, log10, exp, clip, where,
-# min, max, pi, e, and the full np / pd / math modules.
-#
-# Variable names in the expression must be valid Python identifiers that match
-# keys in variable_map (or names in an attached catalog).  Because
-# StationDataReference.ref_key() produces underscore-separated identifiers,
-# ref.name can be embedded verbatim as the variable name.
-#
-# Generated expression: "cumsum(Station_B__precipitation__hourly)"
-
-precip_b_h = catalog.search(station_name="Station B", variable="precipitation", interval="hourly")[
-    0
-]
-
-precip_cumulative = MathDataReference(
-    expression=f"cumsum({precip_b_h.name})",
-    variable_map={precip_b_h.name: precip_b_h},
-    name="Station_B__precip_cumulative__hourly",
-    station_id="2",
-    station_name="Station B",
-    variable="precip_cumulative",
-    unit="mm",
-    interval="hourly",
-    start_year="2020",
-    max_year="2021",
-    geometry=Point(-115.15, 36.16),
-)
-catalog.add(precip_cumulative)
-
-
-# -- 3d. MathDataReference -- multi-variable: cross-station wind anomaly ------
-#
-# Operator overloading works across two DataReferences.  DataReference.__sub__
-# builds the expression "lhs.name - rhs.name" and merges both variable maps
-# automatically.  Any further arithmetic (scaling, abs, sqrt ...) can be
-# chained without limit.
-#
-# Generated expression:
-#   "Station_A__wind_speed__hourly - Station_C__wind_speed__hourly"
-
-wind_c_h = catalog.search(station_name="Station C", variable="wind_speed", interval="hourly")[0]
-
-wind_diff: MathDataReference = wind_a_h - wind_c_h
-wind_diff.name = "wind_diff_A_minus_C__hourly"
-for attr, val in [
-    ("station_id", "1"),
-    ("station_name", "Station A"),
-    ("variable", "wind_diff_A_minus_C"),
-    ("unit", "m/s"),
-    ("interval", "hourly"),
-    ("start_year", "2020"),
-    ("max_year", "2021"),
-    ("geometry", Point(-118.25, 34.05)),
-]:
-    wind_diff.set_attribute(attr, val)
-catalog.add(wind_diff)
-
-
-# -- Catalog summary ----------------------------------------------------------
+# -- Catalog summary (raw refs only -- math refs are loaded from YAML below) --
 print(catalog)  # DataCatalog(N references)
 print(catalog.to_dataframe()[["station_name", "variable", "unit", "interval"]].to_string())
 
@@ -256,8 +174,18 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
         ``reset_index()`` promotes the reference name (the catalog key) into a
         regular ``'name'`` column.  ``get_data_for_time_range()`` uses
         ``r["name"]`` to look up the corresponding DataReference at display time.
+
+        When math refs are present the ``expression`` column exists but is blank
+        for raw DataReferences.  Those blank cells are filled with the ref's
+        catalog name so users can see exactly what variable name to use when
+        writing new expressions.
         """
         df = self._cat.to_dataframe().reset_index()  # 'name' becomes a regular column
+        if "expression" in df.columns:
+            # Fill blank expression cells for raw refs with their catalog name.
+            # This tells users "use this name as a variable in your expression".
+            mask = df["expression"].isna() | (df["expression"].astype(str).str.strip() == "")
+            df.loc[mask, "expression"] = df.loc[mask, "name"]
         return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
     # -- get_data_for_time_range: delegate to DataReference.getData() ---------
@@ -285,8 +213,12 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
         return False
 
     # -- View layer -----------------------------------------------------------
+    def _has_math_refs(self) -> bool:
+        """Return True if the catalog contains at least one MathDataReference."""
+        return any(isinstance(r, MathDataReference) for r in self._cat.list())
+
     def get_table_column_width_map(self):
-        return {
+        widths = {
             "station_id": "6%",
             "station_name": "12%",
             "variable": "14%",
@@ -294,8 +226,10 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
             "interval": "6%",
             "start_year": "6%",
             "max_year": "6%",
-            "expression": "44%",
         }
+        if self._has_math_refs():
+            widths["expression"] = "50%"
+        return widths
 
     def get_table_columns(self):
         # "name" is the DataCatalog lookup key used by get_data_for_time_range.
@@ -304,18 +238,20 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
         return list(self.get_table_column_width_map().keys()) + ["name"]
 
     def get_table_filters(self):
+        filterable = [
+            "station_name",
+            "station_id",
+            "variable",
+            "unit",
+            "interval",
+            "start_year",
+            "max_year",
+        ]
+        if self._has_math_refs():
+            filterable.append("expression")
         return {
             col: {"type": "input", "func": "like", "placeholder": f"Filter {col}"}
-            for col in [
-                "station_name",
-                "station_id",
-                "variable",
-                "unit",
-                "interval",
-                "start_year",
-                "max_year",
-                "expression",
-            ]
+            for col in filterable
         }
 
     def get_tooltips(self):
@@ -360,38 +296,42 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
         return f"{v[1]}({v[0]})"
 
 
-# %% -- [5] Launch the UI -----------------------------------------------------
-exmgr = ExampleTimeSeriesDataUIManager(catalog)
-
-# -- [5a] Persist math refs to YAML and reload --------------------------------
+# %% -- [5] Load math refs from YAML -----------------------------------------
 #
-# save_math_refs() writes every MathDataReference in the catalog to a YAML
-# file.  MathDataCatalogReader loads them back, wiring each expression to the
-# parent catalog so variable names resolve at getData() time.
+# Two YAML files are included; both can be loaded independently or together.
+#
+# math_refs_tsdataui.yaml  -- direct name-lookup style (expression tokens are
+#   full catalog key names like Station_A__wind_speed__hourly).
+#
+# math_refs_search_map.yaml  -- search_map / alias style (recommended):
+#   expression tokens are short aliases like obs, ws_a, ws_b resolved by
+#   catalog attribute criteria at getData() time.  Portable across catalogs.
+#
+# Both YAML paths are pre-filled in the Math Ref editor so the user can load
+# either file with a single click.  Only one MATH_REFS_FILE is used as the
+# default; change the value below to switch.
 
 MATH_REFS_FILE = Path(__file__).parent / "data" / "math_refs_tsdataui.yaml"
-MATH_REFS_FILE.parent.mkdir(parents=True, exist_ok=True)
-save_math_refs(catalog, MATH_REFS_FILE)
-print(f"\nMath refs saved to: {MATH_REFS_FILE}")
+MATH_REFS_SEARCH_MAP_FILE = Path(__file__).parent / "data" / "math_refs_search_map.yaml"
 
-# Round-trip: load into a fresh catalog that already has the raw refs.
-catalog_reloaded = DataCatalog()
+# Catalog starts with raw refs only.  Math refs are loaded on demand via the
+# "Math Ref" editor action -- use "Load from YAML" to populate from either file.
+catalog_from_yaml = DataCatalog()
 for ref in catalog.list():
-    if not isinstance(ref, MathDataReference):
-        catalog_reloaded.add(ref)
-catalog_reloaded.add_reader(MathDataCatalogReader(parent_catalog=catalog_reloaded))
-catalog_reloaded.add_source(str(MATH_REFS_FILE))
-print(f"Reloaded catalog: {catalog_reloaded}")
-print("MathDataReferences after reload:")
-for ref in catalog_reloaded.list():
-    if isinstance(ref, MathDataReference):
-        print(f"  {ref.name!r}: {ref.expression!r}")
+    catalog_from_yaml.add(ref)
 
-# -- [5b] Wire up the Math Ref editor action ----------------------------------
+print(f"Catalog: {catalog_from_yaml} (no math refs loaded yet)")
+
+
+# %% -- [6] Launch the UI backed by the YAML catalog --------------------------
 #
-# MathRefEditorAction opens an inline editor panel when the user selects a
-# MathDataReference row and clicks "Math Ref", or creates a new one from
-# scratch. Wire it into get_data_actions() via a subclass override.
+# MathRefEditorAction exposes three YAML operations in the editor panel:
+#   * "Save to YAML"   -- persist all current math refs in the catalog.
+#   * "Load from YAML" -- merge refs from a YAML file into the live catalog
+#     and refresh the table, without restarting the kernel.
+#
+# The manager is wired to catalog_from_yaml so all math refs originate from
+# the YAML file, not from in-memory MathDataReference construction.
 
 
 class EditableExampleTSDataUIManager(ExampleTimeSeriesDataUIManager):
@@ -399,7 +339,7 @@ class EditableExampleTSDataUIManager(ExampleTimeSeriesDataUIManager):
 
     def get_data_actions(self):
         actions = super().get_data_actions()
-        math_action = MathRefEditorAction()
+        math_action = MathRefEditorAction(default_yaml_path=str(MATH_REFS_SEARCH_MAP_FILE))
         actions.append(dict(
             name="Math Ref",
             button_type="warning",
@@ -410,7 +350,9 @@ class EditableExampleTSDataUIManager(ExampleTimeSeriesDataUIManager):
         return actions
 
 
-exmgr_editable = EditableExampleTSDataUIManager(catalog)
+exmgr_editable = EditableExampleTSDataUIManager(catalog_from_yaml)
 ui = dataui.DataUI(exmgr_editable, station_id_column="station_id")
-ui.create_view(title="Example Time Series Data UI (DataCatalog + MathDataReference)").servable()
+ui.create_view(
+    title="Example Time Series Data UI (DataCatalog + MathDataReference from YAML)"
+).servable()
 # %%
