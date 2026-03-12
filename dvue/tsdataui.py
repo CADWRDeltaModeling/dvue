@@ -23,7 +23,11 @@ pn.extension("tabulator", notifications=True, design="native")
 #
 LINE_DASH_MAP = ["solid", "dashed", "dotted", "dotdash", "dashdot"]
 #
-# from vtools.functions.filter import cosine_lanczos # FIXME: move this to the specific repo that needs it.
+try:
+    from vtools.functions.filter import cosine_lanczos
+    _VTOOLS_AVAILABLE = True
+except ImportError:
+    _VTOOLS_AVAILABLE = False
 
 
 def unique_preserve_order(seq):
@@ -72,6 +76,7 @@ class TimeSeriesDataUIManager(DataUIManager):
     fill_gap = param.Integer(
         default=0, doc="Fill gaps in data upto this limit, only when a positive integer"
     )
+    do_tidal_filter = param.Boolean(default=False, doc="Apply tidal filter", constant=not _VTOOLS_AVAILABLE)
     irregular_curve_connection = param.Selector(
         objects=["steps-post", "steps-pre", "steps-mid", "linear"],
         default="steps-post",
@@ -246,8 +251,13 @@ class TimeSeriesDataUIManager(DataUIManager):
             self.param.color_cycle_name,
             self.param.shared_axes,  # Add checkbox for shared_axes
         )
+        tidal_filter_widget = pn.Param(
+            self.param.do_tidal_filter,
+            widgets={"do_tidal_filter": {"disabled": not _VTOOLS_AVAILABLE}},
+        )
         transform_widgets = pn.Column(
             self.param.fill_gap,
+            tidal_filter_widget,
             pn.Row(self.param.sensible_range_yaxis, self.param.sensible_percentile_range),
         )
         widget_tabs = pn.Tabs(
@@ -348,6 +358,8 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Apply optional data transformations
         if self.fill_gap > 0:
             data = data.interpolate(limit=self.fill_gap)
+        if self.do_tidal_filter and _VTOOLS_AVAILABLE and not self.is_irregular(r):
+            data = cosine_lanczos(data, "40h")
 
         return data
 
