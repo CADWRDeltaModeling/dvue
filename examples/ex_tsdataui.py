@@ -46,7 +46,7 @@ from pathlib import Path
 from shapely.geometry import Point
 
 from dvue import dataui, tsdataui
-from dvue.catalog import DataCatalog, DataReference, MathDataReference
+from dvue.catalog import DataCatalog, DataReference, MathDataReference, InMemoryDataReferenceReader
 from dvue import MathDataCatalogReader, MathRefEditorAction
 
 # %% -- [2] Station metadata and synthetic data generator ---------------------
@@ -115,7 +115,7 @@ for stn in STATIONS:
     for variable, unit in VARIABLES:
         for interval in INTERVALS:
             ref = StationDataReference(
-                source=create_smooth_tsdf(interval=interval),
+                InMemoryDataReferenceReader(create_smooth_tsdf(interval=interval)),
                 station_id=stn["station_id"],
                 station_name=stn["station_name"],
                 variable=variable,

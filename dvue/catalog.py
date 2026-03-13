@@ -5,21 +5,30 @@ searchable catalogs, and composing derived datasets via mathematical expressions
 
 Classes
 -------
+DataReferenceReader
+    Abstract base class for objects that load data given a set of metadata
+    attributes.  Subclass this to implement custom data sources.  Built-in
+    subclasses: InMemoryDataReferenceReader, CallableDataReferenceReader,
+    FileDataReferenceReader.
 DataReference
-    A reference to a data source with associated (name, value) metadata.
+    A reference to a data source identified by metadata attributes.  Delegates
+    actual loading to an attached DataReferenceReader on the first getData()
+    call; caches the result thereafter.
 CatalogView
     A live, read-only filtered view of a DataCatalog, selecting a subset of
     its DataReferences based on metadata criteria.
 MathDataReference
     A DataReference that computes data by evaluating a mathematical expression
     over other DataReferences resolved from a variable map or catalog.
-DataCatalogReader
-    Abstract base class for objects that construct DataReferences from sources.
+CatalogBuilder
+    Abstract base class for objects that scan a source and construct
+    DataReferences wired to the right DataReferenceReader.  Subclass to
+    support new source types (directories, databases, REST APIs, …).
 DataCatalog
     A searchable container of DataReferences with schema mapping and dynamic
-    reader registration.
+    CatalogBuilder registration.
 
-Sample reader implementations (CSVDirectoryReader, PatternCSVDirectoryReader)
+Sample builder implementations (CSVDirectoryBuilder, PatternCSVDirectoryBuilder)
 and the filename-pattern helper (_pattern_to_regex) live in :mod:`dvue.readers`
 and are re-exported here for backward compatibility.
 """
@@ -41,51 +50,159 @@ logger = logging.getLogger(__name__)
 # Sentinel for "argument not supplied" (distinct from None).
 _UNSET = object()
 
+
 # ---------------------------------------------------------------------------
-# DataReference
+# DataReferenceReader (ABC)
 # ---------------------------------------------------------------------------
 
 
-class DataReference:
-    """A reference to a data source with associated metadata attributes.
+class DataReferenceReader(abc.ABC):
+    """Abstract base class for loading data given a set of metadata attributes.
 
-    ``DataReference`` wraps a data source and exposes it through a consistent
-    :meth:`getData` API.  Results are optionally cached after the first load.
+    A ``DataReferenceReader`` knows *how* to load data for a particular kind of
+    source (a file, a database table, a REST endpoint, …).  It is wired into a
+    :class:`DataReference` at construction time and called lazily by
+    :meth:`~DataReference.getData`.
 
-    Parameters
-    ----------
-    source : Any
-        Where to load data from.  Supported types:
+    The reader only receives the attribute dict; it has no dependency on
+    :class:`DataReference` itself, which allows the same reader instance to be
+    shared by many references pointing to different locations within the same
+    source system (flyweight pattern).
 
-        * ``pd.DataFrame`` / ``pd.Series`` – used directly.
-        * ``callable`` – called with no arguments; must return a DataFrame.
-        * ``str`` or :class:`pathlib.Path` – local file path.  Supported
-          extensions: ``.csv``, ``.tsv``, ``.parquet``, ``.feather``,
-          ``.json``, ``.xlsx``, ``.xls``, ``.hdf``, ``.h5``.
-        * URL string (``http://`` / ``https://``) – fetched as CSV, Parquet,
-          or JSON based on the URL extension.
-
-    name : str, optional
-        Identifier.  Required when adding to a :class:`DataCatalog`.
-    cache : bool, optional
-        Cache the result of the first :meth:`getData` call.  Default ``True``.
-    **attributes
-        Arbitrary (name, value) metadata pairs searchable via
-        :meth:`DataCatalog.search`.
+    Subclasses **must** implement :meth:`load`.
 
     Examples
     --------
-    >>> ref = DataReference(df, name="stations", variable="temperature", unit="degC")
-    >>> ref.getData()                       # returns the DataFrame
-    >>> ref.get_attribute("variable")
-    'temperature'
-    >>> ref.set_attribute("reviewed", True).set_attribute("priority", 1)
+    >>> class MyDBReader(DataReferenceReader):
+    ...     def __init__(self, connection):
+    ...         self._conn = connection
+    ...     def load(self, **attributes):
+    ...         return self._conn.query_table(attributes["table"])
+    ...
+    >>> reader = MyDBReader(conn)
+    >>> ref = DataReference(reader, name="users", table="users")
+    >>> ref.getData()   # calls reader.load(table="users")
     """
 
-    # Class-level map of file extension → loader callable
-    _FILE_LOADERS: ClassVar[Dict[str, Callable[[str], pd.DataFrame]]] = {
+    @abc.abstractmethod
+    def load(self, **attributes: Any) -> pd.DataFrame:
+        """Return a :class:`~pandas.DataFrame` for the given attributes.
+
+        Parameters
+        ----------
+        **attributes
+            The full ``_attributes`` dict of the calling
+            :class:`DataReference`, unpacked as keyword arguments.
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+        ...
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
+
+
+# ---------------------------------------------------------------------------
+# Built-in DataReferenceReader subclasses
+# ---------------------------------------------------------------------------
+
+
+class InMemoryDataReferenceReader(DataReferenceReader):
+    """Hold a fixed :class:`~pandas.DataFrame` (or :class:`~pandas.Series`) in memory.
+
+    The stored data is returned as a defensive copy on every :meth:`load` call
+    so that callers cannot mutate the stored frame.
+
+    Parameters
+    ----------
+    data : pd.DataFrame or pd.Series
+        The data to return.  A :class:`~pandas.Series` is automatically
+        promoted to a single-column :class:`~pandas.DataFrame`.
+
+    Examples
+    --------
+    >>> reader = InMemoryDataReferenceReader(df)
+    >>> ref = DataReference(reader, name="stations", variable="temperature")
+    >>> ref.getData()
+    """
+
+    def __init__(self, data: Union[pd.DataFrame, pd.Series]) -> None:
+        if isinstance(data, pd.Series):
+            data = data.to_frame()
+        self._data = data
+
+    def load(self, **attributes: Any) -> pd.DataFrame:
+        return self._data.copy()
+
+    def __repr__(self) -> str:
+        return f"InMemoryDataReferenceReader(shape={self._data.shape})"
+
+
+class CallableDataReferenceReader(DataReferenceReader):
+    """Call a no-argument callable to produce a :class:`~pandas.DataFrame`.
+
+    Useful when the data must be computed or fetched fresh each time but the
+    logic is encapsulated in an existing function or lambda.
+
+    Parameters
+    ----------
+    fn : callable
+        A zero-argument callable that returns a
+        :class:`~pandas.DataFrame`, :class:`~pandas.Series`, or any value
+        that :class:`~pandas.DataFrame` can be constructed from.
+
+    Examples
+    --------
+    >>> reader = CallableDataReferenceReader(lambda: fetch_latest())
+    >>> ref = DataReference(reader, name="live", variable="temperature")
+    >>> ref.getData()   # calls fn() each time (unless caching is on)
+    """
+
+    def __init__(self, fn: Callable[[], Any]) -> None:
+        self._fn = fn
+
+    def load(self, **attributes: Any) -> pd.DataFrame:
+        result = self._fn()
+        if isinstance(result, pd.DataFrame):
+            return result
+        if isinstance(result, pd.Series):
+            return result.to_frame()
+        return pd.DataFrame(result)
+
+    def __repr__(self) -> str:
+        return f"CallableDataReferenceReader(fn={self._fn!r})"
+
+
+class FileDataReferenceReader(DataReferenceReader):
+    """Load a file (or URL) whose path is given by the ``file_path`` attribute.
+
+    The file format is inferred from the extension of ``file_path``.
+    Supported extensions: ``.csv``, ``.tsv``, ``.parquet``, ``.feather``,
+    ``.json``, ``.xlsx``, ``.xls``, ``.hdf``, ``.h5``.
+    HTTP/HTTPS URLs are also supported and dispatch on the URL's extension.
+
+    Because all path information lives in the :class:`DataReference`
+    attributes, a *single* ``FileDataReferenceReader()`` instance can be
+    shared across any number of file-backed references (flyweight).
+
+    Parameters
+    ----------
+    read_kwargs : dict, optional
+        Extra keyword arguments forwarded to the underlying pandas reader
+        (e.g. ``{"parse_dates": ["timestamp"]}`` for CSV files).
+
+    Examples
+    --------
+    >>> reader = FileDataReferenceReader()
+    >>> ref = DataReference(reader, name="flow", file_path="/data/flow.csv")
+    >>> ref.getData()   # calls pd.read_csv("/data/flow.csv")
+    """
+
+    _FILE_LOADERS: ClassVar[Dict[str, Callable]] = {
         ".csv": pd.read_csv,
-        ".tsv": lambda p: pd.read_csv(p, sep="\t"),
+        ".tsv": lambda p, **kw: pd.read_csv(p, sep="\t", **kw),
         ".parquet": pd.read_parquet,
         ".feather": pd.read_feather,
         ".json": pd.read_json,
@@ -95,14 +212,97 @@ class DataReference:
         ".h5": pd.read_hdf,
     }
 
+    def __init__(self, read_kwargs: Optional[Dict[str, Any]] = None) -> None:
+        self._read_kwargs: Dict[str, Any] = read_kwargs or {}
+
+    def load(self, **attributes: Any) -> pd.DataFrame:
+        file_path = attributes.get("file_path")
+        if file_path is None:
+            raise ValueError(
+                "FileDataReferenceReader requires a 'file_path' attribute on the "
+                "DataReference.  Set it via the attributes keyword arguments."
+            )
+        s = str(file_path)
+        if s.startswith(("http://", "https://")):
+            return self._load_url(s)
+        return self._load_file(s)
+
+    def _load_file(self, path: str) -> pd.DataFrame:
+        suffix = Path(path).suffix.lower()
+        loader = self._FILE_LOADERS.get(suffix)
+        if loader is None:
+            raise ValueError(
+                f"Unsupported file extension {suffix!r}. "
+                f"Supported: {list(self._FILE_LOADERS)}"
+            )
+        return loader(path, **self._read_kwargs)
+
+    def _load_url(self, url: str) -> pd.DataFrame:
+        lower = url.lower()
+        if lower.endswith(".parquet"):
+            return pd.read_parquet(url)
+        if lower.endswith(".json"):
+            return pd.read_json(url)
+        return pd.read_csv(url)
+
+    def __repr__(self) -> str:
+        if self._read_kwargs:
+            return f"FileDataReferenceReader(read_kwargs={self._read_kwargs!r})"
+        return "FileDataReferenceReader()"
+
+
+# ---------------------------------------------------------------------------
+# DataReference
+# ---------------------------------------------------------------------------
+
+
+class DataReference:
+    """A reference to a data source identified by metadata attributes.
+
+    ``DataReference`` delegates actual loading to a :class:`DataReferenceReader`
+    and exposes the result through a consistent :meth:`getData` API.  All
+    source-specific logic lives in the reader; the reference owns caching and
+    the metadata attribute dict.
+
+    Parameters
+    ----------
+    reader : DataReferenceReader
+        The strategy object that knows how to load data.  Built-in choices:
+
+        * :class:`InMemoryDataReferenceReader` – wrap an existing DataFrame.
+        * :class:`CallableDataReferenceReader` – call a zero-argument callable.
+        * :class:`FileDataReferenceReader` – read a file via a ``file_path``
+          attribute (supports CSV, Parquet, JSON, HDF, Excel, …).
+
+        Pass ``None`` (or omit) only in :class:`MathDataReference` subclasses
+        that override :meth:`_load_data` directly.
+    name : str, optional
+        Identifier.  Required when adding to a :class:`DataCatalog`.
+    cache : bool, optional
+        Cache the result of the first :meth:`getData` call.  Default ``True``.
+    **attributes
+        Arbitrary (name, value) metadata pairs passed to the reader's
+        :meth:`~DataReferenceReader.load` and searchable via
+        :meth:`DataCatalog.search`.
+
+    Examples
+    --------
+    >>> reader = InMemoryDataReferenceReader(df)
+    >>> ref = DataReference(reader, name="stations", variable="temperature", unit="degC")
+    >>> ref.getData()                       # returns the DataFrame
+    >>> ref.get_attribute("variable")
+    'temperature'
+    >>> ref.set_attribute("reviewed", True).set_attribute("priority", 1)
+    """
+
     def __init__(
         self,
-        source: Any,
+        reader: Optional[DataReferenceReader] = None,
         name: str = "",
         cache: bool = True,
         **attributes: Any,
     ) -> None:
-        self.source = source
+        self._reader = reader
         self.name = name
         self._cache_enabled: bool = cache
         self._cached_data: Optional[pd.DataFrame] = None
@@ -208,57 +408,17 @@ class DataReference:
         return self
 
     def _load_data(self) -> pd.DataFrame:
-        """Low-level data loading.  Override in subclasses for custom logic."""
-        source = self.source
+        """Delegate loading to the attached :class:`DataReferenceReader`.
 
-        if source is None:
+        Subclasses (e.g. :class:`~dvue.math_reference.MathDataReference`) may
+        override this method to compute data without a reader.
+        """
+        if self._reader is None:
             raise ValueError(
-                f"{self.__class__.__name__} has no source. "
-                "Override _load_data() or getData() to provide data."
+                f"{self.__class__.__name__} has no DataReferenceReader. "
+                "Supply a reader at construction time or override _load_data()."
             )
-
-        if isinstance(source, pd.DataFrame):
-            return source.copy()
-
-        if isinstance(source, pd.Series):
-            return source.to_frame()
-
-        if callable(source):
-            result = source()
-            if isinstance(result, pd.DataFrame):
-                return result
-            if isinstance(result, pd.Series):
-                return result.to_frame()
-            return pd.DataFrame(result)
-
-        if isinstance(source, (str, Path)):
-            s = str(source)
-            if s.startswith(("http://", "https://")):
-                return self._load_url(s)
-            return self._load_file(s)
-
-        # Last resort: attempt DataFrame construction
-        try:
-            return pd.DataFrame(source)
-        except Exception as exc:
-            raise ValueError(f"Cannot load data from source {source!r}: {exc}") from exc
-
-    def _load_file(self, path: str) -> pd.DataFrame:
-        suffix = Path(path).suffix.lower()
-        loader = self._FILE_LOADERS.get(suffix)
-        if loader is None:
-            raise ValueError(
-                f"Unsupported file extension {suffix!r}. " f"Supported: {list(self._FILE_LOADERS)}"
-            )
-        return loader(path)
-
-    def _load_url(self, url: str) -> pd.DataFrame:
-        lower = url.lower()
-        if lower.endswith(".parquet"):
-            return pd.read_parquet(url)
-        if lower.endswith(".json"):
-            return pd.read_json(url)
-        return pd.read_csv(url)
+        return self._reader.load(**self._attributes)
 
     # ------------------------------------------------------------------
     # Arithmetic operator overloading → auto-creates MathDataReference
@@ -301,7 +461,7 @@ class DataReference:
 
     def __repr__(self) -> str:
         attrs = ", ".join(f"{k}={v!r}" for k, v in self._attributes.items())
-        parts = [f"name={self.name!r}", f"source={self.source!r}"]
+        parts = [f"name={self.name!r}", f"reader={self._reader!r}"]
         if attrs:
             parts.append(attrs)
         return f"{self.__class__.__name__}({', '.join(parts)})"
@@ -347,42 +507,53 @@ def _compose_r(lhs: Any, rhs: DataReference, op: str) -> "MathDataReference":
 
 
 # ---------------------------------------------------------------------------
-# DataCatalogReader (ABC)
+# CatalogBuilder (ABC)
 # ---------------------------------------------------------------------------
 
 
-class DataCatalogReader(abc.ABC):
-    """Abstract base class for objects that construct DataReferences from sources.
+class CatalogBuilder(abc.ABC):
+    """Abstract base class for objects that scan a source and build DataReferences.
 
-    Subclass this to support new source types (databases, cloud object stores,
-    REST APIs, etc.) and register instances with
-    :meth:`DataCatalog.register_reader` or :meth:`DataCatalog.add_reader`.
+    A ``CatalogBuilder`` is responsible for *discovering* what data is
+    available in a source and constructing :class:`DataReference` objects
+    pre-wired with the appropriate :class:`DataReferenceReader`.  It has no
+    role in the actual data loading — that is delegated to the reader.
+
+    Register instances with :meth:`DataCatalog.register_builder` (global) or
+    :meth:`DataCatalog.add_builder` (instance-local).
 
     Subclasses **must** implement:
 
     * :meth:`can_handle(source) -> bool`
-    * :meth:`read(source) -> List[DataReference]`
+    * :meth:`build(source) -> List[DataReference]`
 
     Examples
     --------
-    >>> class MyDBReader(DataCatalogReader):
+    >>> class MyDBBuilder(CatalogBuilder):
     ...     def can_handle(self, source):
     ...         return isinstance(source, MyDBConnection)
-    ...     def read(self, source):
-    ...         tables = source.list_tables()
-    ...         return [DataReference(source.query_table(t), name=t) for t in tables]
+    ...     def build(self, source):
+    ...         reader = MyDBReader(source)   # a DataReferenceReader subclass
+    ...         return [
+    ...             DataReference(reader, name=t, table=t)
+    ...             for t in source.list_tables()
+    ...         ]
     ...
-    >>> DataCatalog.register_reader(MyDBReader())
+    >>> DataCatalog.register_builder(MyDBBuilder())
     """
 
     @abc.abstractmethod
     def can_handle(self, source: Any) -> bool:
-        """Return ``True`` if this reader is able to produce references from *source*."""
+        """Return ``True`` if this builder can construct references from *source*."""
         ...
 
     @abc.abstractmethod
-    def read(self, source: Any) -> List[DataReference]:
-        """Read *source* and return a list of :class:`DataReference` objects.
+    def build(self, source: Any) -> List[DataReference]:
+        """Scan *source* and return a list of :class:`DataReference` objects.
+
+        Each returned reference should be wired to the correct
+        :class:`DataReferenceReader` subclass so that data is not loaded
+        until :meth:`~DataReference.getData` is called.
 
         Parameters
         ----------
@@ -398,27 +569,23 @@ class DataCatalogReader(abc.ABC):
         return f"{self.__class__.__name__}()"
 
 
+# Backward-compatible alias
+DataCatalogReader = CatalogBuilder
+
+
 # ---------------------------------------------------------------------------
 # DataCatalog
 # ---------------------------------------------------------------------------
 
 
-def _sources_equal(a: Any, b: Any) -> bool:
-    """Return ``True`` when two DataReference sources are equal.
+def _readers_equal(a: Any, b: Any) -> bool:
+    """Return ``True`` when two DataReference readers are the same instance.
 
-    Uses identity check first (fast path).  For pandas objects, delegates to
-    the DataFrame/Series `.equals()` method to avoid ambiguous-truth-value
-    errors from element-wise ``==``.  For all other types falls back to a
-    standard ``==`` comparison, guarding against any exception.
+    Identity comparison is the right test: two different reader *instances*
+    that happen to load the same data are still considered distinct (the user
+    may have intentionally replaced one with the other).
     """
-    if a is b:
-        return True
-    if isinstance(a, (pd.DataFrame, pd.Series)) and isinstance(b, (pd.DataFrame, pd.Series)):
-        return a.equals(b)
-    try:
-        return bool(a == b)
-    except Exception:
-        return False
+    return a is b
 
 
 class DataCatalog:
@@ -429,7 +596,7 @@ class DataCatalog:
     * Add / remove / retrieve references by name.
     * Search by metadata attributes with optional schema-map normalisation.
     * Load references in bulk from external sources via registered
-      :class:`DataCatalogReader` objects.
+      :class:`CatalogBuilder` objects.
     * Map heterogeneous raw attribute names to a canonical schema vocabulary.
 
     Parameters
@@ -439,16 +606,17 @@ class DataCatalog:
         *canonical* names exposed in :meth:`search` and :meth:`to_dataframe`.
         Example: ``{"stn_id": "id", "stn_nm": "name"}``.
 
-    Reader registry
-    ---------------
-    :meth:`register_reader` (class method) adds a reader to the **global**
+    Builder registry
+    ----------------
+    :meth:`register_builder` (class method) adds a builder to the **global**
     registry; all new catalog instances inherit a copy of it.
-    :meth:`add_reader` adds a reader to a **single instance** only.
+    :meth:`add_builder` adds a builder to a **single instance** only.
 
     Examples
     --------
     >>> catalog = DataCatalog(schema_map={"stn_id": "id"})
-    >>> catalog.add(DataReference(df, name="temp", variable="temperature", stn_id="S01"))
+    >>> reader = InMemoryDataReferenceReader(df)
+    >>> catalog.add(DataReference(reader, name="temp", variable="temperature", stn_id="S01"))
     >>> catalog.search(variable="temperature")
     [DataReference(name='temp', ...)]
     >>> catalog.search(id="S01")            # canonical name works too
@@ -457,25 +625,31 @@ class DataCatalog:
 
     Bulk loading::
 
-        catalog.add_reader(CSVDirectoryReader()).add_source("/data/csv/")
+        catalog.add_builder(CSVDirectoryBuilder()).add_source("/data/csv/")
     """
 
-    # Global reader registry – shared across all DataCatalog instances
-    _global_readers: ClassVar[List[DataCatalogReader]] = []
+    # Global builder registry – shared across all DataCatalog instances
+    _global_builders: ClassVar[List[CatalogBuilder]] = []
 
     @classmethod
-    def register_reader(cls, reader: DataCatalogReader) -> None:
-        """Register *reader* globally.
+    def register_builder(cls, builder: CatalogBuilder) -> None:
+        """Register *builder* globally.
 
         All :class:`DataCatalog` instances created **after** this call will
-        include the reader in their search order.
+        include the builder in their search order.
 
         Parameters
         ----------
-        reader : DataCatalogReader
+        builder : CatalogBuilder
         """
-        cls._global_readers.append(reader)
-        logger.debug("DataCatalog: globally registered reader %r", reader)
+        cls._global_builders.append(builder)
+        logger.debug("DataCatalog: globally registered builder %r", builder)
+
+    # Backward-compatible alias
+    @classmethod
+    def register_reader(cls, reader: CatalogBuilder) -> None:  # type: ignore[override]
+        """Backward-compatible alias for :meth:`register_builder`."""
+        cls.register_builder(reader)
 
     # ------------------------------------------------------------------
     # Construction
@@ -486,19 +660,29 @@ class DataCatalog:
         self._schema_map: Dict[str, str] = schema_map or {}
         # Start with a snapshot of the global registry; instance-local additions
         # do not affect other catalogs.
-        self._readers: List[DataCatalogReader] = list(DataCatalog._global_readers)
+        self._builders: List[CatalogBuilder] = list(DataCatalog._global_builders)
 
-    def add_reader(self, reader: DataCatalogReader) -> "DataCatalog":
-        """Add *reader* to this catalog instance only (chainable)."""
-        self._readers.append(reader)
+    def add_builder(self, builder: CatalogBuilder) -> "DataCatalog":
+        """Add *builder* to this catalog instance only (chainable)."""
+        self._builders.append(builder)
         return self
 
-    def _find_reader(self, source: Any) -> Optional[DataCatalogReader]:
-        """Return the most-recently-registered reader that can handle *source*."""
-        for reader in reversed(self._readers):
-            if reader.can_handle(source):
-                return reader
+    # Backward-compatible alias
+    def add_reader(self, reader: CatalogBuilder) -> "DataCatalog":  # type: ignore[override]
+        """Backward-compatible alias for :meth:`add_builder`."""
+        return self.add_builder(reader)
+
+    def _find_builder(self, source: Any) -> Optional[CatalogBuilder]:
+        """Return the most-recently-registered builder that can handle *source*."""
+        for builder in reversed(self._builders):
+            if builder.can_handle(source):
+                return builder
         return None
+
+    # Keep old name for any code that calls it directly
+    def _find_reader(self, source: Any) -> Optional[CatalogBuilder]:  # type: ignore[override]
+        """Backward-compatible alias for :meth:`_find_builder`."""
+        return self._find_builder(source)
 
     # ------------------------------------------------------------------
     # CRUD operations
@@ -527,10 +711,10 @@ class DataCatalog:
             raise ValueError("DataReference must have a non-empty name to be added to a catalog.")
         existing = self._references.get(ref.name)
         if existing is not None:
-            if _sources_equal(existing.source, ref.source):
+            if _readers_equal(existing._reader, ref._reader):
                 if existing.attributes == ref.attributes:
                     raise ValueError(
-                        f"A DataReference named {ref.name!r} with the same source and "
+                        f"A DataReference named {ref.name!r} with the same reader and "
                         "identical metadata attributes already exists in the catalog. "
                         "Remove it first, or update its attributes before re-adding."
                     )
@@ -538,7 +722,7 @@ class DataCatalog:
         return self
 
     def add_source(self, source: Any) -> "DataCatalog":
-        """Construct and add references from *source* via a registered reader (chainable).
+        """Construct and add references from *source* via a registered builder (chainable).
 
         Parameters
         ----------
@@ -547,22 +731,22 @@ class DataCatalog:
         Raises
         ------
         ValueError
-            If no registered reader can handle *source*.
+            If no registered builder can handle *source*.
         """
-        reader = self._find_reader(source)
-        if reader is None:
+        builder = self._find_builder(source)
+        if builder is None:
             raise ValueError(
                 f"No registered DataCatalogReader can handle {source!r}. "
-                "Call add_reader() or DataCatalog.register_reader() first."
+                "Call add_builder() or DataCatalog.register_builder() first."
             )
-        refs = reader.read(source)
+        refs = builder.build(source)
         for ref in refs:
             self.add(ref)
         logger.info(
             "DataCatalog: added %d reference(s) from %r via %r",
             len(refs),
             source,
-            reader,
+            builder,
         )
         return self
 
@@ -945,7 +1129,9 @@ class CatalogView(DataCatalog):
 
 from .readers import (  # noqa: E402, F401
     _pattern_to_regex,
+    CSVDirectoryBuilder,
     CSVDirectoryReader,
+    PatternCSVDirectoryBuilder,
     PatternCSVDirectoryReader,
 )
 

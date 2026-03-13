@@ -12,7 +12,7 @@ MathDataReference
     explicit ``variable_map``, a ``search_map`` (criteria-based catalog
     lookup), or direct name lookup in an attached catalog.
 MathDataCatalogReader
-    A :class:`~dvue.catalog.DataCatalogReader` that loads
+    A :class:`~dvue.catalog.CatalogBuilder` that loads
     ``MathDataReference`` specs from a YAML file.
 
 Functions
@@ -36,7 +36,10 @@ import pandas as pd
 # compatibility.  Python's partial-module mechanism ensures DataReference is
 # already present in the catalog module namespace by the time this line runs.
 from .catalog import DataReference  # noqa: E402
-from .catalog import DataCatalogReader  # noqa: E402
+from .catalog import CatalogBuilder  # noqa: E402
+
+# Backward-compatible alias used in some external code
+DataCatalogReader = CatalogBuilder
 
 # ---------------------------------------------------------------------------
 # Safe expression evaluation namespace
@@ -179,7 +182,7 @@ class MathDataReference(DataReference):
         cache: bool = False,
         **attributes: Any,
     ) -> None:
-        super().__init__(source=None, name=name, cache=cache, **attributes)
+        super().__init__(name=name, cache=cache, **attributes)
         # expression stored in _attributes so it appears in to_dataframe()
         self.expression = expression
         self._variable_map: Dict[str, Any] = dict(variable_map or {})
@@ -438,7 +441,7 @@ class MathDataReference(DataReference):
 # ---------------------------------------------------------------------------
 
 
-class MathDataCatalogReader(DataCatalogReader):
+class MathDataCatalogReader(CatalogBuilder):
     """Load :class:`MathDataReference` objects from a YAML file.
 
     Each entry in the YAML file must contain at least ``name`` and
@@ -519,7 +522,7 @@ class MathDataCatalogReader(DataCatalogReader):
             return str(source).lower().endswith((".yaml", ".yml"))
         return False
 
-    def read(self, source: Any) -> list:
+    def build(self, source: Any) -> list:
         """Parse *source* YAML and return a list of :class:`MathDataReference` objects."""
         import yaml  # pyyaml – standard in most data-science environments
 

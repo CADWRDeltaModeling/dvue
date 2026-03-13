@@ -1,6 +1,6 @@
 # %%
 """
-Example: DataCatalogReader implementations, unified catalogs, and MathDataReferences.
+Example: CatalogBuilder implementations, unified catalogs, and MathDataReferences.
 
 This file is the canonical demonstration of how the dvue reader / catalog /
 math-reference system fits together from end to end.  Every section is
@@ -10,10 +10,10 @@ directory so no external files are required.
 Sections
 --------
 [1]  Generate sample time-series CSV data (written to examples/data/)
-[2]  CSVDirectoryReader — load a plain directory of CSV files
-[3]  PatternCSVDirectoryReader — extract structured metadata from filenames
-[4]  Custom DataCatalogReader — wrap an arbitrary in-memory data source
-[5]  Reader registration — global vs instance-scoped
+[2]  CSVDirectoryBuilder — load a plain directory of CSV files
+[3]  PatternCSVDirectoryBuilder — extract structured metadata from filenames
+[4]  Custom CatalogBuilder — wrap an arbitrary in-memory data source
+[5]  Builder registration — global vs instance-scoped
 [6]  Unified catalog — merge independently-sourced catalogs
 [7]  MathDataReference — derived signals over the unified catalog
      [7a] Operator overload: unit conversion (m → ft)
@@ -34,9 +34,14 @@ import pandas as pd
 
 from dvue.catalog import (
     CatalogView,
+    CatalogBuilder,
     DataCatalog,
     DataCatalogReader,
     DataReference,
+    DataReferenceReader,
+    CallableDataReferenceReader,
+    InMemoryDataReferenceReader,
+    FileDataReferenceReader,
     MathDataReference,
     MathDataCatalogReader,
     save_math_refs,
@@ -44,7 +49,7 @@ from dvue.catalog import (
 from dvue.dataui import DataProvider, DataUIManager
 from dvue.dataui import DataUI
 from dvue.actions import MathRefEditorAction
-from dvue.readers import CSVDirectoryReader, PatternCSVDirectoryReader
+from dvue.readers import CSVDirectoryBuilder, CSVDirectoryReader, PatternCSVDirectoryBuilder, PatternCSVDirectoryReader
 
 # %% -- [1] Generate sample CSV data -----------------------------------------
 #
@@ -108,20 +113,25 @@ print(" tide/ :", sorted(p.name for p in TIDE_DIR.iterdir()))
 # approach whenever upstream CSV files have a timestamp index column.
 
 
-class TideGaugeCsvReader(CSVDirectoryReader):
-    """CSVDirectoryReader subclass that parses the first column as a DatetimeIndex."""
+class TideGaugeCsvBuilder(CSVDirectoryBuilder):
+    """CSVDirectoryBuilder subclass that parses the first column as a DatetimeIndex."""
 
-    def read(self, source) -> list[DataReference]:
-        refs = super().read(source)
+    def build(self, source) -> list[DataReference]:
+        refs = super().build(source)
         for ref in refs:
             fp = ref.get_attribute("file_path")
-            ref.source = lambda p=fp: pd.read_csv(p, index_col=0, parse_dates=True)
+            ref._reader = CallableDataReferenceReader(
+                lambda p=fp: pd.read_csv(p, index_col=0, parse_dates=True)
+            )
         return refs
+
+
+TideGaugeCsvReader = TideGaugeCsvBuilder  # backward-compat alias
 
 
 tide_catalog = (
     DataCatalog()
-    .add_reader(TideGaugeCsvReader(source_type="tide_gauge", project="delta_calibration"))
+    .add_builder(TideGaugeCsvBuilder(source_type="tide_gauge", project="delta_calibration"))
     .add_source(str(TIDE_DIR))
 )
 
@@ -150,24 +160,29 @@ print("tide_gauge_Martinez shape:", sample.shape, "| dtype:", sample.dtypes["val
 # from the parsed field values.
 
 
-class HydroPatternReader(PatternCSVDirectoryReader):
-    """PatternCSVDirectoryReader with DatetimeIndex parsing and agency tagging."""
+class HydroPatternBuilder(PatternCSVDirectoryBuilder):
+    """PatternCSVDirectoryBuilder with DatetimeIndex parsing and agency tagging."""
 
     def __init__(self, **default_attrs):
         # No {name} placeholder: full stem becomes the catalog key.
         super().__init__("{variable}__{stationid}__{agency}", **default_attrs)
 
-    def read(self, source) -> list[DataReference]:
-        refs = super().read(source)
+    def build(self, source) -> list[DataReference]:
+        refs = super().build(source)
         for ref in refs:
             fp = ref.get_attribute("file_path")
-            ref.source = lambda p=fp: pd.read_csv(p, index_col=0, parse_dates=True)
+            ref._reader = CallableDataReferenceReader(
+                lambda p=fp: pd.read_csv(p, index_col=0, parse_dates=True)
+            )
         return refs
+
+
+HydroPatternReader = HydroPatternBuilder  # backward-compat alias
 
 
 hydro_catalog = (
     DataCatalog()
-    .add_reader(HydroPatternReader(network="delta"))
+    .add_builder(HydroPatternBuilder(network="delta"))
     .add_source(str(HYDRO_DIR))
 )
 
@@ -185,17 +200,17 @@ usgs_view = CatalogView(hydro_catalog, selection={"agency": "usgs"})
 print("USGS view names :", usgs_view.list_names())
 
 
-# %% -- [4] Custom DataCatalogReader -----------------------------------------
+# %% -- [4] Custom CatalogBuilder -------------------------------------------
 #
-# DataCatalogReader is an abstract base class.  Implement can_handle() and
-# read() to connect any data source to the catalog ecosystem.
+# CatalogBuilder is an abstract base class.  Implement can_handle() and
+# build() to connect any data source to the catalog ecosystem.
 #
 # Here we model a "model output" store — a dict mapping ref names to
 # DataFrames.  In a real application this could be a database connection,
 # REST API client, cloud object store, etc.
 
 
-class ModelOutputReader(DataCatalogReader):
+class ModelOutputBuilder(CatalogBuilder):
     """Wraps a dict of {name: DataFrame} model-output results.
 
     This is a minimal template: replace the source type (dict) and loader
@@ -208,17 +223,20 @@ class ModelOutputReader(DataCatalogReader):
             isinstance(v, pd.DataFrame) for v in source.values()
         )
 
-    def read(self, source: dict) -> list[DataReference]:
+    def build(self, source: dict) -> list[DataReference]:
         refs = []
         for name, df in source.items():
             ref = DataReference(
-                df.copy(),
+                InMemoryDataReferenceReader(df),
                 name=name,
                 source_type="model_output",
                 model="hydrodynamic_v3",
             )
             refs.append(ref)
         return refs
+
+
+ModelOutputReader = ModelOutputBuilder  # backward-compat alias
 
 
 # Sample model output (same time index as the observed data)
@@ -229,7 +247,7 @@ model_outputs = {
 
 model_catalog = (
     DataCatalog()
-    .add_reader(ModelOutputReader())
+    .add_builder(ModelOutputBuilder())
     .add_source(model_outputs)
 )
 
@@ -239,21 +257,21 @@ for ref in model_catalog.list():
     print(f"  {ref.name}  shape={ref.getData().shape}")
 
 
-# %% -- [5] Reader registration — global vs instance-scoped ------------------
+# %% -- [5] Builder registration — global vs instance-scoped ----------------
 #
-# Readers can be registered at two scopes:
+# Builders can be registered at two scopes:
 #
-#   DataCatalog.register_reader(reader)   ← global: all new catalogues inherit it
-#   catalog.add_reader(reader)            ← instance: only this catalog is affected
+#   DataCatalog.register_builder(builder)   ← global: all new catalogues inherit it
+#   catalog.add_builder(builder)            ← instance: only this catalog is affected
 #
 # The global registry is useful for application-wide drivers (e.g. a
-# DatastoreCatalogReader that handles any StationDatastore).  Instance
-# registration is better when a reader is specific to one data source.
+# DatastoreCatalogBuilder that handles any StationDatastore).  Instance
+# registration is better when a builder is specific to one data source.
 
-# Register ModelOutputReader globally so any new DataCatalog can accept a dict:
-DataCatalog.register_reader(ModelOutputReader())
+# Register ModelOutputBuilder globally so any new DataCatalog can accept a dict:
+DataCatalog.register_builder(ModelOutputBuilder())
 
-# Now an empty catalog can load model outputs without an explicit add_reader():
+# Now an empty catalog can load model outputs without an explicit add_builder():
 quick_catalog = DataCatalog().add_source(model_outputs)
 print("\n── Global registry demo ──")
 print(quick_catalog)  # DataCatalog(2 references) – reader was found globally
@@ -291,10 +309,10 @@ for name in sorted(unified.list_names()):
 #
 unified_b = (
     DataCatalog()
-    .add_reader(HydroPatternReader(network="delta"))   # handles str/Path dirs
-    .add_reader(ModelOutputReader())                   # handles dicts
-    .add_source(str(HYDRO_DIR))                        # → HydroPatternReader
-    .add_source(model_outputs)                         # → ModelOutputReader
+    .add_builder(HydroPatternBuilder(network="delta"))   # handles str/Path dirs
+    .add_builder(ModelOutputBuilder())                   # handles dicts
+    .add_source(str(HYDRO_DIR))                          # → HydroPatternBuilder
+    .add_source(model_outputs)                           # → ModelOutputBuilder
 )
 # Tide gauge refs (same source type as hydro) are merged from their own catalog:
 for ref in tide_catalog.list():
@@ -500,7 +518,7 @@ fresh_catalog = DataCatalog()
 for ref in unified.list():
     if not isinstance(ref, MathDataReference):
         fresh_catalog.add(ref)
-fresh_catalog.add_reader(MathDataCatalogReader(parent_catalog=fresh_catalog))
+fresh_catalog.add_builder(MathDataCatalogReader(parent_catalog=fresh_catalog))
 fresh_catalog.add_source(str(MATH_REFS_FILE))
 print(f"Reloaded catalog: {fresh_catalog}")
 math_in_fresh = [r for r in fresh_catalog.list() if isinstance(r, MathDataReference)]

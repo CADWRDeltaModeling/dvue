@@ -14,9 +14,14 @@ from .actions import (
 from .math_ref_editor import MathRefEditorAction
 from .fullscreen import FullScreen
 from .catalog import (
+    DataReferenceReader,
+    InMemoryDataReferenceReader,
+    CallableDataReferenceReader,
+    FileDataReferenceReader,
     DataReference,
     CatalogView,
-    DataCatalogReader,
+    CatalogBuilder,
+    DataCatalogReader,  # backward-compat alias for CatalogBuilder
     DataCatalog,
 )
 from .math_reference import (
@@ -25,8 +30,10 @@ from .math_reference import (
     save_math_refs,
 )
 from .readers import (
-    CSVDirectoryReader,
-    PatternCSVDirectoryReader,
+    CSVDirectoryBuilder,
+    PatternCSVDirectoryBuilder,
+    CSVDirectoryReader,          # backward-compat alias
+    PatternCSVDirectoryReader,   # backward-compat alias
 )
 
 __all__ = [
@@ -39,16 +46,24 @@ __all__ = [
     "DownloadDataCatalogAction",
     "MathRefEditorAction",
     "FullScreen",
+    # DataReferenceReader hierarchy
+    "DataReferenceReader",
+    "InMemoryDataReferenceReader",
+    "CallableDataReferenceReader",
+    "FileDataReferenceReader",
     # Catalog core
     "DataReference",
     "CatalogView",
     "MathDataReference",
-    "DataCatalogReader",
+    "CatalogBuilder",
+    "DataCatalogReader",   # backward-compat alias for CatalogBuilder
     "DataCatalog",
     # Math ref persistence
     "MathDataCatalogReader",
     "save_math_refs",
-    # Sample reader implementations (dvue.readers)
-    "CSVDirectoryReader",
-    "PatternCSVDirectoryReader",
+    # Builder implementations (dvue.readers)
+    "CSVDirectoryBuilder",
+    "PatternCSVDirectoryBuilder",
+    "CSVDirectoryReader",          # backward-compat alias
+    "PatternCSVDirectoryReader",   # backward-compat alias
 ]

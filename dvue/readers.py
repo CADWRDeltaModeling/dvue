@@ -1,56 +1,58 @@
-"""Sample DataCatalogReader implementations for dvue.
+"""CatalogBuilder implementations for dvue.
 
-This module provides two concrete :class:`~dvue.catalog.DataCatalogReader`
+This module provides two concrete :class:`~dvue.catalog.CatalogBuilder`
 implementations that cover the most common CSV file source patterns:
 
-``CSVDirectoryReader``
-    Reads every ``*.csv`` file from a directory (or a single CSV file).
-    Each file becomes a :class:`~dvue.catalog.DataReference` named after
-    the file stem.
+``CSVDirectoryBuilder``
+    Scans every ``*.csv`` file from a directory (or a single CSV file).
+    Each file becomes a :class:`~dvue.catalog.DataReference` backed by a
+    :class:`~dvue.catalog.FileDataReferenceReader` and named after the file
+    stem.
 
-``PatternCSVDirectoryReader``
-    Reads CSV files from a directory and extracts structured metadata
+``PatternCSVDirectoryBuilder``
+    Scans CSV files from a directory and extracts structured metadata
     (e.g. variable, station ID, agency) from each filename via ``{field}``
     placeholder patterns.
 
-These implementations serve both as ready-to-use readers and as reference
-examples for writing custom readers.
+Backward-compatible aliases ``CSVDirectoryReader`` and
+``PatternCSVDirectoryReader`` are provided at the bottom of the module.
 
-See Also
---------
-``examples/ex_readers.py``  — fully self-contained runnable demonstration of
-CSVDirectoryReader, PatternCSVDirectoryReader, a custom InMemoryDataReader,
-unified catalogs from multiple readers, and MathDataReference expressions
-over the unified catalog.
-
-Writing a custom reader
------------------------
-Subclass :class:`~dvue.catalog.DataCatalogReader` and implement the two
-abstract methods, then register the reader with the catalog:
+Writing a custom CatalogBuilder
+-------------------------------
+Subclass :class:`~dvue.catalog.CatalogBuilder` and implement the two
+abstract methods, then register the builder with the catalog:
 
 .. code-block:: python
 
-    from dvue.catalog import DataCatalog, DataCatalogReader, DataReference
+    from dvue.catalog import (
+        DataCatalog, CatalogBuilder, DataReferenceReader, DataReference
+    )
 
-    class MyDatabaseReader(DataCatalogReader):
+    class MyDBDataReferenceReader(DataReferenceReader):
+        '''Load a table from a database connection.'''
+        def __init__(self, connection):
+            self._conn = connection
+
+        def load(self, **attributes):
+            return self._conn.query_table(attributes["table"])
+
+    class MyDatabaseBuilder(CatalogBuilder):
         def can_handle(self, source):
             return isinstance(source, MyDBConnection)
 
-        def read(self, source):
+        def build(self, source):
+            reader = MyDBDataReferenceReader(source)  # one shared reader
             return [
-                DataReference(
-                    lambda t=table: source.query_table(t),
-                    name=table,
-                    database=source.name,
-                )
+                DataReference(reader, name=table, table=table)
                 for table in source.list_tables()
             ]
+            # No data loaded yet — getData() triggers the first query.
 
     # Register globally (affects all new DataCatalog instances)
-    DataCatalog.register_reader(MyDatabaseReader())
+    DataCatalog.register_builder(MyDatabaseBuilder())
 
     # Or register on a single catalog instance only
-    catalog = DataCatalog().add_reader(MyDatabaseReader())
+    catalog = DataCatalog().add_builder(MyDatabaseBuilder())
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .catalog import DataCatalogReader, DataReference
+from .catalog import CatalogBuilder, DataReference, FileDataReferenceReader
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +119,17 @@ def _pattern_to_regex(pattern: str) -> re.Pattern:
 # ---------------------------------------------------------------------------
 
 
-class CSVDirectoryReader(DataCatalogReader):
-    """Read CSV files from a directory (or a single CSV file).
+class CSVDirectoryBuilder(CatalogBuilder):
+    """Scan CSV files from a directory (or a single CSV file).
 
-    Each CSV file becomes a :class:`~dvue.catalog.DataReference` named after
-    the file stem (filename without extension).  Additional keyword arguments
+    Each CSV file becomes a :class:`~dvue.catalog.DataReference` backed by a
+    shared :class:`~dvue.catalog.FileDataReferenceReader` and named after the
+    file stem (filename without extension).  Additional keyword arguments
     supplied at construction time are stored as metadata on every created
     reference.
+
+    No CSV data is loaded until :meth:`~dvue.catalog.DataReference.getData`
+    is called on an individual reference.
 
     Parameters
     ----------
@@ -132,30 +138,13 @@ class CSVDirectoryReader(DataCatalogReader):
 
     Examples
     --------
-    >>> reader = CSVDirectoryReader(project="climate", source_type="csv")
-    >>> catalog = DataCatalog().add_reader(reader).add_source("/data/climate/")
-
-    Customising the reader
-    ----------------------
-    To add post-processing (e.g. date-parsing, unit conversion) override
-    :meth:`read` in a subclass:
-
-    .. code-block:: python
-
-        class ParsedCSVReader(CSVDirectoryReader):
-            def read(self, source):
-                refs = super().read(source)
-                for ref in refs:
-                    # Wrap the original source with a parsing step
-                    original_source = ref.source
-                    ref.source = lambda p=original_source: (
-                        pd.read_csv(p, parse_dates=["timestamp"])
-                    )
-                return refs
+    >>> builder = CSVDirectoryBuilder(project="climate", source_type="csv")
+    >>> catalog = DataCatalog().add_builder(builder).add_source("/data/climate/")
     """
 
     def __init__(self, **default_attributes: Any) -> None:
         self._default_attributes = default_attributes
+        self._file_reader = FileDataReferenceReader()
 
     def can_handle(self, source: Any) -> bool:
         """Return ``True`` for an existing directory or ``.csv`` file path."""
@@ -164,13 +153,13 @@ class CSVDirectoryReader(DataCatalogReader):
         p = Path(source)
         return p.is_dir() or p.suffix.lower() == ".csv"
 
-    def read(self, source: Any) -> List[DataReference]:
-        """Read *source* and return one :class:`~dvue.catalog.DataReference` per CSV file.
+    def build(self, source: Any) -> List[DataReference]:
+        """Scan *source* and return one :class:`~dvue.catalog.DataReference` per CSV file.
 
         Parameters
         ----------
         source : str or Path
-            Directory (all ``*.csv`` files are read) or a single CSV file.
+            Directory (all ``*.csv`` files are scanned) or a single CSV file.
 
         Returns
         -------
@@ -181,14 +170,14 @@ class CSVDirectoryReader(DataCatalogReader):
         refs = []
         for f in files:
             ref = DataReference(
-                source=str(f),
+                self._file_reader,
                 name=f.stem,
                 file_path=str(f),
                 format="csv",
                 **self._default_attributes,
             )
             refs.append(ref)
-        logger.debug("CSVDirectoryReader: constructed %d references from %s", len(refs), source)
+        logger.debug("CSVDirectoryBuilder: constructed %d references from %s", len(refs), source)
         return refs
 
 
@@ -197,8 +186,8 @@ class CSVDirectoryReader(DataCatalogReader):
 # ---------------------------------------------------------------------------
 
 
-class PatternCSVDirectoryReader(DataCatalogReader):
-    """Read CSV files from a directory and extract metadata from each filename.
+class PatternCSVDirectoryBuilder(CatalogBuilder):
+    """Scan CSV files from a directory and extract metadata from each filename.
 
     Filenames are matched against a *pattern* that uses ``{field}``
     placeholders.  Each matched field is stored as a metadata attribute on
@@ -206,6 +195,9 @@ class PatternCSVDirectoryReader(DataCatalogReader):
     ``{name}`` becomes the reference name; if the pattern contains no
     ``{name}`` placeholder the full file stem is used instead.  Files whose
     names do not match the pattern are skipped with a ``WARNING`` log message.
+
+    No CSV data is loaded until :meth:`~dvue.catalog.DataReference.getData`
+    is called on an individual reference.
 
     Parameters
     ----------
@@ -240,29 +232,10 @@ class PatternCSVDirectoryReader(DataCatalogReader):
 
     Examples
     --------
-    >>> reader = PatternCSVDirectoryReader("{name}__{stationid}__{source}")
-    >>> catalog = DataCatalog().add_reader(reader).add_source("/data/hydro/")
+    >>> builder = PatternCSVDirectoryBuilder("{name}__{stationid}__{source}")
+    >>> catalog = DataCatalog().add_builder(builder).add_source("/data/hydro/")
     >>> catalog.search(stationid="STA001")
     >>> catalog.search(source="USGS")
-
-    Subclassing template
-    --------------------
-    .. code-block:: python
-
-        class MyAgencyReader(PatternCSVDirectoryReader):
-            \"\"\"Reader for files named like AGENCY__SITEID__PARAMETER.csv.\"\"\"
-
-            def __init__(self, **default_attrs):
-                super().__init__("{source}__{stationid}__{name}", **default_attrs)
-
-            def read(self, source):
-                refs = super().read(source)
-                # Apply any post-construction transformations here
-                for ref in refs:
-                    agency = ref.get_attribute("source")
-                    ref.set_attribute("agency_url",
-                                      f"https://example.com/{agency}")
-                return refs
     """
 
     def __init__(
@@ -282,6 +255,7 @@ class PatternCSVDirectoryReader(DataCatalogReader):
         self._fields: List[str] = fields
         self._glob = glob
         self._default_attributes = default_attributes
+        self._file_reader = FileDataReferenceReader()
 
     @property
     def pattern(self) -> str:
@@ -299,7 +273,7 @@ class PatternCSVDirectoryReader(DataCatalogReader):
             return False
         return Path(source).is_dir()
 
-    def read(self, source: Any) -> List[DataReference]:
+    def build(self, source: Any) -> List[DataReference]:
         """Scan *source* directory and return one :class:`~dvue.catalog.DataReference`
         per file whose name matches :attr:`pattern`.
 
@@ -323,7 +297,7 @@ class PatternCSVDirectoryReader(DataCatalogReader):
             m = self._regex.match(stem)
             if m is None:
                 logger.warning(
-                    "PatternCSVDirectoryReader: %r does not match pattern %r – skipping.",
+                    "PatternCSVDirectoryBuilder: %r does not match pattern %r – skipping.",
                     f.name,
                     self._pattern,
                 )
@@ -340,20 +314,18 @@ class PatternCSVDirectoryReader(DataCatalogReader):
             attrs.update(self._default_attributes)
             attrs.update(parsed)  # fields from filename (stationid, source, …)
 
-            # DataReference reserves 'source', 'name', and 'cache' as constructor
-            # parameters.  If the filename pattern produces a field with the same
-            # name (e.g. '{source}' in the pattern), passing it via **attrs would
-            # raise TypeError.  Extract those keys and apply them afterwards.
-            _CONSTRUCTOR_PARAMS = {"source", "name", "cache"}
+            # 'name' and 'cache' are DataReference constructor params; if a
+            # filename field collides with them, store them as attributes instead.
+            _CONSTRUCTOR_PARAMS = {"name", "cache"}
             colliding = {k: attrs.pop(k) for k in list(attrs) if k in _CONSTRUCTOR_PARAMS}
 
-            ref = DataReference(source=str(f), name=ref_name, **attrs)
+            ref = DataReference(self._file_reader, name=ref_name, **attrs)
             for k, v in colliding.items():
                 ref.set_attribute(k, v)
             refs.append(ref)
 
         logger.info(
-            "PatternCSVDirectoryReader: %d reference(s) constructed, %d file(s) skipped in %s",
+            "PatternCSVDirectoryBuilder: %d reference(s) constructed, %d file(s) skipped in %s",
             len(refs),
             skipped,
             source,
@@ -361,4 +333,15 @@ class PatternCSVDirectoryReader(DataCatalogReader):
         return refs
 
     def __repr__(self) -> str:
-        return f"PatternCSVDirectoryReader(pattern={self._pattern!r})"
+        return f"PatternCSVDirectoryBuilder(pattern={self._pattern!r})"
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases
+# ---------------------------------------------------------------------------
+
+#: Alias for :class:`CSVDirectoryBuilder` (backward compatibility).
+CSVDirectoryReader = CSVDirectoryBuilder
+
+#: Alias for :class:`PatternCSVDirectoryBuilder` (backward compatibility).
+PatternCSVDirectoryReader = PatternCSVDirectoryBuilder

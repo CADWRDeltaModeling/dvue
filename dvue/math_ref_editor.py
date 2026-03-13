@@ -483,7 +483,7 @@ class MathRefEditorAction:
                 return
             try:
                 reader = MathDataCatalogReader(parent_catalog=catalog)
-                refs = reader.read(path)
+                refs = reader.build(path)
                 added = 0
                 for r in refs:
                     # Update semantics: remove any existing ref with the same
