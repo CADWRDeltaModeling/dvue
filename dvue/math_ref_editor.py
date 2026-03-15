@@ -5,8 +5,9 @@ inline editor inside the DataUI display panel.  Users can:
 
 * Create a new :class:`~dvue.math_reference.MathDataReference` from scratch.
 * Edit an existing one selected from the catalog table.
-* Save the resulting math references to a YAML file for later reuse.
-* Load math references from a YAML file directly into the live catalog.
+* Download all current math refs to a YAML file via the **Download YAML** button.
+* Upload a YAML file from the client to merge refs into the live catalog via
+  the **Upload YAML** button.
 
 The editor supports:
 
@@ -41,12 +42,11 @@ class MathRefEditorAction:
     2. On **Save**, creates or updates a
        :class:`~dvue.math_reference.MathDataReference` in the manager's
        catalog and refreshes the table.
-    3. On **Save to YAML**, writes all current math refs in the catalog to a
-       YAML file via :func:`~dvue.math_reference.save_math_refs`.
-    4. On **Load from YAML**, reads a YAML file via
-       :class:`~dvue.math_reference.MathDataCatalogReader` and merges the
-       resulting :class:`~dvue.math_reference.MathDataReference` objects into
-       the live catalog, then refreshes the table.
+    3. On **Download YAML**, serialises all current math refs in the catalog to
+       a YAML file that is sent to the client browser for download.
+    4. On **Upload YAML**, reads a YAML file uploaded from the client and merges
+       the resulting :class:`~dvue.math_reference.MathDataReference` objects
+       into the live catalog, then refreshes the table.
 
     The catalog is retrieved from ``dataui._dataui_manager.data_catalog``.
 
@@ -85,16 +85,16 @@ class MathRefEditorAction:
     # Construction
     # ------------------------------------------------------------------
 
-    def __init__(self, default_yaml_path: str = "") -> None:
+    def __init__(self, default_yaml_filename: str = "math_refs.yaml") -> None:
         """Create the action.
 
         Parameters
         ----------
-        default_yaml_path : str, optional
-            Pre-fills the YAML path inputs in the editor so the user does not
-            have to type the path manually.
+        default_yaml_filename : str, optional
+            Suggested filename used when the browser downloads the YAML file.
+            Defaults to ``"math_refs.yaml"``.
         """
-        self._default_yaml_path = default_yaml_path
+        self._default_yaml_filename = default_yaml_filename
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -159,7 +159,7 @@ class MathRefEditorAction:
     # ------------------------------------------------------------------
 
     def callback(self, event: Any, dataui: Any) -> None:  # noqa: C901
-        from .math_reference import MathDataReference, MathDataCatalogReader, save_math_refs
+        from .math_reference import MathDataReference, MathDataCatalogReader
 
         manager = dataui._dataui_manager
         catalog = getattr(manager, "data_catalog", None)
@@ -356,32 +356,86 @@ class MathRefEditorAction:
         status_md = pn.pane.Markdown("", sizing_mode="stretch_width")
         save_btn = pn.widgets.Button(name="Save", button_type="success", icon="device-floppy")
         cancel_btn = pn.widgets.Button(name="Cancel", button_type="default", icon="x")
-        # Single shared path input used by both Save and Load actions.
-        yaml_path_input = pn.widgets.TextInput(
-            name="YAML file path",
-            value=self._default_yaml_path,
-            placeholder="e.g. math_refs.yaml",
+
+        # ── Client-side YAML upload ───────────────────────────────────────────
+        upload_widget = pn.widgets.FileInput(
+            accept=".yaml,.yml",
+            name="Upload YAML",
             sizing_mode="stretch_width",
         )
-        save_yaml_btn = pn.widgets.Button(
-            name="Save to YAML",
-            button_type="primary",
-            icon="file-export",
-            width=150,
-        )
-        load_from_yaml_btn = pn.widgets.Button(
-            name="Load from YAML",
+        upload_btn = pn.widgets.Button(
+            name="Load Uploaded YAML",
             button_type="primary",
             icon="file-import",
-            width=150,
+            width=180,
+        )
+
+        # ── Client-side YAML download ─────────────────────────────────────────
+        def _yaml_download_callback():
+            """Called by FileDownload; returns an in-memory YAML byte stream."""
+            from io import BytesIO
+            import yaml as _yaml
+            from .math_reference import MathDataReference
+
+            records = []
+            for ref in catalog.list():
+                if not isinstance(ref, MathDataReference):
+                    continue
+                entry = {"name": ref.name, "expression": ref.expression}
+                sm = getattr(ref, "_search_map", None)
+                req = getattr(ref, "_search_require_single", {})
+                if sm:
+                    entry["search_map"] = {
+                        var: {
+                            "criteria": crit,
+                            "require_single": req.get(var, True),
+                        }
+                        for var, crit in sm.items()
+                    }
+                extra = {
+                    k: v
+                    for k, v in ref.attributes.items()
+                    if k != "expression"
+                    and isinstance(v, (str, int, float, bool, type(None)))
+                }
+                if extra:
+                    entry["attributes"] = extra
+                records.append(entry)
+            buf = BytesIO()
+            buf.write(_yaml.dump(records, default_flow_style=False, allow_unicode=True).encode())
+            buf.seek(0)
+            return buf
+
+        download_yaml_btn = pn.widgets.FileDownload(
+            label="Download YAML",
+            callback=_yaml_download_callback,
+            filename=self._default_yaml_filename,
+            button_type="primary",
+            icon="file-export",
+            embed=False,
+        )
+
+        yaml_section = pn.Column(
+            pn.pane.Markdown("#### YAML — Upload / Download"),
+            pn.Row(
+                pn.Column(
+                    pn.pane.Markdown("**Upload** a YAML file from your computer:"),
+                    upload_widget,
+                    upload_btn,
+                ),
+                pn.Column(
+                    pn.pane.Markdown("**Download** all math refs as YAML:"),
+                    download_yaml_btn,
+                ),
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_width",
         )
 
         editor_panel = pn.Column(
             title_md,
             pn.layout.Divider(),
-            pn.pane.Markdown("#### YAML file"),
-            yaml_path_input,
-            pn.Row(load_from_yaml_btn, save_yaml_btn),
+            yaml_section,
             pn.layout.Divider(),
             help_md,
             name_input,
@@ -464,30 +518,45 @@ class MathRefEditorAction:
                 logger.exception("MathRefEditorAction save error")
                 status_md.object = f"❌ **Error:** {exc}"
 
-        def _on_save_yaml(event: Any) -> None:
-            path = yaml_path_input.value.strip()
-            if not path:
-                status_md.object = "⚠️ **YAML path is required.**"
+        def _on_upload_yaml(event: Any) -> None:
+            if upload_widget.value is None:
+                status_md.object = "⚠️ **No file selected. Please choose a YAML file to upload.**"
                 return
             try:
-                save_math_refs(catalog, path)
-                status_md.object = f"✅ **Saved** math refs to `{path}`."
-            except Exception as exc:
-                logger.exception("MathRefEditorAction YAML save error")
-                status_md.object = f"❌ **YAML save error:** {exc}"
+                import yaml as _yaml
+                from .math_reference import MathDataReference
 
-        def _on_load_yaml(event: Any) -> None:
-            path = yaml_path_input.value.strip()
-            if not path:
-                status_md.object = "⚠️ **YAML path is required.**"
-                return
-            try:
-                reader = MathDataCatalogReader(parent_catalog=catalog)
-                refs = reader.build(path)
+                raw = upload_widget.value  # bytes
+                data = _yaml.safe_load(raw)
+                if isinstance(data, dict):
+                    data = data.get("math_refs", [])
+                # Build refs from the parsed list — same logic as
+                # MathDataCatalogReader.build() but without re-reading a file.
+                refs = []
+                for entry in data or []:
+                    entry = dict(entry)
+                    name = entry.pop("name")
+                    expression = entry.pop("expression")
+                    sm_raw = entry.pop("search_map", None)
+                    req: Dict[str, bool] = {}
+                    if sm_raw:
+                        cleaned = {}
+                        for var, crit in sm_raw.items():
+                            crit = dict(crit)
+                            req[var] = bool(crit.pop("_require_single", True))
+                            cleaned[var] = crit
+                        sm_raw = cleaned
+                    ref = MathDataReference(
+                        expression=expression,
+                        name=name,
+                        search_map=sm_raw if sm_raw else None,
+                        search_require_single=req if req else None,
+                        **entry,
+                    )
+                    ref.set_catalog(catalog)
+                    refs.append(ref)
                 added = 0
                 for r in refs:
-                    # Update semantics: remove any existing ref with the same
-                    # name before re-adding so callers get the latest version.
                     try:
                         catalog.remove(r.name)
                     except KeyError:
@@ -499,24 +568,24 @@ class MathRefEditorAction:
                         dataui._dfcat = manager.get_data_catalog()
                         new_cols = manager.get_table_columns()
                         dataui.display_table.value = dataui._dfcat[new_cols]
-                        # Refresh widths and header filters so the expression
-                        # column appears correctly after a first-time load.
                         dataui.display_table.widths = manager.get_table_column_width_map()
                         dataui.display_table.header_filters = manager.get_table_filters()
                     except Exception as _te:
-                        logger.warning("Could not refresh table after load: %s", _te)
-                status_md.object = f"✅ **Loaded** {added} math ref(s) from `{path}`."
+                        logger.warning("Could not refresh table after upload: %s", _te)
+                fname = getattr(upload_widget, "filename", "uploaded file")
+                status_md.object = f"✅ **Uploaded** {added} math ref(s) from `{fname}`."
             except Exception as exc:
-                logger.exception("MathRefEditorAction YAML load error")
-                status_md.object = f"❌ **YAML load error:** {exc}"
+                logger.exception("MathRefEditorAction YAML upload error")
+                status_md.object = f"❌ **YAML upload error:** {exc}"
+
+        upload_btn.on_click(_on_upload_yaml)
 
         def _on_cancel(event: Any) -> None:
             editor_panel.objects = [pn.pane.Markdown("*Editor closed.*")]
 
         save_btn.on_click(_on_save)
         cancel_btn.on_click(_on_cancel)
-        save_yaml_btn.on_click(_on_save_yaml)
-        load_from_yaml_btn.on_click(_on_load_yaml)
+        upload_btn.on_click(_on_upload_yaml)
 
         # Show editor as a new tab in the display panel.
         if len(dataui._display_panel.objects) > 0 and isinstance(
