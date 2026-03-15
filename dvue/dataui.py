@@ -390,6 +390,15 @@ class DataUIManager(DataProvider):
         """
         raise NotImplementedError("Subclasses must implement get_name_to_marker().")
 
+    def get_map_option_widgets(self):
+        """Return extra Panel widgets to append to the Map Options sidebar tab.
+
+        Override in a subclass to add parameter-type filters, year-range
+        sliders, or any other map-side controls.  Return ``None`` (default)
+        to add nothing.
+        """
+        return None
+
     def get_data_actions(self) -> list:
         """Return a list of default data actions. Override to customize available actions."""
         plot_action = PlotAction()
@@ -548,11 +557,21 @@ class DataUI(param.Parameterized):
             logger.error(f"Error building map of features: {e}")
             self._map_features = gv.Points(dfmap, crs=crs)
         if show_color_by:
-            self._map_features = self._map_features.opts(
-                color=dim(color_by).categorize(
-                    self._dataui_manager.get_name_to_color(), default="blue"
+            name_to_color = self._dataui_manager.get_name_to_color()
+            # get_name_to_color() returns {column_name: colormap_or_dict}.
+            # Extract the entry for the active column so categorize() receives
+            # a {value: color} dict, or fall back to a named cmap string.
+            column_color = name_to_color.get(color_by, "Category10") if isinstance(name_to_color, dict) else name_to_color
+            if isinstance(column_color, dict):
+                # explicit {value: color} mapping
+                self._map_features = self._map_features.opts(
+                    color=dim(color_by).categorize(column_color, default="blue")
                 )
-            )
+            else:
+                # named colormap string (e.g. "Category10", "Viridis")
+                self._map_features = self._map_features.opts(
+                    color=dim(color_by), cmap=column_color
+                )
         else:
             self._map_features = self._map_features.opts(color="blue")
         if isinstance(self._map_features, gv.Points):
@@ -645,10 +664,12 @@ class DataUI(param.Parameterized):
         )
         if isinstance(self._map_features, gv.Points):
             if show_marker_by:
+                name_to_marker = self._dataui_manager.get_name_to_marker()
+                # get_name_to_marker() returns {column_name: {value: marker}}.
+                # Extract the per-column dict before passing to categorize().
+                column_marker = name_to_marker.get(marker_by, {}) if isinstance(name_to_marker, dict) else {}
                 self._map_features = self._map_features.opts(
-                    marker=dim(marker_by).categorize(
-                        self._dataui_manager.get_name_to_marker(), default="circle"
-                    )
+                    marker=dim(marker_by).categorize(column_marker, default="circle")
                 )
             else:
                 self._map_features = self._map_features.opts(marker="circle")
@@ -999,7 +1020,8 @@ class DataUI(param.Parameterized):
             self.param.use_regex_filter,
         )
         if hasattr(self, "_map_features"):
-            map_options = pn.WidgetBox(
+            _extra_map_widgets = self._dataui_manager.get_map_option_widgets()
+            _map_option_items = [
                 "Map Options",
                 self.param.show_map_colors,
                 self.param.map_color_category,
@@ -1009,7 +1031,10 @@ class DataUI(param.Parameterized):
                 self.param.map_non_selection_alpha,
                 self.param.map_point_size,
                 self.param.query,
-            )
+            ]
+            if _extra_map_widgets is not None:
+                _map_option_items.append(_extra_map_widgets)
+            map_options = pn.WidgetBox(*_map_option_items)
             # Use HoloViews streams.Params instead of pn.bind so that ALL param
             # changes (including color/marker category) are routed through
             # HoloViews' own rendering pipeline.  pn.bind only triggers a Panel
@@ -1078,6 +1103,8 @@ class DataUI(param.Parameterized):
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
                 self._tmap * self._map_function,
                 min_width=450,
+                min_height=600,
+                sizing_mode="stretch_both",
             )
 
             sidebar_view = pn.Column(

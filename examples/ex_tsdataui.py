@@ -47,7 +47,7 @@ from shapely.geometry import Point
 
 from dvue import dataui, tsdataui
 from dvue.catalog import DataCatalog, DataReference, MathDataReference, InMemoryDataReferenceReader
-from dvue import MathDataCatalogReader, MathRefEditorAction
+from dvue import MathDataCatalogReader
 
 # %% -- [2] Station metadata and synthetic data generator ---------------------
 STATIONS = [
@@ -325,32 +325,15 @@ print(f"Catalog: {catalog_from_yaml} (no math refs loaded yet)")
 
 # %% -- [6] Launch the UI backed by the YAML catalog --------------------------
 #
-# MathRefEditorAction exposes three YAML operations in the editor panel:
-#   * "Save to YAML"   -- persist all current math refs in the catalog.
-#   * "Load from YAML" -- merge refs from a YAML file into the live catalog
-#     and refresh the table, without restarting the kernel.
+# MathRefEditorAction is included by default in TimeSeriesDataUIManager.
+# Use the Math Ref button > "Load from YAML" to populate the catalog from
+# either YAML file at runtime without restarting the kernel.
 #
-# The manager is wired to catalog_from_yaml so all math refs originate from
-# the YAML file, not from in-memory MathDataReference construction.
+# To hide the button for a specific manager, set:
+#   exmgr.show_math_ref_editor = False
+#   -- or pass show_math_ref_editor=False to the constructor.
 
-
-class EditableExampleTSDataUIManager(ExampleTimeSeriesDataUIManager):
-    """Extends the example manager with a Math Ref editor action."""
-
-    def get_data_actions(self):
-        actions = super().get_data_actions()
-        math_action = MathRefEditorAction(default_yaml_path=str(MATH_REFS_SEARCH_MAP_FILE))
-        actions.append(dict(
-            name="Math Ref",
-            button_type="warning",
-            icon="math-function",
-            action_type="display",
-            callback=math_action.callback,
-        ))
-        return actions
-
-
-exmgr_editable = EditableExampleTSDataUIManager(catalog_from_yaml)
+exmgr_editable = ExampleTimeSeriesDataUIManager(catalog_from_yaml)
 ui = dataui.DataUI(exmgr_editable, station_id_column="station_id")
 ui.create_view(
     title="Example Time Series Data UI (DataCatalog + MathDataReference from YAML)"

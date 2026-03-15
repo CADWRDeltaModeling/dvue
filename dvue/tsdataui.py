@@ -115,6 +115,10 @@ class TimeSeriesDataUIManager(DataUIManager):
     color_cycle_column = param.Selector(
         default=None, objects=[], doc="Column to use for color cycle"
     )
+    show_math_ref_editor = param.Boolean(
+        default=True,
+        doc="Show the Math Ref editor button in the action bar. Set to False to hide it.",
+    )
 
     def __init__(self, filename_column="FILE", file_number_column_name="FILE_NUM", **params):
         # modify catalog if filename_column is present to include file number if multiple files are present
@@ -144,7 +148,25 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.param.plot_group_by_column.objects = columns_with_blank
 
     def get_data_catalog(self):
+        # Delegate to DataProvider when a data_catalog property is set.
+        if self.data_catalog is not None:
+            return super().get_data_catalog()
         raise NotImplementedError("Method get_data_catalog not implemented")
+
+    def get_data_actions(self):
+        """Return default actions, appending MathRefEditorAction when show_math_ref_editor is True."""
+        actions = super().get_data_actions()
+        if self.show_math_ref_editor:
+            from .math_ref_editor import MathRefEditorAction
+            math_action = MathRefEditorAction()
+            actions.append(dict(
+                name="Math Ref",
+                button_type="warning",
+                icon="math-function",
+                action_type="display",
+                callback=math_action.callback,
+            ))
+        return actions
 
     def get_time_range(self, dfcat):
         raise NotImplementedError("Method get_time_range not implemented")
@@ -359,7 +381,12 @@ class TimeSeriesDataUIManager(DataUIManager):
         if self.fill_gap > 0:
             data = data.interpolate(limit=self.fill_gap)
         if self.do_tidal_filter and _VTOOLS_AVAILABLE and not self.is_irregular(r):
-            data = cosine_lanczos(data, "40h")
+            # Interpolate internal NaN gaps before filtering so the cosine-Lanczos
+            # kernel does not propagate NaN across sparse or gappy data (e.g. event
+            # sensors resampled to a regular grid).  Edge NaN from fill_edge_nan=True
+            # remain in the output to indicate the filter warm-up period.
+            data_for_filter = data.interpolate(method="time")
+            data = cosine_lanczos(data_for_filter, "40h")
 
         return data
 

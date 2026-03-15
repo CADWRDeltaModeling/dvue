@@ -305,7 +305,7 @@ class DataReference:
         self._reader = reader
         self.name = name
         self._cache_enabled: bool = cache
-        self._cached_data: Optional[pd.DataFrame] = None
+        self._cached_data: Dict[Any, pd.DataFrame] = {}
         self._attributes: Dict[str, Any] = dict(attributes)
 
     # ------------------------------------------------------------------
@@ -329,6 +329,17 @@ class DataReference:
     def has_attribute(self, name: str) -> bool:
         """Return ``True`` if metadata attribute *name* exists."""
         return name in self._attributes
+
+    def _make_cache_key(self, time_range: Any) -> Any:
+        """Return a hashable cache key for *time_range*.
+
+        ``None`` means "no time constraint" (full series).  A
+        ``(start, end)`` pair is normalised to ``pd.Timestamp`` so that
+        equivalent datetime-like values hash identically.
+        """
+        if time_range is None:
+            return None
+        return (pd.Timestamp(time_range[0]), pd.Timestamp(time_range[1]))
 
     def matches(self, **criteria: Any) -> bool:
         """Return ``True`` if *all* criteria match this reference's metadata.
@@ -379,36 +390,57 @@ class DataReference:
     # Data loading
     # ------------------------------------------------------------------
 
-    def getData(self) -> pd.DataFrame:
+    def getData(self, time_range: Any = None) -> pd.DataFrame:
         """Load and return the data from the source.
 
-        The result is cached after the first call when *cache* is ``True``
-        (the default).  Call :meth:`invalidate_cache` to force a fresh load.
+        Parameters
+        ----------
+        time_range : tuple of (start, end), optional
+            When supplied, the reader receives it as a ``time_range``
+            keyword argument so it can load only the requested window
+            efficiently (e.g. DSS files).  The result is cached per
+            unique ``(start, end)`` pair, so different ranges are stored
+            independently.  Pass ``None`` (the default) to request the
+            full series.
 
         Returns
         -------
         pd.DataFrame
         """
-        if self._cache_enabled and self._cached_data is not None:
-            return self._cached_data.copy()
+        cache_key = self._make_cache_key(time_range)
+        if self._cache_enabled and cache_key in self._cached_data:
+            return self._cached_data[cache_key].copy()
 
-        data = self._load_data()
+        data = self._load_data(time_range=time_range)
 
         if self._cache_enabled:
-            self._cached_data = data
+            self._cached_data[cache_key] = data
             return data.copy()
         return data
 
-    def invalidate_cache(self) -> "DataReference":
-        """Clear cached data so the next :meth:`getData` call reloads the source.
+    def invalidate_cache(self, time_range: Any = None) -> "DataReference":
+        """Clear cached data so the next :meth:`getData` call reloads from source.
+
+        Parameters
+        ----------
+        time_range : tuple, optional
+            When given, only the entry for that specific range is cleared.
+            Pass ``None`` (the default) to clear the entire cache.
 
         Returns *self* for chaining.
         """
-        self._cached_data = None
+        if time_range is None:
+            self._cached_data.clear()
+        else:
+            self._cached_data.pop(self._make_cache_key(time_range), None)
         return self
 
-    def _load_data(self) -> pd.DataFrame:
+    def _load_data(self, time_range: Any = None) -> pd.DataFrame:
         """Delegate loading to the attached :class:`DataReferenceReader`.
+
+        ``time_range`` is merged into the attributes dict passed to the
+        reader so that time-range-aware readers (e.g. DSS, HDF5) can read
+        only the requested window without loading the full series.
 
         Subclasses (e.g. :class:`~dvue.math_reference.MathDataReference`) may
         override this method to compute data without a reader.
@@ -418,7 +450,7 @@ class DataReference:
                 f"{self.__class__.__name__} has no DataReferenceReader. "
                 "Supply a reader at construction time or override _load_data()."
             )
-        return self._reader.load(**self._attributes)
+        return self._reader.load(**{**self._attributes, "time_range": time_range})
 
     # ------------------------------------------------------------------
     # Arithmetic operator overloading → auto-creates MathDataReference
@@ -605,6 +637,11 @@ class DataCatalog:
         Maps *raw* attribute names (as stored in DataReferences) to
         *canonical* names exposed in :meth:`search` and :meth:`to_dataframe`.
         Example: ``{"stn_id": "id", "stn_nm": "name"}``.
+    crs : str, optional
+        Coordinate reference system string (e.g. ``"EPSG:4326"``) passed to
+        :class:`~geopandas.GeoDataFrame` when :meth:`to_dataframe` detects a
+        ``geometry`` column in the collected attributes.  Ignored when
+        *geopandas* is not available or no ``geometry`` attribute is present.
 
     Builder registry
     ----------------
@@ -655,9 +692,14 @@ class DataCatalog:
     # Construction
     # ------------------------------------------------------------------
 
-    def __init__(self, schema_map: Optional[Dict[str, str]] = None) -> None:
+    def __init__(
+        self,
+        schema_map: Optional[Dict[str, str]] = None,
+        crs: Optional[str] = None,
+    ) -> None:
         self._references: Dict[str, DataReference] = {}
         self._schema_map: Dict[str, str] = schema_map or {}
+        self._crs: Optional[str] = crs
         # Start with a snapshot of the global registry; instance-local additions
         # do not affect other catalogs.
         self._builders: List[CatalogBuilder] = list(DataCatalog._global_builders)
@@ -890,9 +932,15 @@ class DataCatalog:
         union of all attribute names, translated through *schema_map*.
         The index is the reference name.
 
+        If every reference carries a ``geometry`` attribute (a Shapely
+        geometry) and *geopandas* is importable, the result is a
+        :class:`~geopandas.GeoDataFrame` with that column set as the active
+        geometry and :attr:`crs` applied when the catalog was constructed with
+        a non-``None`` *crs* argument.
+
         Returns
         -------
-        pd.DataFrame
+        pd.DataFrame or geopandas.GeoDataFrame
         """
         rows = []
         for ref in self._references.values():
@@ -904,7 +952,18 @@ class DataCatalog:
 
         if not rows:
             return pd.DataFrame()
-        return pd.DataFrame(rows).set_index("name")
+
+        df = pd.DataFrame(rows).set_index("name")
+
+        if "geometry" in df.columns:
+            try:
+                import geopandas as gpd  # noqa: PLC0415
+
+                return gpd.GeoDataFrame(df, geometry="geometry", crs=self._crs)
+            except ImportError:
+                pass
+
+        return df
 
     # ------------------------------------------------------------------
     # Dunder

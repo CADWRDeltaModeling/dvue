@@ -249,7 +249,7 @@ class MathDataReference(DataReference):
     # Variable resolution and expression evaluation
     # ------------------------------------------------------------------
 
-    def _resolve_variables(self) -> Dict[str, Any]:
+    def _resolve_variables(self, time_range=None) -> Dict[str, Any]:
         """Parse the expression and resolve each identifier to a Series or DataFrame."""
         tokens = set(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b", self.expression))
         tokens -= _RESERVED_TOKENS
@@ -284,7 +284,7 @@ class MathDataReference(DataReference):
                     # (stack rows) when the join fails.
                     frames: List[pd.DataFrame] = []
                     for r in results:
-                        d = r.getData()
+                        d = r.getData(time_range=time_range)
                         frames.append(d if isinstance(d, pd.DataFrame) else d.to_frame())
                     try:
                         data = pd.concat(frames, axis=1).sort_index()
@@ -306,7 +306,7 @@ class MathDataReference(DataReference):
                 # Unknown identifier – let eval() raise a NameError naturally.
                 continue
 
-            data = ref.getData()
+            data = ref.getData(time_range=time_range)
             if isinstance(data, pd.DataFrame):
                 # Unwrap single-column DataFrames to Series for scalar arithmetic
                 resolved[tok] = data.iloc[:, 0] if len(data.columns) == 1 else data
@@ -315,8 +315,8 @@ class MathDataReference(DataReference):
 
         return resolved
 
-    def _load_data(self) -> pd.DataFrame:
-        variables = self._resolve_variables()
+    def _load_data(self, time_range=None) -> pd.DataFrame:
+        variables = self._resolve_variables(time_range=time_range)
 
         if not variables:
             raise ValueError(
