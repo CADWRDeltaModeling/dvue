@@ -443,7 +443,7 @@ notifications = pn.state.notifications
 
 class DataUI(param.Parameterized):
     """
-    Show table (and map) of data from a catalog. IIf the catalog manager returns a catalog that is a GeoDataFrame it will display a map of the data.
+    Show table (and map) of data from a catalog. If the catalog manager returns a catalog that is a GeoDataFrame it will display a map of the data.
 
     Selection on table rows or map will select the corresponding rows in the other view (map or table). It supports 1-to-many mapping of stations to rows in the catalog.
 

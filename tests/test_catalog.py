@@ -224,6 +224,67 @@ class TestDataReference:
         ref = CustomRef(simple_df, name="r", station="A")
         assert ref.ref_key() == "A_custom"
 
+    # ------------------------------------------------------------------
+    # Key attributes
+    # ------------------------------------------------------------------
+
+    def test_get_key_attributes_default_returns_all_attr_names(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
+        assert ref.get_key_attributes() == ["station", "variable"]
+
+    def test_get_key_attributes_returns_set_names(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
+        ref.set_key_attributes(["station", "variable"])
+        assert ref.get_key_attributes() == ["station", "variable"]
+
+    def test_set_key_attributes_is_chainable(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A")
+        result = ref.set_key_attributes(["station"])
+        assert result is ref
+
+    def test_ref_key_respects_key_attributes_subset(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
+        ref.set_key_attributes(["station", "variable"])
+        assert ref.ref_key() == "A_wind"
+
+    def test_ref_key_respects_key_attributes_order(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
+        ref.set_key_attributes(["variable", "station"])
+        assert ref.ref_key() == "wind_A"
+
+    def test_ref_key_single_key_attribute(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
+        ref.set_key_attributes(["variable"])
+        assert ref.ref_key() == "wind"
+
+    def test_ref_key_empty_key_attributes_returns_empty(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
+        ref.set_key_attributes([])
+        assert ref.ref_key() == ""
+
+    def test_ref_key_unknown_key_attribute_skipped(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A")
+        ref.set_key_attributes(["station", "nonexistent"])
+        assert ref.ref_key() == "A"
+
+    def test_ref_key_without_key_attributes_uses_all(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
+        assert ref.ref_key() == "A_wind_hourly"
+
+    def test_get_key_attributes_returns_copy(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A")
+        ref.set_key_attributes(["station"])
+        keys = ref.get_key_attributes()
+        keys.append("mutated")
+        assert ref.get_key_attributes() == ["station"]
+
+    def test_set_key_attributes_can_be_updated(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
+        ref.set_key_attributes(["station"])
+        assert ref.ref_key() == "A"
+        ref.set_key_attributes(["variable"])
+        assert ref.ref_key() == "wind"
+
     def test_set_attribute_chainable(self, simple_df):
         ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r")
         result = ref.set_attribute("a", 1).set_attribute("b", 2)

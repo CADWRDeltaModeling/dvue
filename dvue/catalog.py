@@ -307,6 +307,7 @@ class DataReference:
         self._cache_enabled: bool = cache
         self._cached_data: Dict[Any, pd.DataFrame] = {}
         self._attributes: Dict[str, Any] = dict(attributes)
+        self._key_attributes: Optional[List[str]] = None  # None → all attributes
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -329,6 +330,53 @@ class DataReference:
     def has_attribute(self, name: str) -> bool:
         """Return ``True`` if metadata attribute *name* exists."""
         return name in self._attributes
+
+    # ------------------------------------------------------------------
+    # Key attributes
+    # ------------------------------------------------------------------
+
+    def set_key_attributes(self, names: List[str]) -> "DataReference":
+        """Set the attribute names used by :meth:`ref_key` (chainable).
+
+        Only the named attributes (in the given order) contribute to the
+        unique key produced by :meth:`ref_key`.  Passing an empty list
+        causes :meth:`ref_key` to return ``""``.
+
+        Parameters
+        ----------
+        names : list of str
+            Ordered list of attribute names.  Each name must already exist
+            as a metadata attribute on this reference when :meth:`ref_key`
+            is called (unknown names are silently skipped).
+
+        Returns
+        -------
+        DataReference
+            *self*, for chaining.
+
+        Examples
+        --------
+        >>> ref = DataReference(reader, name="r", station="A", variable="wind", interval="h")
+        >>> ref.set_key_attributes(["station", "variable"])
+        >>> ref.ref_key()  # "A_wind"
+        """
+        self._key_attributes = list(names)
+        return self
+
+    def get_key_attributes(self) -> List[str]:
+        """Return the attribute names used by :meth:`ref_key`.
+
+        When key attributes have not been set explicitly (the default),
+        **all** current attribute names are returned in insertion order,
+        which matches the previous behaviour of :meth:`ref_key`.
+
+        Returns
+        -------
+        list of str
+        """
+        if self._key_attributes is None:
+            return list(self._attributes.keys())
+        return list(self._key_attributes)
 
     def _make_cache_key(self, time_range: Any) -> Any:
         """Return a hashable cache key for *time_range*.
@@ -359,25 +407,36 @@ class DataReference:
         return True
 
     def ref_key(self) -> str:
-        """Return a string key derived from this reference's metadata attributes.
+        """Return a string key derived from this reference's *key* attributes.
 
-        The default implementation joins all string-representable attribute values
-        with ``"_"`` separators, sanitising spaces and non-identifier characters
-        to underscores.  The result is intended to be a valid Python identifier
-        so it can be used as a variable name inside :class:`MathDataReference`
-        expression strings.
+        Uses the attribute names returned by :meth:`get_key_attributes` —
+        either the explicitly-set subset (via :meth:`set_key_attributes`) or
+        all attributes when none have been designated as keys.
+
+        Each attribute value is sanitised (spaces and non-identifier characters
+        become underscores) and the results are joined with ``"_"``.
+        Non-scalar values (lists, dicts, geometry objects, …) are silently
+        skipped so they do not pollute the key.
+
+        The result is intended to be a valid Python identifier so it can be
+        used as a variable name inside :class:`MathDataReference` expression
+        strings.
 
         Override in subclasses to produce a more readable, domain-specific key
         from a chosen subset of attributes.
 
         Examples
         --------
-        >>> ref = DataReference(df, name="r", station="A", variable="wind", interval="hourly")
+        >>> ref = DataReference(reader, name="r", station="A", variable="wind", interval="hourly")
         >>> ref.ref_key()
         'A_wind_hourly'
+        >>> ref.set_key_attributes(["station", "variable"])
+        >>> ref.ref_key()
+        'A_wind'
         """
         parts = []
-        for value in self._attributes.values():
+        for key in self.get_key_attributes():
+            value = self._attributes.get(key)
             if not isinstance(value, (str, int, float, bool)):
                 continue
             sanitized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip())

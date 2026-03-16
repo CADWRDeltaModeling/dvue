@@ -33,7 +33,11 @@ from collections import defaultdict
 
 def get_unique_short_names(paths):
     # Normalize paths and split into parts
-    path_parts = [os.path.normpath(p).split(os.sep) for p in paths]
+    try:
+        path_parts = [os.path.normpath(p).split(os.sep) for p in paths]
+    except Exception as e:
+        logger.error(f"Error normalizing paths: {e}")
+        return ""
 
     # Start with just the basename
     name_map = defaultdict(list)
