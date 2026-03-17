@@ -93,12 +93,15 @@ class StationDataReference(DataReference):
 
         ref.ref_key()  # "Station_A__wind_speed__hourly"
     """
-
+    OVERRIDE_DEFAULT_DEF=False
     def ref_key(self) -> str:
-        name = self.get_attribute("station_name", "").replace(" ", "_")
-        variable = self.get_attribute("variable", "")
-        interval = self.get_attribute("interval", "")
-        return f"{name}__{variable}__{interval}"
+        if (self.OVERRIDE_DEFAULT_DEF):
+            name = self.get_attribute("station_name", "").replace(" ", "_")
+            variable = self.get_attribute("variable", "")
+            interval = self.get_attribute("interval", "")
+            return f"{name}__{variable}__{interval}"
+        else:
+            return super().ref_key()
 
 
 catalog = DataCatalog()
@@ -125,6 +128,7 @@ for stn in STATIONS:
                 max_year="2021",
                 geometry=geom,
             )
+            ref.set_key_attributes(["station_id", "variable", "interval", "unit"])  # for ref_key()
             ref.name = ref.ref_key()
             catalog.add(ref)
 

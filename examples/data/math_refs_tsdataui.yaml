@@ -1,12 +1,10 @@
 - name: Station_A__wind_speed_mph__hourly
-  expression: Station_A__wind_speed__hourly * (2.23694)
+  expression: _1_wind_speed_hourly_m_s * (2.23694)
   station_id: '1'
   station_name: Station A
   variable: wind_speed_mph
   unit: mph
   interval: hourly
-  start_year: '2020'
-  max_year: '2021'
 - name: Station_B__precip_cumulative__hourly
   station_id: '2'
   station_name: Station B
@@ -15,9 +13,9 @@
   interval: hourly
   start_year: '2020'
   max_year: '2021'
-  expression: cumsum(Station_B__precipitation__hourly)
+  expression: cumsum(_2_precipitation_hourly_mm)
 - name: wind_diff_A_minus_C__hourly
-  expression: Station_A__wind_speed__hourly - Station_C__wind_speed__hourly
+  expression: _1_wind_speed_hourly_m_s - _3_wind_speed_hourly_m_s
   station_id: '1'
   station_name: Station A
   variable: wind_diff_A_minus_C

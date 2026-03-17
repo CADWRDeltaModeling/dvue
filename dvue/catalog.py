@@ -443,7 +443,12 @@ class DataReference:
             sanitized = sanitized.strip("_")
             if sanitized:
                 parts.append(sanitized)
-        return "_".join(parts)
+        result = "_".join(parts)
+        # Guarantee a valid Python identifier: names starting with a digit
+        # cannot be used as variables in MathDataReference expressions.
+        if result and result[0].isdigit():
+            result = "_" + result
+        return result
 
     # ------------------------------------------------------------------
     # Data loading

@@ -203,7 +203,12 @@ class TestDataReference:
 
     def test_ref_key_includes_numeric_attributes(self, simple_df):
         ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", year=2020)
-        assert ref.ref_key() == "2020"
+        assert ref.ref_key() == "_2020"  # prefixed with _ to form a valid Python identifier
+
+    def test_ref_key_never_starts_with_digit(self, simple_df):
+        ref = DataReference(InMemoryDataReferenceReader(simple_df), name="r", station_id="1", variable="flow")
+        key = ref.ref_key()
+        assert key[0].isalpha() or key[0] == "_", f"ref_key {key!r} starts with a digit"
 
     def test_ref_key_skips_complex_types(self, simple_df):
         class _Blob:
