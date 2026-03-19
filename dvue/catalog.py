@@ -36,6 +36,7 @@ and are re-exported here for backward compatibility.
 from __future__ import annotations
 
 import abc
+import importlib
 import logging
 import math
 import re
@@ -80,7 +81,7 @@ class DataReferenceReader(abc.ABC):
     ...         return self._conn.query_table(attributes["table"])
     ...
     >>> reader = MyDBReader(conn)
-    >>> ref = DataReference(reader, name="users", table="users")
+    >>> ref = DataReference(source="", reader=reader, name="users", table="users")
     >>> ref.getData()   # calls reader.load(table="users")
     """
 
@@ -99,6 +100,11 @@ class DataReferenceReader(abc.ABC):
         pd.DataFrame
         """
         ...
+
+    @classmethod
+    def fqcn(cls) -> str:
+        """Return the fully qualified class name (``\"module.ClassName\"")."""
+        return f"{cls.__module__}.{cls.__qualname__}"
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
@@ -124,7 +130,7 @@ class InMemoryDataReferenceReader(DataReferenceReader):
     Examples
     --------
     >>> reader = InMemoryDataReferenceReader(df)
-    >>> ref = DataReference(reader, name="stations", variable="temperature")
+    >>> ref = DataReference(source="", reader=reader, name="stations", variable="temperature")
     >>> ref.getData()
     """
 
@@ -156,7 +162,7 @@ class CallableDataReferenceReader(DataReferenceReader):
     Examples
     --------
     >>> reader = CallableDataReferenceReader(lambda: fetch_latest())
-    >>> ref = DataReference(reader, name="live", variable="temperature")
+    >>> ref = DataReference(source="", reader=reader, name="live", variable="temperature")
     >>> ref.getData()   # calls fn() each time (unless caching is on)
     """
 
@@ -183,20 +189,25 @@ class FileDataReferenceReader(DataReferenceReader):
     ``.json``, ``.xlsx``, ``.xls``, ``.hdf``, ``.h5``.
     HTTP/HTTPS URLs are also supported and dispatch on the URL's extension.
 
-    Because all path information lives in the :class:`DataReference`
-    attributes, a *single* ``FileDataReferenceReader()`` instance can be
-    shared across any number of file-backed references (flyweight).
+    Because all path information lives in :attr:`source` (set at construction
+    time), a single ``FileDataReferenceReader`` instance is tightly bound to
+    one file.  For backward compatibility, if ``source`` is empty the reader
+    falls back to a ``file_path`` attribute on the :class:`DataReference`.
 
     Parameters
     ----------
+    source : str, optional
+        File path or URL.  Pass ``""`` only when using the legacy
+        ``file_path`` :class:`DataReference` attribute.
     read_kwargs : dict, optional
         Extra keyword arguments forwarded to the underlying pandas reader
         (e.g. ``{"parse_dates": ["timestamp"]}`` for CSV files).
 
     Examples
     --------
-    >>> reader = FileDataReferenceReader()
-    >>> ref = DataReference(reader, name="flow", file_path="/data/flow.csv")
+    >>> ref = DataReference(source="/data/flow.csv",
+    ...                      reader="dvue.catalog.FileDataReferenceReader",
+    ...                      name="flow")
     >>> ref.getData()   # calls pd.read_csv("/data/flow.csv")
     """
 
@@ -212,20 +223,20 @@ class FileDataReferenceReader(DataReferenceReader):
         ".h5": pd.read_hdf,
     }
 
-    def __init__(self, read_kwargs: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, source: str = "", read_kwargs: Optional[Dict[str, Any]] = None) -> None:
+        self.source: str = source
         self._read_kwargs: Dict[str, Any] = read_kwargs or {}
 
     def load(self, **attributes: Any) -> pd.DataFrame:
-        file_path = attributes.get("file_path")
-        if file_path is None:
+        path = self.source or str(attributes.get("file_path", ""))
+        if not path:
             raise ValueError(
-                "FileDataReferenceReader requires a 'file_path' attribute on the "
-                "DataReference.  Set it via the attributes keyword arguments."
+                "FileDataReferenceReader requires either a source path (via the "
+                "DataReference source= argument) or a 'file_path' attribute."
             )
-        s = str(file_path)
-        if s.startswith(("http://", "https://")):
-            return self._load_url(s)
-        return self._load_file(s)
+        if path.startswith(("http://", "https://")):
+            return self._load_url(path)
+        return self._load_file(path)
 
     def _load_file(self, path: str) -> pd.DataFrame:
         suffix = Path(path).suffix.lower()
@@ -246,9 +257,43 @@ class FileDataReferenceReader(DataReferenceReader):
         return pd.read_csv(url)
 
     def __repr__(self) -> str:
+        parts = [f"source={self.source!r}"] if self.source else []
         if self._read_kwargs:
-            return f"FileDataReferenceReader(read_kwargs={self._read_kwargs!r})"
-        return "FileDataReferenceReader()"
+            parts.append(f"read_kwargs={self._read_kwargs!r}")
+        return f"FileDataReferenceReader({', '.join(parts)})"
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+
+def _resolve_class(fqcn: str) -> type:
+    """Import and return the class identified by its fully qualified name.
+
+    Parameters
+    ----------
+    fqcn : str
+        Fully qualified class name as produced by
+        :meth:`DataReferenceReader.fqcn`, e.g.
+        ``"dvue.catalog.FileDataReferenceReader"``.
+
+    Returns
+    -------
+    type
+
+    Raises
+    ------
+    ImportError
+        If the module cannot be imported.
+    AttributeError
+        If the class name does not exist in the module.
+    """
+    module_name, _, class_name = fqcn.rpartition(".")
+    if not module_name:
+        raise ImportError(f"Cannot resolve {fqcn!r}: no module component in name.")
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
 
 
 # ---------------------------------------------------------------------------
@@ -259,55 +304,116 @@ class FileDataReferenceReader(DataReferenceReader):
 class DataReference:
     """A reference to a data source identified by metadata attributes.
 
-    ``DataReference`` delegates actual loading to a :class:`DataReferenceReader`
-    and exposes the result through a consistent :meth:`getData` API.  All
-    source-specific logic lives in the reader; the reference owns caching and
-    the metadata attribute dict.
+    ``DataReference`` pairs a data location (:attr:`source`) with a
+    :class:`DataReferenceReader` identified by its fully qualified class name
+    (:attr:`reader`).  The reader is instantiated lazily on the first
+    :meth:`getData` call, making every reference serialisable to CSV via
+    :meth:`to_dict` / :meth:`DataCatalog.to_csv`.
 
     Parameters
     ----------
-    reader : DataReferenceReader
-        The strategy object that knows how to load data.  Built-in choices:
+    source : str, optional
+        URL or file path identifying where the data lives.  Stored as
+        ``self.source`` and passed as the sole positional argument to
+        ``reader_class(source)`` during lazy reader instantiation.  Pass
+        ``""`` when supplying a pre-built reader instance (e.g.
+        :class:`InMemoryDataReferenceReader`).
+    reader : str or DataReferenceReader, optional
+        Either:
 
-        * :class:`InMemoryDataReferenceReader` – wrap an existing DataFrame.
-        * :class:`CallableDataReferenceReader` – call a zero-argument callable.
-        * :class:`FileDataReferenceReader` – read a file via a ``file_path``
-          attribute (supports CSV, Parquet, JSON, HDF, Excel, …).
-
-        Pass ``None`` (or omit) only in :class:`MathDataReference` subclasses
-        that override :meth:`_load_data` directly.
+        * A **fully qualified class name** string (``"module.ClassName"``)
+          identifying a :class:`DataReferenceReader` subclass.  The class is
+          imported and instantiated lazily as ``reader_class(source)`` on the
+          first :meth:`getData` call.  This form is serialisable to CSV via
+          :meth:`to_dict` / :meth:`DataCatalog.to_csv`.
+        * A pre-built :class:`DataReferenceReader` **instance** for
+          programmatic use (e.g. :class:`InMemoryDataReferenceReader`,
+          :class:`CallableDataReferenceReader`).  The instance is used
+          directly; its FQCN is stored in :attr:`reader` for reference.
+        * ``None`` — only for :class:`~dvue.math_reference.MathDataReference`
+          subclasses that override :meth:`_load_data` without a reader.
     name : str, optional
         Identifier.  Required when adding to a :class:`DataCatalog`.
     cache : bool, optional
         Cache the result of the first :meth:`getData` call.  Default ``True``.
     **attributes
-        Arbitrary (name, value) metadata pairs passed to the reader's
-        :meth:`~DataReferenceReader.load` and searchable via
-        :meth:`DataCatalog.search`.
+        Arbitrary (name, value) metadata pairs accessible via
+        :meth:`get_attribute` and searchable via :meth:`DataCatalog.search`.
 
     Examples
     --------
     >>> reader = InMemoryDataReferenceReader(df)
-    >>> ref = DataReference(reader, name="stations", variable="temperature", unit="degC")
+    >>> ref = DataReference(source="", reader=reader, name="stations",
+    ...                      variable="temperature", unit="degC")
     >>> ref.getData()                       # returns the DataFrame
     >>> ref.get_attribute("variable")
     'temperature'
-    >>> ref.set_attribute("reviewed", True).set_attribute("priority", 1)
+    >>> # FQCN-based lazy loading from a CSV file:
+    >>> ref = DataReference(source="/data/flow.csv",
+    ...                      reader="dvue.catalog.FileDataReferenceReader",
+    ...                      name="flow", variable="discharge")
+    >>> ref.getData()   # instantiates FileDataReferenceReader("/data/flow.csv")
     """
 
     def __init__(
         self,
-        reader: Optional[DataReferenceReader] = None,
+        source: str = "",
+        reader: Union[str, "DataReferenceReader", None] = None,
         name: str = "",
         cache: bool = True,
         **attributes: Any,
     ) -> None:
-        self._reader = reader
+        self.source: str = source
+        self._reader_fqcn: str = ""
+        self._reader_instance: Optional[DataReferenceReader] = None
+        if isinstance(reader, str):
+            self._reader_fqcn = reader
+        elif isinstance(reader, DataReferenceReader):
+            self._reader_fqcn = reader.fqcn()
+            self._reader_instance = reader
+        # else: None → MathDataReference subclass or uninitialised
         self.name = name
         self._cache_enabled: bool = cache
         self._cached_data: Dict[Any, pd.DataFrame] = {}
         self._attributes: Dict[str, Any] = dict(attributes)
         self._key_attributes: Optional[List[str]] = None  # None → all attributes
+
+    # ------------------------------------------------------------------
+    # Reader access
+    # ------------------------------------------------------------------
+
+    @property
+    def reader(self) -> str:
+        """Fully qualified class name of the reader (``"module.ClassName"``)."""
+        return self._reader_fqcn
+
+    def _get_reader(self) -> "DataReferenceReader":
+        """Return the reader instance, instantiating lazily from FQCN+source if needed."""
+        if self._reader_instance is not None:
+            return self._reader_instance
+        if not self._reader_fqcn:
+            raise ValueError(
+                f"{self.__class__.__name__}(name={self.name!r}) has no reader. "
+                "Supply a reader FQCN string or a DataReferenceReader instance, "
+                "or override _load_data() in a subclass."
+            )
+        cls = _resolve_class(self._reader_fqcn)
+        self._reader_instance = cls(self.source)
+        return self._reader_instance
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise this reference to a plain dictionary suitable for CSV output.
+
+        Returns a dict with keys ``name``, ``source``, ``reader`` (FQCN), and
+        all metadata attributes.  Use :meth:`DataCatalog.to_csv` to write an
+        entire catalog at once.
+        """
+        return {
+            "name": self.name,
+            "source": self.source,
+            "reader": self._reader_fqcn,
+            **self._attributes,
+        }
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -509,12 +615,7 @@ class DataReference:
         Subclasses (e.g. :class:`~dvue.math_reference.MathDataReference`) may
         override this method to compute data without a reader.
         """
-        if self._reader is None:
-            raise ValueError(
-                f"{self.__class__.__name__} has no DataReferenceReader. "
-                "Supply a reader at construction time or override _load_data()."
-            )
-        return self._reader.load(**{**self._attributes, "time_range": time_range})
+        return self._get_reader().load(**{**self._attributes, "time_range": time_range})
 
     # ------------------------------------------------------------------
     # Arithmetic operator overloading → auto-creates MathDataReference
@@ -557,11 +658,10 @@ class DataReference:
 
     def __repr__(self) -> str:
         attrs = ", ".join(f"{k}={v!r}" for k, v in self._attributes.items())
-        parts = [f"name={self.name!r}", f"reader={self._reader!r}"]
+        parts = [f"name={self.name!r}", f"source={self.source!r}", f"reader={self._reader_fqcn!r}"]
         if attrs:
             parts.append(attrs)
         return f"{self.__class__.__name__}({', '.join(parts)})"
-
     def __str__(self) -> str:
         return f"{self.__class__.__name__}({self.name!r})"
 
@@ -672,16 +772,6 @@ DataCatalogReader = CatalogBuilder
 # ---------------------------------------------------------------------------
 # DataCatalog
 # ---------------------------------------------------------------------------
-
-
-def _readers_equal(a: Any, b: Any) -> bool:
-    """Return ``True`` when two DataReference readers are the same instance.
-
-    Identity comparison is the right test: two different reader *instances*
-    that happen to load the same data are still considered distinct (the user
-    may have intentionally replaced one with the other).
-    """
-    return a is b
 
 
 class DataCatalog:
@@ -817,13 +907,25 @@ class DataCatalog:
             raise ValueError("DataReference must have a non-empty name to be added to a catalog.")
         existing = self._references.get(ref.name)
         if existing is not None:
-            if _readers_equal(existing._reader, ref._reader):
-                if existing.attributes == ref.attributes:
-                    raise ValueError(
-                        f"A DataReference named {ref.name!r} with the same reader and "
-                        "identical metadata attributes already exists in the catalog. "
-                        "Remove it first, or update its attributes before re-adding."
-                    )
+            # Determine whether the source/reader is "the same".
+            # • Both have a pre-built instance → identity check (distinguishes
+            #   two InMemoryDataReferenceReader instances carrying different data).
+            # • Both are FQCN-only → equality on (fqcn, source).
+            # • Mixed (one instance, one FQCN) → never treated as a duplicate.
+            same_source: bool = False
+            if existing._reader_instance is not None and ref._reader_instance is not None:
+                same_source = existing._reader_instance is ref._reader_instance
+            elif existing._reader_instance is None and ref._reader_instance is None:
+                same_source = (
+                    existing._reader_fqcn == ref._reader_fqcn
+                    and existing.source == ref.source
+                )
+            if same_source and existing.attributes == ref.attributes:
+                raise ValueError(
+                    f"A DataReference named {ref.name!r} with the same reader, source, and "
+                    "identical metadata attributes already exists in the catalog. "
+                    "Remove it first, or update its attributes before re-adding."
+                )
         self._references[ref.name] = ref
         return self
 
@@ -1028,6 +1130,55 @@ class DataCatalog:
                 pass
 
         return df
+
+    # ------------------------------------------------------------------
+    # Serialisation
+    # ------------------------------------------------------------------
+
+    def to_csv(self, path: Union[str, Path]) -> None:
+        """Serialise all references to a CSV file.
+
+        Columns: ``name``, ``source``, ``reader`` (fully qualified class name),
+        followed by the union of all attribute columns across all references.
+        Rows that lack a given attribute receive ``NaN``.
+
+        Parameters
+        ----------
+        path : str or Path
+        """
+        rows = [ref.to_dict() for ref in self._references.values()]
+        if not rows:
+            pd.DataFrame(columns=["name", "source", "reader"]).to_csv(path, index=False)
+            return
+        pd.DataFrame(rows).to_csv(path, index=False)
+
+    @classmethod
+    def from_csv(cls, path: Union[str, Path]) -> "DataCatalog":
+        """Load a :class:`DataCatalog` from a CSV file written by :meth:`to_csv`.
+
+        Each row's ``reader`` column is the fully qualified class name of the
+        :class:`DataReferenceReader` subclass.  The reader is instantiated
+        lazily (on the first :meth:`~DataReference.getData` call) as
+        ``reader_class(source)``.
+
+        Parameters
+        ----------
+        path : str or Path
+
+        Returns
+        -------
+        DataCatalog
+        """
+        df = pd.read_csv(path)
+        catalog = cls()
+        for _, row in df.iterrows():
+            d: Dict[str, Any] = {k: v for k, v in row.items() if pd.notna(v)}
+            name = str(d.pop("name", ""))
+            source = str(d.pop("source", ""))
+            reader = str(d.pop("reader", ""))
+            ref = DataReference(source=source, reader=reader, name=name, **d)
+            catalog.add(ref)
+        return catalog
 
     # ------------------------------------------------------------------
     # Dunder

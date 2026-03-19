@@ -43,7 +43,7 @@ abstract methods, then register the builder with the catalog:
         def build(self, source):
             reader = MyDBDataReferenceReader(source)  # one shared reader
             return [
-                DataReference(reader, name=table, table=table)
+                DataReference(source=source_url, reader=reader, name=table, table=table)
                 for table in source.list_tables()
             ]
             # No data loaded yet — getData() triggers the first query.
@@ -170,7 +170,8 @@ class CSVDirectoryBuilder(CatalogBuilder):
         refs = []
         for f in files:
             ref = DataReference(
-                self._file_reader,
+                source=str(f),
+                reader=self._file_reader,
                 name=f.stem,
                 file_path=str(f),
                 format="csv",
@@ -314,12 +315,12 @@ class PatternCSVDirectoryBuilder(CatalogBuilder):
             attrs.update(self._default_attributes)
             attrs.update(parsed)  # fields from filename (stationid, source, …)
 
-            # 'name' and 'cache' are DataReference constructor params; if a
-            # filename field collides with them, store them as attributes instead.
-            _CONSTRUCTOR_PARAMS = {"name", "cache"}
+            # 'name', 'cache', 'source', and 'reader' are DataReference constructor params;
+            # if a filename field collides with them, store them as attributes instead.
+            _CONSTRUCTOR_PARAMS = {"name", "cache", "source", "reader"}
             colliding = {k: attrs.pop(k) for k in list(attrs) if k in _CONSTRUCTOR_PARAMS}
 
-            ref = DataReference(self._file_reader, name=ref_name, **attrs)
+            ref = DataReference(source=str(f), reader=self._file_reader, name=ref_name, **attrs)
             for k, v in colliding.items():
                 ref.set_attribute(k, v)
             refs.append(ref)
