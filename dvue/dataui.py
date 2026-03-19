@@ -546,8 +546,23 @@ class DataUI(param.Parameterized):
             if isinstance(dfmap, gpd.GeoDataFrame):
                 geom_type = str.lower(str(dfmap.geometry.iloc[0].geom_type))
                 if "point" in geom_type:
-                    self._map_features = gv.Points(dfmap, crs=crs)
-                elif geom_type == "LineString":
+                    # Passing a GeoDataFrame directly to gv.Points fails in newer
+                    # geoviews versions (GeomDictInterface "non-flat" error during
+                    # projection).  Extract explicit x/y columns to work around it.
+                    dfpts = dfmap.copy()
+                    dfpts["__x__"] = dfmap.geometry.x
+                    dfpts["__y__"] = dfmap.geometry.y
+                    dfpts = dfpts.drop(columns=["geometry"])
+                    # Drop columns containing non-scalar objects (e.g. reader instances
+                    # stored in the 'source' attribute) that pandas cannot sort/compare.
+                    scalar_cols = [
+                        c for c in dfpts.columns
+                        if dfpts[c].dtype != object
+                        or dfpts[c].map(lambda v: isinstance(v, (str, type(None)))).all()
+                    ]
+                    dfpts = dfpts[scalar_cols]
+                    self._map_features = gv.Points(dfpts, kdims=["__x__", "__y__"], crs=crs)
+                elif "linestring" in geom_type:
                     self._map_features = gv.Path(dfmap, crs=crs)
                 elif "polygon" in geom_type:
                     self._map_features = gv.Polygons(dfmap, crs=crs)

@@ -118,7 +118,7 @@ for stn in STATIONS:
     for variable, unit in VARIABLES:
         for interval in INTERVALS:
             ref = StationDataReference(
-                InMemoryDataReferenceReader(create_smooth_tsdf(interval=interval)),
+                reader=InMemoryDataReferenceReader(create_smooth_tsdf(interval=interval)),
                 station_id=stn["station_id"],
                 station_name=stn["station_name"],
                 variable=variable,
