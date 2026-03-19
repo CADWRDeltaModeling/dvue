@@ -10,6 +10,52 @@ logger = logging.getLogger(__name__)
 
 
 class PlotAction:
+    """Base action for visualising selected catalog rows.
+
+    Subclasses override :meth:`render` to build domain-specific panels.
+    :meth:`get_refs_and_data` handles data retrieval from the manager's
+    DataCatalog and forwards ``time_range`` to each DataReference so that
+    time-range-aware readers can load only the requested window.
+    """
+
+    def get_refs_and_data(self, df, manager):
+        """Yield ``(row, ref, data)`` for each selected row.
+
+        ``manager.time_range`` is forwarded to ``ref.getData()`` so that
+        time-range-aware readers can load only the requested window
+        efficiently.  Rows whose manager has no
+        :class:`~dvue.catalog.DataCatalog` (``get_data_reference`` raises
+        :exc:`NotImplementedError`) yield ``(row, None, None)`` instead
+        of propagating the error.
+        """
+        time_range = getattr(manager, "time_range", None)
+        for _, row in df.iterrows():
+            try:
+                ref = manager.get_data_reference(row)
+                data = ref.getData(time_range=time_range)
+                yield row, ref, data
+            except NotImplementedError:
+                yield row, None, None
+
+    def render(self, df, refs_and_data, manager):
+        """Build and return a Panel/HoloViews object from *refs_and_data*.
+
+        Default: delegates to ``manager.create_panel(df)`` for backward
+        compatibility with subclasses that override ``create_panel()``
+        directly.  Override to build the visualisation from *refs_and_data*
+        without depending on DataUI widget methods.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The selected rows from the catalog table.
+        refs_and_data : list of (row, ref, data)
+            Pre-loaded triples from :meth:`get_refs_and_data`.
+        manager : DataUIManager
+            The data/view manager for this UI.
+        """
+        return manager.create_panel(df)
+
     def callback(self, event, dataui):
         try:
             dataui._display_panel.loading = True
@@ -30,7 +76,13 @@ class PlotAction:
             # Show 20% progress
             dataui.set_progress(20)
 
-            plot_panel = dataui._dataui_manager.create_panel(dfselected)
+            manager = dataui._dataui_manager
+
+            # Load refs and data (passes time_range to getData())
+            refs_and_data = list(self.get_refs_and_data(dfselected, manager))
+            dataui.set_progress(50)
+
+            plot_panel = self.render(dfselected, refs_and_data, manager)
 
             # Show 90% progress
             dataui.set_progress(90)

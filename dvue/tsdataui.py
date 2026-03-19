@@ -1,5 +1,6 @@
 from .utils import get_unique_short_names
 from .dataui import DataUIManager, full_stack
+from .actions import PlotAction
 from datetime import datetime, timedelta
 import warnings
 from functools import lru_cache
@@ -154,8 +155,14 @@ class TimeSeriesDataUIManager(DataUIManager):
         raise NotImplementedError("Method get_data_catalog not implemented")
 
     def get_data_actions(self):
-        """Return default actions, appending MathRefEditorAction when show_math_ref_editor is True."""
+        """Return default actions, replacing PlotAction with TimeSeriesPlotAction and
+        optionally appending MathRefEditorAction when show_math_ref_editor is True."""
         actions = super().get_data_actions()
+        # Upgrade the generic PlotAction to TimeSeriesPlotAction
+        for action in actions:
+            if action.get("name") == "Plot":
+                action["callback"] = TimeSeriesPlotAction().callback
+                break
         if self.show_math_ref_editor:
             from .math_ref_editor import MathRefEditorAction
             math_action = MathRefEditorAction()
@@ -303,9 +310,17 @@ class TimeSeriesDataUIManager(DataUIManager):
 
         progress_per_row = 50 / total_rows  # We'll use 0-50% range for the iteration
 
+        # When a DataCatalog is available, delegate data loading to each DataReference
+        # so that mixed catalogs with different reader types are handled automatically.
+        # Otherwise fall back to the legacy get_data_for_time_range() hook.
+        use_catalog = self.data_catalog is not None
+
         # Process each row, updating progress as we go
         for i, (_, r) in enumerate(df.iterrows()):
-            data, _, _ = self.get_data_for_time_range(r, self.time_range)
+            if use_catalog:
+                data = self.get_data_reference(r).getData()
+            else:
+                data, _, _ = self.get_data_for_time_range(r, self.time_range)
 
             # Update progress - scale from 0 to 50%
             if dataui:
@@ -426,104 +441,6 @@ class TimeSeriesDataUIManager(DataUIManager):
         layout_map[group_key].append((curve, row))
         station_map[group_key].append(station_name)
         self.append_to_title_map(title_map, group_key, row)
-
-    def create_layout(self, df, time_range):
-        """
-        Create layout maps for visualizing time series data.
-
-        Groups curves based on plot_group_by_column if specified, otherwise by unit.
-
-        Returns:
-            tuple: (layout_map, station_map, range_map, title_map)
-                layout_map: Dictionary mapping group keys to lists of (curve, row) tuples
-                station_map: Dictionary mapping group keys to lists of station names
-                range_map: Dictionary mapping group keys to y-axis ranges
-                title_map: Dictionary mapping group keys to title information
-        """
-        layout_map = {}
-        title_map = {}
-        range_map = {}
-        station_map = {}  # list of stations for each unit
-
-        # Prepare file index mapping if needed
-        file_index_map = {}
-        if self.display_fileno:
-            local_unique_files = df[self.filename_column].unique()
-            short_unique_files = get_unique_short_names(local_unique_files)
-            file_index_map = dict(zip(local_unique_files, short_unique_files))
-
-        # Setup progress tracking
-        dataui = self._dataui if hasattr(self, "_dataui") else None
-        if dataui:
-            dataui.set_progress(50)
-
-        # Calculate progress increment
-        total_rows = len(df)
-        progress_per_row = 40 / max(total_rows, 1)  # We'll use 50-90% range for the iteration
-
-        # Process each row
-        for i, (_, row) in enumerate(df.iterrows()):
-            try:
-                # Get and process data
-                data, unit, _ = self.get_data_for_time_range(row, time_range)
-                unit = unit.lower()  # lowercase the units
-                data = self._process_curve_data(data, row, time_range)
-
-                # Create curve
-                file_index = (
-                    file_index_map.get(row[self.filename_column], "") if self.display_fileno else ""
-                )
-                curve = self.create_curve(data, row, unit, file_index=file_index)
-
-                # Add curve to layout
-                station_name = self.build_station_name(row)
-
-                # Determine group key based on plot_group_by_column
-                group_key = None
-                if self.plot_group_by_column:
-                    # Use the value from the column specified by plot_group_by_column
-                    # if that column exists in the row's data
-                    if self.plot_group_by_column in row:
-                        group_value = row[self.plot_group_by_column]
-                        if group_value is not None and str(group_value).strip() != "":
-                            group_key = str(group_value)
-
-                self._add_curve_to_layout(
-                    layout_map,
-                    station_map,
-                    title_map,
-                    range_map,
-                    curve,
-                    row,
-                    unit,
-                    station_name,
-                    group_key=group_key,
-                )
-
-            except Exception as e:
-                print(full_stack())
-                if pn.state.notifications:
-                    pn.state.notifications.error(f"Error processing row: {row}: {e}")
-
-            # Update progress
-            if dataui and total_rows > 0:
-                current_progress = 50 + int(progress_per_row * (i + 1))
-                dataui.set_progress(current_progress)
-
-        # Post-processing
-        title_map = self._update_title_for_custom_grouping(title_map)
-
-        # Calculate y-axis ranges if needed
-        if self.sensible_range_yaxis:
-            for unit, curves in layout_map.items():
-                for curve, _ in curves:
-                    range_map[unit] = self._calculate_range(range_map[unit], curve.data)
-
-        # Finalize progress
-        if dataui:
-            dataui.set_progress(90)
-
-        return layout_map, station_map, range_map, title_map
 
     def _calculate_range(self, current_range, df, factor=0.0):
         if df.empty:
@@ -682,79 +599,10 @@ class TimeSeriesDataUIManager(DataUIManager):
         return styled_curve
 
     def create_panel(self, df):
-        """
-        Create visualization panel from the data.
-
-        This method applies styling to curves based on selected attributes and
-        arranges them in overlays and layouts.
-        """
-        time_range = self.time_range
-        try:
-            # Get station IDs and prepare color dataframe
-            stationids = self.get_station_ids(df)
-            color_df = get_color_dataframe(stationids, self.color_cycle)
-
-            # Prepare style mappings (color, line style, marker)
-            style_maps = self._prepare_style_maps(df)
-
-            # Create data layout
-            layout_map, station_map, range_map, title_map = self.create_layout(df, time_range)
-
-            if len(layout_map) == 0:
-                return hv.Div(self.get_no_selection_message()).opts(sizing_mode="stretch_both")
-
-            # Build visualization layout
-            overlays = []
-            for group_key, curves_data in layout_map.items():
-                stations = station_map[group_key]
-
-                # Analyze style combinations
-                style_combinations, has_duplicates, has_style_duplicates = (
-                    self._get_style_combinations(stations, curves_data, style_maps)
-                )
-
-                # Apply styling to each curve
-                styled_curves = []
-                for i, (curve, row) in enumerate(curves_data):
-                    styled_curve = self._apply_curve_styling(
-                        curve,
-                        row,
-                        has_duplicates,
-                        has_style_duplicates,
-                        style_maps,
-                        style_combinations,
-                    )
-                    styled_curves.append(styled_curve)
-
-                # Create overlay for this group
-                overlay = hv.Overlay(styled_curves).opts(
-                    show_legend=self.show_legend,
-                    legend_position=self.legend_position,
-                    ylim=(
-                        tuple(range_map[group_key])
-                        if range_map[group_key] is not None
-                        else (None, None)
-                    ),
-                    title=title_map[group_key],
-                    min_height=400,
-                )
-                overlays.append(overlay)
-
-            # Return final layout
-            return (
-                hv.Layout(overlays)
-                .cols(1)
-                .opts(
-                    shared_axes=self.shared_axes,
-                    axiswise=True,
-                    sizing_mode="stretch_both",
-                )
-            )
-        except Exception as e:
-            stackmsg = full_stack()
-            print(stackmsg)
-            pn.state.notifications.error(f"Error while creating panel: {e}")
-            return hv.Div(f"<h3> Exception while creating panel </h3> <pre>{e}</pre>")
+        """Delegate to :class:`TimeSeriesPlotAction` for programmatic access."""
+        action = TimeSeriesPlotAction()
+        refs_and_data = list(action.get_refs_and_data(df, self))
+        return action.render(df, refs_and_data, self)
 
     def _update_title_for_custom_grouping(self, title_map):
         """
@@ -788,3 +636,136 @@ class TimeSeriesDataUIManager(DataUIManager):
             processed_titles[group_key] = title
 
         return processed_titles
+
+
+class TimeSeriesPlotAction(PlotAction):
+    """PlotAction for time-series data backed by a :class:`~dvue.catalog.DataCatalog`.
+
+    Absorbs the full visualization pipeline (formerly split between
+    ``create_layout`` and ``create_panel`` on
+    :class:`TimeSeriesDataUIManager`) so that data retrieval + rendering is
+    self-contained in the action and can be invoked independently of the
+    DataUI widget machinery.
+
+    The action receives pre-loaded ``(row, ref, data)`` triples from
+    :meth:`~dvue.actions.PlotAction.get_refs_and_data` and builds curves,
+    applies styling, and assembles the final HoloViews layout using helper
+    methods on *manager*.
+    """
+
+    def render(self, df, refs_and_data, manager):
+        """Build a HoloViews Layout from *refs_and_data*.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The selected rows from the catalog table (used for style
+            preparation and file-index mapping).
+        refs_and_data : list of (row, ref, data)
+            Pre-loaded triples produced by
+            :meth:`~dvue.actions.PlotAction.get_refs_and_data`.
+            Entries where *ref* or *data* is ``None`` are skipped.
+        manager : TimeSeriesDataUIManager
+            Provides helper methods: ``_process_curve_data``,
+            ``create_curve``, ``_add_curve_to_layout``, styling helpers, etc.
+        """
+        time_range = manager.time_range
+
+        # File-index label map (short unique names per file when display_fileno is set)
+        file_index_map = {}
+        if manager.display_fileno:
+            local_unique_files = df[manager.filename_column].unique()
+            short_unique_files = get_unique_short_names(local_unique_files)
+            file_index_map = dict(zip(local_unique_files, short_unique_files))
+
+        style_maps = manager._prepare_style_maps(df)
+
+        layout_map = {}
+        title_map = {}
+        range_map = {}
+        station_map = {}
+
+        for row, ref, data in refs_and_data:
+            try:
+                if data is None:
+                    continue
+
+                # Resolve unit: prefer DataReference attribute, fall back to catalog row
+                unit = str(
+                    ref.get_attribute("unit", row.get("unit", "")) if ref is not None
+                    else row.get("unit", "")
+                ).lower()
+
+                data = manager._process_curve_data(data, row, time_range)
+
+                file_index = (
+                    file_index_map.get(row[manager.filename_column], "")
+                    if manager.display_fileno
+                    else ""
+                )
+                curve = manager.create_curve(data, row, unit, file_index=file_index)
+                station_name = manager.build_station_name(row)
+
+                # Determine group key: custom column > unit
+                group_key = None
+                if manager.plot_group_by_column and manager.plot_group_by_column in row:
+                    group_value = row[manager.plot_group_by_column]
+                    if group_value is not None and str(group_value).strip() != "":
+                        group_key = str(group_value)
+
+                manager._add_curve_to_layout(
+                    layout_map, station_map, title_map, range_map,
+                    curve, row, unit, station_name, group_key=group_key,
+                )
+            except Exception as e:
+                print(full_stack())
+                if pn.state.notifications:
+                    pn.state.notifications.error(f"Error processing row: {row}: {e}")
+
+        if not layout_map:
+            return hv.Div(manager.get_no_selection_message()).opts(sizing_mode="stretch_both")
+
+        title_map = manager._update_title_for_custom_grouping(title_map)
+
+        if manager.sensible_range_yaxis:
+            for group_key, curves in layout_map.items():
+                for curve, _ in curves:
+                    range_map[group_key] = manager._calculate_range(range_map[group_key], curve.data)
+
+        # Assemble overlays
+        overlays = []
+        for group_key, curves_data in layout_map.items():
+            stations = station_map[group_key]
+            style_combinations, has_duplicates, has_style_duplicates = (
+                manager._get_style_combinations(stations, curves_data, style_maps)
+            )
+            styled_curves = [
+                manager._apply_curve_styling(
+                    curve, row, has_duplicates, has_style_duplicates,
+                    style_maps, style_combinations,
+                )
+                for curve, row in curves_data
+            ]
+            overlays.append(
+                hv.Overlay(styled_curves).opts(
+                    show_legend=manager.show_legend,
+                    legend_position=manager.legend_position,
+                    ylim=(
+                        tuple(range_map[group_key])
+                        if range_map[group_key] is not None
+                        else (None, None)
+                    ),
+                    title=title_map[group_key],
+                    min_height=400,
+                )
+            )
+
+        return (
+            hv.Layout(overlays)
+            .cols(1)
+            .opts(
+                shared_axes=manager.shared_axes,
+                axiswise=True,
+                sizing_mode="stretch_both",
+            )
+        )
