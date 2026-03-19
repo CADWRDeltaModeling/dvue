@@ -74,6 +74,42 @@ def csv_dir(tmp_path):
 
 
 class TestDataReference:
+    def test_source_in_attributes(self, simple_df):
+        ref = DataReference(source="/data/flow.csv", reader=InMemoryDataReferenceReader(simple_df), name="r")
+        assert ref.get_attribute("source") == "/data/flow.csv"
+        assert "source" in ref.attributes
+
+    def test_source_searchable_via_catalog(self, simple_df):
+        cat = DataCatalog()
+        cat.add(DataReference(source="s1.csv", reader=InMemoryDataReferenceReader(simple_df), name="a"))
+        cat.add(DataReference(source="s2.csv", reader=InMemoryDataReferenceReader(simple_df.copy()), name="b"))
+        assert cat.search(source="s1.csv") == [cat["a"]]
+        assert cat.search(source="s2.csv") == [cat["b"]]
+
+    def test_source_in_to_dataframe(self, simple_df):
+        cat = DataCatalog()
+        cat.add(DataReference(source="/x.csv", reader=InMemoryDataReferenceReader(simple_df), name="r"))
+        df = cat.to_dataframe()
+        assert "source" in df.columns
+        assert df.loc["r", "source"] == "/x.csv"
+
+    def test_source_not_in_default_ref_key(self, simple_df):
+        """source should not appear in ref_key() by default."""
+        ref = DataReference(source="/data/flow.csv", reader=InMemoryDataReferenceReader(simple_df),
+                            name="r", station="A", variable="T")
+        assert ref.ref_key() == "A_T"  # source excluded
+
+    def test_source_not_in_default_key_attributes(self, simple_df):
+        ref = DataReference(source="s.csv", reader=InMemoryDataReferenceReader(simple_df),
+                            name="r", station="A")
+        assert "source" not in ref.get_key_attributes()
+
+    def test_source_included_when_set_as_key_attribute(self, simple_df):
+        ref = DataReference(source="s.csv", reader=InMemoryDataReferenceReader(simple_df),
+                            name="r", station="A")
+        ref.set_key_attributes(["source", "station"])
+        assert "source_csv" in ref.ref_key() or "s_csv" in ref.ref_key()
+
     def test_from_dataframe(self, simple_df):
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="climate")
         result = ref.getData()

@@ -375,7 +375,8 @@ class DataReference:
         self.name = name
         self._cache_enabled: bool = cache
         self._cached_data: Dict[Any, pd.DataFrame] = {}
-        self._attributes: Dict[str, Any] = dict(attributes)
+        # source is always the first attribute so it appears first in to_dataframe()
+        self._attributes: Dict[str, Any] = {"source": source, **attributes}
         self._key_attributes: Optional[List[str]] = None  # None → all attributes
 
     # ------------------------------------------------------------------
@@ -410,9 +411,8 @@ class DataReference:
         """
         return {
             "name": self.name,
-            "source": self.source,
             "reader": self._reader_fqcn,
-            **self._attributes,
+            **self._attributes,   # "source" is already in here
         }
 
     # ------------------------------------------------------------------
@@ -481,7 +481,9 @@ class DataReference:
         list of str
         """
         if self._key_attributes is None:
-            return list(self._attributes.keys())
+            # "source" is location metadata, not a domain identifier — exclude it
+            # from the default key so ref_key() stays a clean Python identifier.
+            return [k for k in self._attributes if k != "source"]
         return list(self._key_attributes)
 
     def _make_cache_key(self, time_range: Any) -> Any:
