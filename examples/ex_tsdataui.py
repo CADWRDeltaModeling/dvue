@@ -138,6 +138,44 @@ print(catalog)  # DataCatalog(N references)
 print(catalog.to_dataframe()[["station_name", "variable", "unit", "interval"]].to_string())
 
 
+# %% -- [4] ExampleTimeSeriesPlotAction + ExampleTimeSeriesDataUIManager ------
+
+
+class ExampleTimeSeriesPlotAction(tsdataui.TimeSeriesPlotAction):
+    """TimeSeriesPlotAction for the example station catalog.
+
+    Overrides :meth:`create_curve` to add domain-specific axis labels and
+    :meth:`append_to_title_map` / :meth:`create_title` to format overlay
+    titles as ``station_ids(variables)``.
+    """
+
+    def create_curve(self, df, r, unit, file_index=None):
+        label = f'{r["station_id"]}/{r["variable"]}/{r["interval"]}'
+        crv = hv.Curve(df.iloc[:, [0]], label=label).redim(value=label)
+        return crv.opts(
+            xlabel="Time",
+            ylabel=f'{r["variable"]} ({unit})',
+            title=f'{r["variable"]} @ {r["station_name"]}',
+            responsive=True,
+            active_tools=["wheel_zoom"],
+            tools=["hover"],
+        )
+
+    def _append_value(self, new_value, value):
+        if new_value not in value:
+            value += f'{", " if value else ""}{new_value}'
+        return value
+
+    def append_to_title_map(self, title_map, unit, r):
+        value = title_map.get(unit, ["", ""])
+        value[0] = self._append_value(r["variable"], value[0])
+        value[1] = self._append_value(r["station_id"], value[1])
+        title_map[unit] = value
+
+    def create_title(self, v):
+        return f"{v[1]}({v[0]})"
+
+
 # %% -- [4] ExampleTimeSeriesDataUIManager ------------------------------------
 class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
     """TimeSeriesDataUIManager backed by a DataCatalog.
@@ -273,31 +311,8 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
     def get_map_marker_columns(self):
         return ["variable"]
 
-    def create_curve(self, df, r, unit, file_index=None):
-        label = f'{r["station_id"]}/{r["variable"]}/{r["interval"]}'
-        crv = hv.Curve(df.iloc[:, [0]], label=label).redim(value=label)
-        return crv.opts(
-            xlabel="Time",
-            ylabel=f'{r["variable"]} ({unit})',
-            title=f'{r["variable"]} @ {r["station_name"]}',
-            responsive=True,
-            active_tools=["wheel_zoom"],
-            tools=["hover"],
-        )
-
-    def _append_value(self, new_value, value):
-        if new_value not in value:
-            value += f'{", " if value else ""}{new_value}'
-        return value
-
-    def append_to_title_map(self, title_map, unit, r):
-        value = title_map.get(unit, ["", ""])
-        value[0] = self._append_value(r["variable"], value[0])
-        value[1] = self._append_value(r["station_id"], value[1])
-        title_map[unit] = value
-
-    def create_title(self, v):
-        return f"{v[1]}({v[0]})"
+    def _make_plot_action(self):
+        return ExampleTimeSeriesPlotAction()
 
 
 # %% -- [5] Load math refs from YAML -----------------------------------------

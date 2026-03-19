@@ -264,8 +264,6 @@ class DataUIManager(DataProvider):
     -----------------------------------
     * :meth:`get_table_column_width_map`
     * :meth:`get_table_filters`
-    * :meth:`append_to_title_map`
-    * :meth:`create_title`
     * :meth:`get_tooltips`
     * :meth:`get_map_color_columns`
     * :meth:`get_name_to_color`
@@ -322,22 +320,6 @@ class DataUIManager(DataProvider):
         You must override this in your subclass.
         """
         raise NotImplementedError("You must implement get_table_filters() in your subclass.")
-
-    def append_to_title_map(self, title_map: dict, unit: str, r: pd.Series):
-        """
-        Append information to a title map for display.
-
-        You must override this in your subclass.
-        """
-        raise NotImplementedError("You must implement append_to_title_map() in your subclass.")
-
-    def create_title(self, title_map: dict, unit: str, r: pd.Series) -> str:
-        """
-        Create a title string for display.
-
-        You must override this in your subclass.
-        """
-        raise NotImplementedError("You must implement create_title() in your subclass.")
 
     @lru_cache(maxsize=128)
     def get_no_selection_message(self) -> str:

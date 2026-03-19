@@ -154,6 +154,14 @@ class TimeSeriesDataUIManager(DataUIManager):
             return super().get_data_catalog()
         raise NotImplementedError("Method get_data_catalog not implemented")
 
+    def _make_plot_action(self):
+        """Factory that returns the :class:`TimeSeriesPlotAction` for this manager.
+
+        Override to inject a customised :class:`TimeSeriesPlotAction` subclass
+        without touching :meth:`get_data_actions` or :meth:`create_panel`.
+        """
+        return TimeSeriesPlotAction()
+
     def get_data_actions(self):
         """Return default actions, replacing PlotAction with TimeSeriesPlotAction and
         optionally appending MathRefEditorAction when show_math_ref_editor is True."""
@@ -161,7 +169,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Upgrade the generic PlotAction to TimeSeriesPlotAction
         for action in actions:
             if action.get("name") == "Plot":
-                action["callback"] = TimeSeriesPlotAction().callback
+                action["callback"] = self._make_plot_action().callback
                 break
         if self.show_math_ref_editor:
             from .math_ref_editor import MathRefEditorAction
@@ -189,9 +197,6 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def get_tooltips(self):
         raise NotImplementedError("Method get_tooltips not implemented")
-
-    def create_curve(self, data, r, unit, file_index=""):
-        raise NotImplementedError("Method create_curve not implemented")
 
     # methods below if geolocation data is available
 
@@ -405,43 +410,6 @@ class TimeSeriesDataUIManager(DataUIManager):
 
         return data
 
-    def _add_curve_to_layout(
-        self,
-        layout_map,
-        station_map,
-        title_map,
-        range_map,
-        curve,
-        row,
-        unit,
-        station_name,
-        group_key=None,
-    ):
-        """Add a curve to the layout maps using the specified group key.
-
-        Args:
-            layout_map: Dictionary mapping group keys to lists of (curve, row) tuples
-            station_map: Dictionary mapping group keys to lists of station names
-            title_map: Dictionary mapping group keys to title information
-            range_map: Dictionary mapping group keys to y-axis ranges
-            curve: The curve to add
-            row: The data row
-            unit: The unit of measure (used as default group key if group_key is None)
-            station_name: The name of the station
-            group_key: The key to group by (defaults to unit if None)
-        """
-        # Use unit as the default group key if group_key is None
-        group_key = group_key if group_key is not None else unit
-
-        if group_key not in layout_map:
-            layout_map[group_key] = []
-            range_map[group_key] = None
-            station_map[group_key] = []
-
-        layout_map[group_key].append((curve, row))
-        station_map[group_key].append(station_name)
-        self.append_to_title_map(title_map, group_key, row)
-
     def _calculate_range(self, current_range, df, factor=0.0):
         if df.empty:
             return current_range
@@ -600,58 +568,147 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def create_panel(self, df):
         """Delegate to :class:`TimeSeriesPlotAction` for programmatic access."""
-        action = TimeSeriesPlotAction()
+        action = self._make_plot_action()
         refs_and_data = list(action.get_refs_and_data(df, self))
         return action.render(df, refs_and_data, self)
-
-    def _update_title_for_custom_grouping(self, title_map):
-        """
-        Update title map when custom grouping is used.
-
-        This method adds grouping information to titles when a custom plot_group_by_column
-        is used instead of the default unit-based grouping.
-
-        Args:
-            title_map: The title map to update
-
-        Returns:
-            Updated title map with grouping information
-        """
-        # Process each key-value pair to create titles
-        processed_titles = {}
-        for group_key, title_info in title_map.items():
-            base_title = self.create_title(title_info)
-
-            # When using custom grouping, add the group info and column name
-            if self.plot_group_by_column:
-                column_name = self.plot_group_by_column
-                if str(group_key) != base_title:  # Avoid redundancy
-                    title = f"{column_name}: {group_key} - {base_title}"
-                else:
-                    title = f"{column_name}: {group_key}"
-            else:
-                # No custom grouping, use base title
-                title = base_title
-
-            processed_titles[group_key] = title
-
-        return processed_titles
-
 
 class TimeSeriesPlotAction(PlotAction):
     """PlotAction for time-series data backed by a :class:`~dvue.catalog.DataCatalog`.
 
-    Absorbs the full visualization pipeline (formerly split between
-    ``create_layout`` and ``create_panel`` on
-    :class:`TimeSeriesDataUIManager`) so that data retrieval + rendering is
-    self-contained in the action and can be invoked independently of the
-    DataUI widget machinery.
+    Owns the full visualisation pipeline: curve creation, title accumulation,
+    layout assembly, and styling.  Subclass to customise any part of the pipeline,
+    then wire your subclass in via :meth:`TimeSeriesDataUIManager._make_plot_action`.
 
-    The action receives pre-loaded ``(row, ref, data)`` triples from
-    :meth:`~dvue.actions.PlotAction.get_refs_and_data` and builds curves,
-    applies styling, and assembles the final HoloViews layout using helper
-    methods on *manager*.
+    The *curve_creator* constructor argument provides a lightweight alternative to
+    subclassing when only :meth:`create_curve` needs customising.
+
+    Customisation hooks
+    -------------------
+    * :meth:`create_curve` — build a single HoloViews element for one time series.
+    * :meth:`append_to_title_map` — accumulate per-group title info from a row.
+    * :meth:`create_title` — convert accumulated title info to a display string.
     """
+
+    def __init__(self, curve_creator=None):
+        """
+        Parameters
+        ----------
+        curve_creator : callable, optional
+            ``f(data, row, unit, file_index) -> hv.Element``.  When supplied,
+            :meth:`create_curve` delegates to this callable instead of using
+            the built-in default.  Useful for quick customisation without
+            subclassing.
+        """
+        self._curve_creator = curve_creator
+
+    # ------------------------------------------------------------------
+    # Customisation hooks
+    # ------------------------------------------------------------------
+
+    def create_curve(self, data, row, unit, file_index=""):
+        """Build a HoloViews element for a single time series.
+
+        Override in a subclass or supply *curve_creator* at construction time
+        for domain-specific axis labels, titles, and curve options.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Time-indexed DataFrame (single column) for this series.
+        row : pd.Series
+            Catalog row containing metadata (station_name, variable, unit, …).
+        unit : str
+            Physical unit string (lower-cased).
+        file_index : str, optional
+            Short file identifier appended to the label when *display_fileno*
+            is set on the manager.
+
+        Returns
+        -------
+        hv.Element
+        """
+        if self._curve_creator is not None:
+            return self._curve_creator(data, row, unit, file_index)
+        # Generic default: use first available identifying column as label
+        label = None
+        for col in ("name", "station_name", "station_id"):
+            val = row.get(col) if hasattr(row, "get") else None
+            if val:
+                label = str(val)
+                break
+        label = label or "value"
+        if file_index:
+            label = f"{label} [{file_index}]"
+        return hv.Curve(data.iloc[:, [0]], label=label).opts(
+            responsive=True,
+            active_tools=["wheel_zoom"],
+            tools=["hover"],
+        )
+
+    def append_to_title_map(self, title_map, group_key, row):
+        """Accumulate per-group title information from *row*.
+
+        The default stores the *group_key* string itself as the title.
+        Override (together with :meth:`create_title`) to build richer titles,
+        e.g. ``"station_ids(variables)"``.
+        """
+        title_map.setdefault(group_key, str(group_key))
+
+    def create_title(self, title_info) -> str:
+        """Convert accumulated title info for one group to a display string.
+
+        Override together with :meth:`append_to_title_map` when *title_info*
+        is a structured object rather than a plain string.
+        """
+        return str(title_info)
+
+    # ------------------------------------------------------------------
+    # Pipeline helpers
+    # ------------------------------------------------------------------
+
+    def _add_curve_to_layout(
+        self,
+        layout_map,
+        station_map,
+        title_map,
+        range_map,
+        curve,
+        row,
+        unit,
+        station_name,
+        group_key=None,
+    ):
+        """Add a curve to the layout maps using the specified group key."""
+        group_key = group_key if group_key is not None else unit
+
+        if group_key not in layout_map:
+            layout_map[group_key] = []
+            range_map[group_key] = None
+            station_map[group_key] = []
+
+        layout_map[group_key].append((curve, row))
+        station_map[group_key].append(station_name)
+        self.append_to_title_map(title_map, group_key, row)
+
+    def _update_title_for_custom_grouping(self, title_map, manager):
+        """Build final title strings, adding group-column context when applicable."""
+        processed_titles = {}
+        for group_key, title_info in title_map.items():
+            base_title = self.create_title(title_info)
+            if manager.plot_group_by_column:
+                column_name = manager.plot_group_by_column
+                if str(group_key) != base_title:
+                    title = f"{column_name}: {group_key} - {base_title}"
+                else:
+                    title = f"{column_name}: {group_key}"
+            else:
+                title = base_title
+            processed_titles[group_key] = title
+        return processed_titles
+
+    # ------------------------------------------------------------------
+    # render
+    # ------------------------------------------------------------------
 
     def render(self, df, refs_and_data, manager):
         """Build a HoloViews Layout from *refs_and_data*.
@@ -666,8 +723,7 @@ class TimeSeriesPlotAction(PlotAction):
             :meth:`~dvue.actions.PlotAction.get_refs_and_data`.
             Entries where *ref* or *data* is ``None`` are skipped.
         manager : TimeSeriesDataUIManager
-            Provides helper methods: ``_process_curve_data``,
-            ``create_curve``, ``_add_curve_to_layout``, styling helpers, etc.
+            Provides styling helpers, widget params, and data transformation.
         """
         time_range = manager.time_range
 
@@ -703,7 +759,7 @@ class TimeSeriesPlotAction(PlotAction):
                     if manager.display_fileno
                     else ""
                 )
-                curve = manager.create_curve(data, row, unit, file_index=file_index)
+                curve = self.create_curve(data, row, unit, file_index=file_index)
                 station_name = manager.build_station_name(row)
 
                 # Determine group key: custom column > unit
@@ -713,7 +769,7 @@ class TimeSeriesPlotAction(PlotAction):
                     if group_value is not None and str(group_value).strip() != "":
                         group_key = str(group_value)
 
-                manager._add_curve_to_layout(
+                self._add_curve_to_layout(
                     layout_map, station_map, title_map, range_map,
                     curve, row, unit, station_name, group_key=group_key,
                 )
@@ -725,7 +781,7 @@ class TimeSeriesPlotAction(PlotAction):
         if not layout_map:
             return hv.Div(manager.get_no_selection_message()).opts(sizing_mode="stretch_both")
 
-        title_map = manager._update_title_for_custom_grouping(title_map)
+        title_map = self._update_title_for_custom_grouping(title_map, manager)
 
         if manager.sensible_range_yaxis:
             for group_key, curves in layout_map.items():
