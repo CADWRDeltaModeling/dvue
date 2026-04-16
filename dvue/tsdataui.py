@@ -746,10 +746,12 @@ class TimeSeriesPlotAction(PlotAction):
                 if data is None:
                     continue
 
-                # Resolve unit: prefer DataReference attribute, fall back to catalog row
+                # Resolve unit: prefer data.attrs["unit"] (set by reader after any
+                # conversion), then DataReference attribute, then catalog row.
                 unit = str(
-                    ref.get_attribute("unit", row.get("unit", "")) if ref is not None
-                    else row.get("unit", "")
+                    data.attrs.get("unit") or
+                    (ref.get_attribute("unit", row.get("unit", "")) if ref is not None
+                     else row.get("unit", ""))
                 ).lower()
 
                 data = manager._process_curve_data(data, row, time_range)

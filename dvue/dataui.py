@@ -944,7 +944,6 @@ class DataUI(param.Parameterized):
                     pn.Tabs(
                         (f"Interactive Map {self._tab_count}", map_display),
                         closable=True,
-                        dynamic=True,
                     )
                 ]
 
