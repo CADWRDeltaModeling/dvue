@@ -564,6 +564,14 @@ class DataUI(param.Parameterized):
                 self._map_features = self._map_features.opts(
                     color=dim(color_by).categorize(column_color, default="blue")
                 )
+            elif isinstance(column_color, list):
+                # list of colors — build a categorize dict from unique column values
+                # so Bokeh receives a resolved transform rather than a bare dim()
+                unique_vals = list(dfmap[color_by].unique()) if color_by in dfmap.columns else []
+                color_dict = {v: column_color[i % len(column_color)] for i, v in enumerate(unique_vals)}
+                self._map_features = self._map_features.opts(
+                    color=dim(color_by).categorize(color_dict, default="blue")
+                )
             else:
                 # named colormap string (e.g. "Category10", "Viridis")
                 self._map_features = self._map_features.opts(
@@ -662,9 +670,15 @@ class DataUI(param.Parameterized):
         if isinstance(self._map_features, gv.Points):
             if show_marker_by:
                 name_to_marker = self._dataui_manager.get_name_to_marker()
-                # get_name_to_marker() returns {column_name: {value: marker}}.
+                # get_name_to_marker() returns {column_name: {value: marker}} or a list.
                 # Extract the per-column dict before passing to categorize().
-                column_marker = name_to_marker.get(marker_by, {}) if isinstance(name_to_marker, dict) else {}
+                if isinstance(name_to_marker, dict):
+                    column_marker = name_to_marker.get(marker_by, {})
+                elif isinstance(name_to_marker, list):
+                    unique_vals = list(current_view[marker_by].unique()) if marker_by in current_view.columns else []
+                    column_marker = {v: name_to_marker[i % len(name_to_marker)] for i, v in enumerate(unique_vals)}
+                else:
+                    column_marker = {}
                 self._map_features = self._map_features.opts(
                     marker=dim(marker_by).categorize(column_marker, default="circle")
                 )
@@ -822,9 +836,8 @@ class DataUI(param.Parameterized):
             )
         )
         gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=True, allow_drag=False)
-        gspec[0, 0:5] = self._action_panel
-        gspec[1:5, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
-        gspec[6:15, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
+        gspec[0:4, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
+        gspec[5:14, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
         self._main_panel = gspec
         return gspec
 
@@ -868,19 +881,14 @@ class DataUI(param.Parameterized):
         """Create the main view content based on the current view_type"""
         if self.view_type == "table":
             gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
-            gspec[0, 0:5] = self._action_panel
-            gspec[1:15, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
-            return gspec
+            gspec[0:14, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
+            return pn.Column(self._action_panel, gspec, sizing_mode="stretch_both")
         elif self.view_type == "display":
             gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
-            gspec[0, 0:5] = self._action_panel
-            gspec[1:15, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
-            return gspec
-        else:  # combined view
-            return pn.Column(
-                pn.Row(self._main_panel, sizing_mode="stretch_both", scroll=True),
-                sizing_mode="stretch_both",
-            )
+            gspec[0:14, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
+            return pn.Column(self._action_panel, gspec, sizing_mode="stretch_both")
+        else:  # combined — action panel above the resizable GridStack
+            return pn.Column(self._action_panel, self._main_panel, sizing_mode="stretch_both")
 
     def set_progress(self, value):
         """
@@ -966,9 +974,9 @@ class DataUI(param.Parameterized):
     def create_view_navigation(self):
         """Create navigation buttons for switching between views"""
         nav_buttons = pn.Row(
-            pn.widgets.Button(name="Combined", button_type="primary"),
-            pn.widgets.Button(name="Table", button_type="primary"),
-            pn.widgets.Button(name="Display", button_type="primary"),
+            pn.widgets.Button(name="Combined", button_type="success"),
+            pn.widgets.Button(name="Table", button_type="success"),
+            pn.widgets.Button(name="Display", button_type="success"),
         )
 
         def set_hash(event):
@@ -992,8 +1000,11 @@ class DataUI(param.Parameterized):
         else:
             self.view_type = "combined"
 
-        # Update the template main content based on the selected view
-        if hasattr(self, "_main_view"):
+        # Update only the content area so the nav_bar at the top of
+        # _main_view is preserved across view-type switches.
+        if hasattr(self, "_main_content"):
+            self._main_content.objects = [self._create_main_view()]
+        elif hasattr(self, "_main_view"):
             self._main_view.objects = [self._create_main_view()]
 
     def create_view(self, title="Data User Interface"):
@@ -1118,11 +1129,18 @@ class DataUI(param.Parameterized):
                 pn.Tabs(("Options", control_widgets), ("Table Options", table_options)),
                 self.progress_bar,
             )
-        # Create view navigation buttons
+        # Create view navigation buttons.
+        # Nav bar is placed inside _main_view (not in template.header) so it
+        # is part of template.main and remains visible when DataUI is embedded
+        # in another template that only extracts .sidebar/.main/.modal and
+        # discards .header.
         nav_buttons = pn.Row(self.create_view_navigation())
+        nav_bar = pn.Row(nav_buttons, pn.layout.HSpacer(), sizing_mode="stretch_width")
 
-        # Create the initial main view based on URL hash
-        self._main_view = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
+        # _main_content is swapped by update_view_from_location on view-type
+        # changes; nav_bar stays pinned at the top of _main_view.
+        self._main_content = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
+        self._main_view = pn.Column(nav_bar, self._main_content, sizing_mode="stretch_both")
 
         template = pn.template.VanillaTemplate(
             title=title,
@@ -1131,9 +1149,9 @@ class DataUI(param.Parameterized):
             header_color="lightgray",
         )
 
-        # Add navigation before the main content
+        # About button only in the header (visible in standalone use).
         about_button = self.create_about_button(template)
-        template.header.append(pn.Row(nav_buttons, pn.layout.HSpacer(), about_button))
+        template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
         template.main.append(self._main_view)
 
         # Adding about button
