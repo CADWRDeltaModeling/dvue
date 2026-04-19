@@ -415,6 +415,15 @@ class DataUIManager(DataProvider):
         """
         return None
 
+    def get_sidebar_disclaimer(self):
+        """Return a Panel pane (or plain string) to display at the bottom of the
+        sidebar, or ``None`` (default) to add nothing.
+
+        Override in a subclass to inject a data-source disclaimer, terms of
+        use notice, or any other footer content.
+        """
+        return None
+
     def get_data_actions(self) -> list:
         """Return a list of default data actions. Override to customize available actions."""
         plot_action = PlotAction()
@@ -1199,6 +1208,10 @@ class DataUI(param.Parameterized):
                 pn.Tabs(("Options", control_widgets), ("Table Options", table_options)),
                 self.progress_bar,
             )
+        # Append optional disclaimer to the bottom of the sidebar.
+        disclaimer = self._dataui_manager.get_sidebar_disclaimer()
+        if disclaimer is not None:
+            sidebar_view.append(disclaimer)
         # Create view navigation buttons.
         # Nav bar is placed inside _main_view (not in template.header) so it
         # is part of template.main and remains visible when DataUI is embedded
