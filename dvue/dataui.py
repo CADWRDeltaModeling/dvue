@@ -523,6 +523,31 @@ class DataUI(param.Parameterized):
         # if station_id column is defined then consolidate the self._dfcat into a single row per station
         # this is useful when we have multiple rows per station
         hover = HoverTool(tooltips=tooltips)
+
+        # Pre-compute categorical colors as a concrete column BEFORE building the
+        # GeoViews element.  Bokeh 3.9+ strictly validates DataSpec properties
+        # (fill_color, line_color) and rejects HoloViews dim().categorize()
+        # objects.  A plain string field-reference ("_dvue_color") is always
+        # accepted by Bokeh.
+        _COLOR_COL = "_dvue_color"
+        color_dict = None
+        column_color = "Category10"  # default; re-resolved below if show_color_by
+        if show_color_by:
+            name_to_color = self._dataui_manager.get_name_to_color()
+            column_color = (
+                name_to_color.get(color_by, "Category10")
+                if isinstance(name_to_color, dict)
+                else name_to_color
+            )
+            if isinstance(column_color, dict):
+                color_dict = column_color
+            elif isinstance(column_color, list):
+                unique_vals = list(dfmap[color_by].unique()) if color_by in dfmap.columns else []
+                color_dict = {v: column_color[i % len(column_color)] for i, v in enumerate(unique_vals)}
+            if color_dict is not None:
+                dfmap = dfmap.copy()
+                dfmap[_COLOR_COL] = dfmap[color_by].map(lambda v: color_dict.get(v, "blue"))
+
         # check if the dfmap is a geodataframe
         try:
             if isinstance(dfmap, gpd.GeoDataFrame):
@@ -554,26 +579,13 @@ class DataUI(param.Parameterized):
             logger.error(f"Error building map of features: {e}")
             self._map_features = gv.Points(dfmap, crs=crs)
         if show_color_by:
-            name_to_color = self._dataui_manager.get_name_to_color()
-            # get_name_to_color() returns {column_name: colormap_or_dict}.
-            # Extract the entry for the active column so categorize() receives
-            # a {value: color} dict, or fall back to a named cmap string.
-            column_color = name_to_color.get(color_by, "Category10") if isinstance(name_to_color, dict) else name_to_color
-            if isinstance(column_color, dict):
-                # explicit {value: color} mapping
-                self._map_features = self._map_features.opts(
-                    color=dim(color_by).categorize(column_color, default="blue")
-                )
-            elif isinstance(column_color, list):
-                # list of colors — build a categorize dict from unique column values
-                # so Bokeh receives a resolved transform rather than a bare dim()
-                unique_vals = list(dfmap[color_by].unique()) if color_by in dfmap.columns else []
-                color_dict = {v: column_color[i % len(column_color)] for i, v in enumerate(unique_vals)}
-                self._map_features = self._map_features.opts(
-                    color=dim(color_by).categorize(color_dict, default="blue")
-                )
+            if color_dict is not None:
+                # Use pre-computed color column — Bokeh 3.9+ accepts a plain field
+                # reference; dim().categorize() is rejected by strict DataSpec validation.
+                self._map_features = self._map_features.opts(color=_COLOR_COL)
             else:
-                # named colormap string (e.g. "Category10", "Viridis")
+                # Named colormap string (e.g. "Category10", "Viridis") — HoloViews
+                # routes this through a proper Bokeh ColorMapper, which is accepted.
                 self._map_features = self._map_features.opts(
                     color=dim(color_by), cmap=column_color
                 )
