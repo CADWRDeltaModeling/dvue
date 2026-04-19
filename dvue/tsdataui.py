@@ -406,6 +406,11 @@ class TimeSeriesDataUIManager(DataUIManager):
             # sensors resampled to a regular grid).  Edge NaN from fill_edge_nan=True
             # remain in the output to indicate the filter warm-up period.
             data_for_filter = data.interpolate(method="time")
+            # Infer and set frequency if missing (slicing/filtering can drop it)
+            if hasattr(data_for_filter.index, "freq") and data_for_filter.index.freq is None:
+                inferred_freq = pd.infer_freq(data_for_filter.index)
+                if inferred_freq is not None:
+                    data_for_filter.index.freq = pd.tseries.frequencies.to_offset(inferred_freq)
             data = cosine_lanczos(data_for_filter, "40h")
 
         return data
