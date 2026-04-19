@@ -301,6 +301,27 @@ class TimeSeriesDataUIManager(DataUIManager):
         )
         return widget_tabs
 
+    def get_mobile_widgets(self):
+        """Return a compact widget set for mobile: time range + key plot options."""
+        time_widget = pn.Column(
+            pn.pane.HTML("Time range:"),
+            pn.Param(
+                self.param.time_range,
+                widgets={
+                    "time_range": {
+                        "widget_type": pn.widgets.DatetimeRangeInput,
+                        "format": "%Y-%m-%d %H:%M",
+                    }
+                },
+            ),
+        )
+        plot_opts = pn.Column(
+            self.param.show_legend,
+            self.param.color_cycle_name,
+            self.param.shared_axes,
+        )
+        return pn.Column(time_widget, plot_opts, sizing_mode="stretch_width")
+
     def get_data(self, df):
         # Start with 0 progress
         # Get the DataUI instance from the caller

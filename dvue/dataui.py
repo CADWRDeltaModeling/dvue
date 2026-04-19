@@ -46,6 +46,40 @@ from .catalog import DataCatalog, DataReference, CatalogView  # noqa: F401 – e
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# ---------------------------------------------------------------------------
+# Responsive CSS injected into FastListTemplate
+# ---------------------------------------------------------------------------
+_RESPONSIVE_CSS = """
+/* Tablet: narrower sidebar */
+@media (max-width: 1024px) {
+    #sidebar {
+        width: 330px !important;
+        min-width: 280px !important;
+    }
+}
+/* Wrap action buttons on narrow screens */
+.action-bar-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+"""
+
+_MOBILE_CSS = """
+/* Mobile: tighter spacing, larger touch targets */
+.bk-btn {
+    min-height: 40px;
+    font-size: 14px;
+}
+.tabulator .tabulator-row {
+    min-height: 44px;
+}
+/* Cards fill width */
+.card {
+    margin: 4px 0;
+}
+"""
+
 
 class DataProvider(param.Parameterized):
     """Data-access base class for DataUI.
@@ -418,6 +452,30 @@ class DataUIManager(DataProvider):
             callback=download_catalog.callback,
         )
         return [plot_button, download_button, permalink_button, download_catalog_button]
+
+    def get_mobile_table_columns(self) -> list:
+        """Return column names to display in the condensed mobile table.
+
+        Override in subclasses to customize. Defaults to the first 4 columns
+        from :meth:`get_table_column_width_map`.
+        """
+        return list(self.get_table_column_width_map().keys())[:4]
+
+    def get_mobile_actions(self) -> list:
+        """Return actions for the mobile action bar.
+
+        Override in subclasses to customize. Defaults to Plot only.
+        """
+        actions = self.get_data_actions()
+        return [a for a in actions if a.get("name") == "Plot"][:1]
+
+    def get_mobile_widgets(self):
+        """Return a Panel component with mobile-friendly widget controls.
+
+        Override in subclasses to provide a compact widget set.
+        Defaults to None (no extra controls beyond the action bar).
+        """
+        return None
 
 
 notifications = pn.state.notifications
@@ -1121,8 +1179,8 @@ class DataUI(param.Parameterized):
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
                 self._tmap * self._map_function,
-                min_width=450,
-                min_height=600,
+                min_width=300,
+                min_height=300,
                 sizing_mode="stretch_both",
             )
 
@@ -1154,11 +1212,13 @@ class DataUI(param.Parameterized):
         self._main_content = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
         self._main_view = pn.Column(nav_bar, self._main_content, sizing_mode="stretch_both")
 
-        template = pn.template.VanillaTemplate(
+        template = pn.template.FastListTemplate(
             title=title,
             sidebar=[sidebar_view],
             sidebar_width=450,
-            header_color="lightgray",
+            header_background="lightgray",
+            meta_viewport="width=device-width, initial-scale=1",
+            raw_css=[_RESPONSIVE_CSS],
         )
 
         # About button only in the header (visible in standalone use).
@@ -1174,4 +1234,260 @@ class DataUI(param.Parameterized):
         # finally sync location views
         self.setup_location_sync()
 
+        return template
+
+    def create_mobile_view(self, title="Data User Interface"):
+        """Create a mobile-optimized view with stacked vertical layout.
+
+        Returns a :class:`~panel.template.FastListTemplate` with a condensed
+        table, compact action bar, and vertically stacked plot display.
+        The sidebar (accessible via hamburger menu) contains the map toggle
+        and advanced options.
+        """
+        # --- Data table (condensed) ---
+        mobile_cols = self._dataui_manager.get_mobile_table_columns()
+        all_cols = self._dataui_manager.get_table_columns()
+        # Ensure requested columns exist in catalog
+        mobile_cols = [c for c in mobile_cols if c in all_cols]
+        dfs_mobile = self._dfcat[mobile_cols] if mobile_cols else self._dfcat[list(all_cols)[:4]]
+
+        self.display_table = pn.widgets.Tabulator(
+            dfs_mobile,
+            disabled=True,
+            show_index=False,
+            sizing_mode="stretch_width",
+            page_size=50,
+            configuration={
+                "headerFilterLiveFilterDelay": 600,
+                "columnDefaults": {"tooltip": True},
+            },
+        )
+
+        # --- Display panel ---
+        self._display_panel = pn.Column(sizing_mode="stretch_both", min_height=350)
+        self._display_panel.append(
+            pn.pane.HTML(
+                self._dataui_manager.get_no_selection_message(),
+                sizing_mode="stretch_both",
+            )
+        )
+
+        # --- Action bar (compact) ---
+        self._action_panel = pn.Row(styles={"flex-wrap": "wrap", "gap": "4px"})
+        actions = self._dataui_manager.get_mobile_actions()
+        if actions:
+            action_buttons = self.create_data_actions(actions)
+            self._action_panel.extend(action_buttons)
+
+        # Advanced options toggle
+        mobile_widgets = self._dataui_manager.get_mobile_widgets()
+        advanced_panel = None
+        if mobile_widgets is not None:
+            advanced_panel = pn.Card(
+                mobile_widgets,
+                title="Options",
+                collapsed=True,
+                sizing_mode="stretch_width",
+            )
+
+        # --- Progress bar ---
+        self.progress_bar = pn.indicators.Progress(
+            name="Progress",
+            value=0,
+            sizing_mode="stretch_width",
+            margin=(5, 5),
+            bar_color="primary",
+            visible=False,
+        )
+
+        # --- Main area (stacked cards) ---
+        main_items = [
+            pn.Card(
+                self.display_table,
+                title="Catalog",
+                sizing_mode="stretch_width",
+                max_height=350,
+                styles={"overflow-y": "auto"},
+            ),
+            self._action_panel,
+            self.progress_bar,
+        ]
+        if advanced_panel is not None:
+            main_items.append(advanced_panel)
+        main_items.append(
+            pn.Card(
+                self._display_panel,
+                title="Display",
+                sizing_mode="stretch_both",
+                min_height=350,
+            ),
+        )
+
+        # --- Sidebar (hamburger on mobile) ---
+        sidebar_items = []
+        if hasattr(self, "_map_features"):
+            # Rebuild map streams for mobile
+            _self_stream = streams.Params(
+                parameterized=self,
+                parameters=[
+                    "show_map_colors",
+                    "map_color_category",
+                    "show_map_markers",
+                    "map_marker_category",
+                    "query",
+                    "map_default_span",
+                    "map_non_selection_alpha",
+                    "map_point_size",
+                ],
+            )
+            _table_stream = streams.Params(
+                parameterized=self.display_table,
+                parameters=["filters", "selection"],
+            )
+
+            def _map_callback(
+                show_map_colors, map_color_category,
+                show_map_markers, map_marker_category,
+                query, map_default_span,
+                map_non_selection_alpha, map_point_size,
+                filters, selection,
+            ):
+                return self.update_map_features(
+                    show_color_by=show_map_colors, color_by=map_color_category,
+                    show_marker_by=show_map_markers, marker_by=map_marker_category,
+                    query=query, filters=filters, selection=selection,
+                    map_default_span=map_default_span,
+                    map_non_selection_alpha=map_non_selection_alpha,
+                    map_point_size=map_point_size,
+                )
+
+            self._map_function = hv.DynamicMap(
+                _map_callback, streams=[_self_stream, _table_stream]
+            )
+            self._station_select.source = self._map_function
+            self._station_select.param.watch_values(self.select_data_catalog, "index")
+
+            # Touch-friendly map — tap only, no lasso/box
+            map_card = pn.Card(
+                pn.Column(
+                    self._tmap * self._map_function,
+                    sizing_mode="stretch_width",
+                    height=350,
+                ),
+                title="Map",
+                collapsed=True,
+                sizing_mode="stretch_width",
+            )
+            sidebar_items.append(map_card)
+
+            sidebar_items.append(
+                pn.Card(
+                    pn.Column(
+                        self.param.show_map_colors,
+                        self.param.map_color_category,
+                        self.param.map_point_size,
+                        self.param.query,
+                    ),
+                    title="Map Options",
+                    collapsed=True,
+                    sizing_mode="stretch_width",
+                )
+            )
+
+        control_widgets = self._dataui_manager.get_widgets()
+        sidebar_items.append(
+            pn.Card(
+                control_widgets,
+                title="All Options",
+                collapsed=True,
+                sizing_mode="stretch_width",
+            )
+        )
+
+        template = pn.template.FastListTemplate(
+            title=title,
+            sidebar=sidebar_items,
+            sidebar_width=300,
+            collapsed_sidebar=True,
+            header_background="lightgray",
+            meta_viewport="width=device-width, initial-scale=1",
+            raw_css=[_MOBILE_CSS],
+        )
+
+        template.main.extend(main_items)
+        about_button = self.create_about_button(template)
+        template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
+        template.modal.append(self.get_about_text())
+        self._template = template
+        return template
+
+    def create_responsive_view(self, title="Data User Interface"):
+        """Auto-detect desktop vs mobile and return the appropriate view.
+
+        Uses URL hash routing:
+
+        * ``#mobile`` → :meth:`create_mobile_view`
+        * ``#desktop`` or any other hash → :meth:`create_view`
+        * No hash → auto-detect based on client viewport width via a
+          small JavaScript snippet that redirects narrow screens to
+          ``#mobile``.
+
+        This is the recommended entry-point for apps that want to serve
+        both desktop and mobile users from a single URL.
+        """
+        # We need to build both views lazily inside onload so that
+        # pn.state.location is available.
+        container = pn.Column(
+            pn.indicators.LoadingSpinner(value=True, size=50, name="Loading..."),
+            sizing_mode="stretch_both",
+        )
+
+        # Placeholder template — will be replaced
+        template = pn.template.FastListTemplate(
+            title=title,
+            meta_viewport="width=device-width, initial-scale=1",
+            header_background="lightgray",
+        )
+        template.main.append(container)
+
+        dataui = self
+
+        def _on_load():
+            loc = pn.state.location
+            hash_val = (loc.hash or "").lstrip("#").lower() if loc else ""
+
+            if hash_val == "mobile":
+                t = dataui.create_mobile_view(title=title)
+            elif hash_val:
+                # Any explicit hash (desktop, combined, table, display)
+                t = dataui.create_view(title=title)
+            else:
+                # No hash — inject JS auto-detect that redirects narrow
+                # viewports to #mobile on next load.  For this first load,
+                # default to desktop.
+                t = dataui.create_view(title=title)
+
+                # Client-side redirect for narrow screens on future loads
+                _detect_js = (
+                    "<script>"
+                    "if(window.innerWidth<768 && !window.location.hash){"
+                    "window.location.hash='#mobile';"
+                    "window.location.reload();}"
+                    "</script>"
+                )
+                t.header.append(pn.pane.HTML(_detect_js, width=0, height=0))
+
+            # Re-parent into the outer template
+            container.objects = list(t.main)
+            template.sidebar[:] = list(t.sidebar)
+            template.modal[:] = list(t.modal)
+            for obj in t.header:
+                template.header.append(obj)
+            # Copy template styling
+            template.sidebar_width = t.sidebar_width
+            if hasattr(t, 'collapsed_sidebar'):
+                template.collapsed_sidebar = t.collapsed_sidebar
+
+        pn.state.onload(_on_load)
+        self._template = template
         return template
