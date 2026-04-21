@@ -42,6 +42,24 @@ import urllib.parse
 from .utils import full_stack
 from .catalog import DataCatalog, DataReference, CatalogView  # noqa: F401 – exposed for subclasses
 
+# ---------------------------------------------------------------------------
+# Standard DWR disclaimer — import and assign to disclaimer_text on any
+# DataUIManager subclass to display it in the sidebar.
+# ---------------------------------------------------------------------------
+DWR_DISCLAIMER_TEXT = (
+    "All information provided by the Department of Water Resources on its Web "
+    "pages and Internet sites is made available to provide immediate access for "
+    "the convenience of interested persons. While the Department believes the "
+    "information to be reliable, human or mechanical error remains a "
+    "possibility. Therefore, the Department does not guarantee the accuracy, "
+    "completeness, timeliness, or correct sequencing of the information. "
+    "Neither the Department of Water Resources nor any of the sources of the "
+    "information shall be responsible for any errors or omissions, or for the "
+    "use or results obtained from the use of this information. Other specific "
+    "cautionary notices may be included on other Web pages maintained by the "
+    "Department."
+)
+
 # setup logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -309,7 +327,20 @@ class DataUIManager(DataProvider):
     * :meth:`get_widgets`
     * :meth:`get_data_actions`
     * :meth:`get_no_selection_message`
+    * ``disclaimer_text`` param — set to any string to show a collapsible
+      Disclaimer card at the bottom of the sidebar (use ``DWR_DISCLAIMER_TEXT``
+      for the standard DWR disclaimer).
     """
+
+    disclaimer_text = param.String(
+        default=None,
+        allow_None=True,
+        doc=(
+            "Text for a collapsible Disclaimer card shown at the bottom of the "
+            "sidebar. Set to DWR_DISCLAIMER_TEXT for the standard DWR disclaimer, "
+            "or any other string for a custom notice. Leave None to omit."
+        ),
+    )
 
     @classmethod
     def help(cls):
@@ -416,13 +447,18 @@ class DataUIManager(DataProvider):
         return None
 
     def get_sidebar_disclaimer(self):
-        """Return a Panel pane (or plain string) to display at the bottom of the
-        sidebar, or ``None`` (default) to add nothing.
+        """Return a Panel pane with disclaimer content for the modal dialog,
+        or ``None`` (default) to add nothing.
 
-        Override in a subclass to inject a data-source disclaimer, terms of
-        use notice, or any other footer content.
+        Set the ``disclaimer_text`` param to have it rendered automatically,
+        or override this method to return a custom Panel component.
         """
-        return None
+        if not self.disclaimer_text:
+            return None
+        return pn.pane.Markdown(
+            f"## Disclaimer\n\n{self.disclaimer_text}",
+            sizing_mode="stretch_width",
+        )
 
     def get_data_actions(self) -> list:
         """Return a list of default data actions. Override to customize available actions."""
@@ -902,6 +938,7 @@ class DataUI(param.Parameterized):
 
         self._display_panel = pn.Row(sizing_mode="stretch_both")
         self._action_panel = pn.Row()
+        self._tab_count = 0
         actions = self._dataui_manager.get_data_actions()
 
         if actions:
@@ -956,6 +993,39 @@ class DataUI(param.Parameterized):
         about_btn.on_click(about_callback)
         return about_btn
 
+    def create_disclaimer_button(self, template, disclaimer_modal_content):
+        """Return a button that swaps the modal to the disclaimer text and opens it."""
+        disclaimer_btn = pn.widgets.Button(
+            name="Disclaimer", button_type="light", icon="alert-circle"
+        )
+
+        def disclaimer_callback(event):
+            template.modal.clear()
+            template.modal.append(disclaimer_modal_content)
+            template.open_modal()
+
+        disclaimer_btn.on_click(disclaimer_callback)
+        return disclaimer_btn
+
+    def add_header_buttons(self, template):
+        """Add About (and optionally Disclaimer) buttons to *template*'s header.
+
+        Use this when DataUI is embedded inside an outer template that supplies
+        its own header — the buttons will close over the correct *template* so
+        modals open on the servable outer template rather than the inner one
+        returned by :meth:`create_view`.
+        """
+        about_button = self.create_about_button(template)
+        disclaimer_content = self._dataui_manager.get_sidebar_disclaimer()
+        if disclaimer_content is not None:
+            disclaimer_button = self.create_disclaimer_button(template, disclaimer_content)
+            template.header.append(
+                pn.Row(pn.layout.HSpacer(), disclaimer_button, about_button)
+            )
+        else:
+            template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
+        template.modal.append(self.get_about_text())
+
     def _create_main_view(self):
         """Create the main view content based on the current view_type"""
         if self.view_type == "table":
@@ -991,6 +1061,19 @@ class DataUI(param.Parameterized):
         self.progress_bar.visible = False
         self.progress_bar.value = 0
         self.progress_bar.indeterminate = False
+
+    def show_in_display_panel(self, title, content):
+        """Add *content* as a closable tab in the display panel."""
+        if len(self._display_panel.objects) > 0 and isinstance(
+            self._display_panel.objects[0], pn.Tabs
+        ):
+            tabs = self._display_panel.objects[0]
+            tabs.append((title, content))
+            tabs.active = len(tabs) - 1
+        else:
+            self._display_panel.objects = [
+                pn.Tabs((title, content), closable=True)
+            ]
 
     def show_map_in_display_panel(self, event):
         """Display the map in the display panel area as a closable tab"""
@@ -1207,11 +1290,8 @@ class DataUI(param.Parameterized):
             sidebar_view = pn.Column(
                 pn.Tabs(("Options", control_widgets), ("Table Options", table_options)),
                 self.progress_bar,
+                sizing_mode="stretch_both",
             )
-        # Append optional disclaimer to the bottom of the sidebar.
-        disclaimer = self._dataui_manager.get_sidebar_disclaimer()
-        if disclaimer is not None:
-            sidebar_view.append(disclaimer)
         # Create view navigation buttons.
         # Nav bar is placed inside _main_view (not in template.header) so it
         # is part of template.main and remains visible when DataUI is embedded
@@ -1236,7 +1316,12 @@ class DataUI(param.Parameterized):
 
         # About button only in the header (visible in standalone use).
         about_button = self.create_about_button(template)
-        template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
+        disclaimer_text = self._dataui_manager.get_sidebar_disclaimer()
+        if disclaimer_text is not None:
+            disclaimer_button = self.create_disclaimer_button(template, disclaimer_text)
+            template.header.append(pn.Row(pn.layout.HSpacer(), disclaimer_button, about_button))
+        else:
+            template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
         template.main.append(self._main_view)
 
         # Adding about button
