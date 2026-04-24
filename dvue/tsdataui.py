@@ -513,7 +513,27 @@ class TimeSeriesDataUIManager(DataUIManager):
                 inferred_freq = pd.infer_freq(data_for_filter.index)
                 if inferred_freq is not None:
                     data_for_filter.index.freq = pd.tseries.frequencies.to_offset(inferred_freq)
-            data = cosine_lanczos(data_for_filter, "40h")
+            # Skip tidal filter for daily or coarser data — the 40h cosine-Lanczos
+            # filter requires sub-daily data, and vtools cannot convert daily DateOffsets
+            # (e.g. pandas Day) to pd.Timedelta.
+            if len(data_for_filter) >= 2:
+                median_dt = pd.Series(data_for_filter.index.to_numpy()).diff().dropna().median()
+                _skip_filter = median_dt >= pd.Timedelta("1D")
+            else:
+                _skip_filter = True
+            if _skip_filter:
+                import logging
+                logging.getLogger(__name__).debug(
+                    "Skipping tidal filter: data interval is >= 1 day (filter requires sub-daily data)."
+                )
+            else:
+                try:
+                    data = cosine_lanczos(data_for_filter, "40h")
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"Tidal filter (cosine_lanczos) failed and was skipped: {e}"
+                    )
 
         return data
 
