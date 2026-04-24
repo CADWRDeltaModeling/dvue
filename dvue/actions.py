@@ -217,6 +217,36 @@ class PermalinkAction:
         pass
 
 
+class ClearCacheAction:
+    """Invalidate the in-memory data cache on every DataReference in the catalog.
+
+    A notification confirms success.  Use this when source files have been
+    updated on disk and you want the UI to reload fresh data on the next plot.
+    """
+
+    def callback(self, event, dataui):
+        try:
+            catalog = dataui._dataui_manager.data_catalog
+            if catalog is not None:
+                catalog.invalidate_all_caches()
+                if pn.state.notifications is not None:
+                    pn.state.notifications.success(
+                        "Data cache cleared — next plot will reload from source.",
+                        duration=4000,
+                    )
+            else:
+                if pn.state.notifications is not None:
+                    pn.state.notifications.warning(
+                        "No catalog attached — nothing to clear.", duration=3000
+                    )
+        except Exception as e:
+            logger.error("Error clearing cache: %s", e)
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(
+                    f"Failed to clear cache: {e}", duration=0
+                )
+
+
 # MathRefEditorAction has moved to dvue.math_ref_editor.  Re-exported here
 # for backward compatibility with code that does
 # ``from dvue.actions import MathRefEditorAction``.

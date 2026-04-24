@@ -1093,6 +1093,18 @@ class DataCatalog:
         """Return all reference names in insertion order."""
         return list(self._references.keys())
 
+    def invalidate_all_caches(self) -> "DataCatalog":
+        """Clear the in-memory data cache on every :class:`DataReference` in this
+        catalog (chainable).
+
+        Useful before a UI session starts fresh or when source data has changed
+        on disk.  Each reference's ``_cached_data`` dict is cleared; the next
+        :meth:`~DataReference.getData` call will reload from the source.
+        """
+        for ref in self._references.values():
+            ref.invalidate_cache()
+        return self
+
     def to_dataframe(self) -> pd.DataFrame:
         """Return a :class:`~pandas.DataFrame` summarising all references.
 
@@ -1431,3 +1443,54 @@ from .math_reference import (  # noqa: E402, F401
     _MATH_NAMESPACE,
     _RESERVED_TOKENS,
 )
+
+
+# ---------------------------------------------------------------------------
+# Convenience builder
+# ---------------------------------------------------------------------------
+
+def build_catalog_from_dataframe(
+    dfcat: "pd.DataFrame",
+    reader: DataReferenceReader,
+    ref_name_fn,
+    crs: "Optional[str]" = None,
+) -> DataCatalog:
+    """Build a :class:`DataCatalog` from a metadata DataFrame.
+
+    Eliminates the copy-paste ``_build_dvue_catalog`` pattern that every
+    :class:`~dvue.tsdataui.TimeSeriesDataUIManager` subclass used to repeat.
+
+    Parameters
+    ----------
+    dfcat : pd.DataFrame or GeoDataFrame
+        One row per data series.  All columns (except ``"geometry"``) are
+        stored as :class:`DataReference` attributes and forwarded to the
+        reader's :meth:`~DataReferenceReader.load` call.
+    reader : DataReferenceReader
+        Shared (flyweight) reader instance used by every added reference.
+    ref_name_fn : callable
+        ``ref_name_fn(row) -> str`` — returns the unique catalog key for
+        each row.  Must be reconstructable from the columns shown in the
+        table so that :meth:`~dvue.dataui.DataUIManager.get_data_reference`
+        can look up the correct entry.
+    crs : str, optional
+        CRS string forwarded to :class:`DataCatalog`.
+
+    Returns
+    -------
+    DataCatalog
+    """
+    catalog = DataCatalog(crs=crs)
+    for _, row in dfcat.iterrows():
+        attrs = {k: v for k, v in row.items() if k != "geometry"}
+        if "geometry" in row.index and row["geometry"] is not None:
+            attrs["geometry"] = row["geometry"]
+        catalog.add(
+            DataReference(
+                reader=reader,
+                name=ref_name_fn(row),
+                cache=True,
+                **attrs,
+            )
+        )
+    return catalog

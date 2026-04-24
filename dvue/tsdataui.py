@@ -123,6 +123,7 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def __init__(self, filename_column="FILE", file_number_column_name="FILE_NUM", **params):
         # modify catalog if filename_column is present to include file number if multiple files are present
+        self._cached_catalog = None
         catalog = self.get_data_catalog()
         self.change_color_cycle()
         self.filename_column = filename_column
@@ -138,6 +139,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         else:
             self.file_number_column_name = None
             self.display_fileno = False
+        self._cached_catalog = catalog
         self.time_range = self.get_time_range(self.get_data_catalog())
         super().__init__(**params)
         table_columns = list(self.get_table_columns())
@@ -149,6 +151,9 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.param.plot_group_by_column.objects = columns_with_blank
 
     def get_data_catalog(self):
+        # Return cached catalog (with FILE_NUM if applicable) after init.
+        if hasattr(self, '_cached_catalog') and self._cached_catalog is not None:
+            return self._cached_catalog
         # Delegate to DataProvider when a data_catalog property is set.
         if self.data_catalog is not None:
             return super().get_data_catalog()
@@ -289,10 +294,30 @@ class TimeSeriesDataUIManager(DataUIManager):
             self.param.do_tidal_filter,
             widgets={"do_tidal_filter": {"disabled": not _VTOOLS_AVAILABLE}},
         )
+        def _clear_cache_cb(event):
+            catalog = self.data_catalog
+            if catalog is not None:
+                catalog.invalidate_all_caches()
+                if pn.state.notifications is not None:
+                    pn.state.notifications.success(
+                        "Data cache cleared — next plot will reload from source.",
+                        duration=4000,
+                    )
+            else:
+                if pn.state.notifications is not None:
+                    pn.state.notifications.warning(
+                        "No catalog attached — nothing to clear.", duration=3000
+                    )
+
+        clear_cache_btn = pn.widgets.Button(
+            name="Clear Cache", button_type="light", icon="trash"
+        )
+        clear_cache_btn.on_click(_clear_cache_cb)
         transform_widgets = pn.Column(
             self.param.fill_gap,
             tidal_filter_widget,
             pn.Row(self.param.sensible_range_yaxis, self.param.sensible_percentile_range),
+            clear_cache_btn,
         )
         widget_tabs = pn.Tabs(
             ("Time", control_widgets),
@@ -426,7 +451,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             # kernel does not propagate NaN across sparse or gappy data (e.g. event
             # sensors resampled to a regular grid).  Edge NaN from fill_edge_nan=True
             # remain in the output to indicate the filter warm-up period.
-            data_for_filter = data.interpolate(method="time")
+            data_for_filter = data.astype("float64").interpolate(method="time")
             # Infer and set frequency if missing (slicing/filtering can drop it)
             if hasattr(data_for_filter.index, "freq") and data_for_filter.index.freq is None:
                 inferred_freq = pd.infer_freq(data_for_filter.index)

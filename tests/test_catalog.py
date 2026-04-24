@@ -26,6 +26,7 @@ from dvue.catalog import (
     PatternCSVDirectoryReader,
     PatternCSVDirectoryBuilder,
     _pattern_to_regex,
+    build_catalog_from_dataframe,
 )
 
 
@@ -1830,4 +1831,117 @@ class TestDataCatalogCSV:
         cat.to_csv(p_cat)
         cat2 = DataCatalog.from_csv(p_cat)
         assert set(cat2.list_names()) == {"a", "b", "c"}
+
+
+# ---------------------------------------------------------------------------
+# Tests for DataCatalog.invalidate_all_caches
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidateAllCaches:
+    def _make_cached_catalog(self):
+        """Two refs, each with a warm cache entry."""
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0, 2.0]}))
+        cat = DataCatalog()
+        for name in ("ref_a", "ref_b"):
+            ref = DataReference(reader=reader, name=name, cache=True)
+            ref.getData()          # populate cache
+            cat.add(ref)
+        return cat
+
+    def test_caches_warm_before_clear(self):
+        cat = self._make_cached_catalog()
+        for ref in cat.list():
+            assert ref._cached_data, "Cache should be warm before invalidation"
+
+    def test_invalidate_all_clears_every_ref(self):
+        cat = self._make_cached_catalog()
+        result = cat.invalidate_all_caches()
+        for ref in cat.list():
+            assert not ref._cached_data, "Cache should be empty after invalidation"
+
+    def test_invalidate_all_returns_self(self):
+        cat = self._make_cached_catalog()
+        assert cat.invalidate_all_caches() is cat
+
+    def test_data_reloaded_after_invalidation(self):
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [42.0]}))
+        ref = DataReference(reader=reader, name="r", cache=True)
+        cat = DataCatalog()
+        cat.add(ref)
+        df1 = ref.getData()
+        cat.invalidate_all_caches()
+        df2 = ref.getData()
+        pd.testing.assert_frame_equal(df1, df2)
+
+
+# ---------------------------------------------------------------------------
+# Tests for build_catalog_from_dataframe
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCatalogFromDataframe:
+    def _make_df(self, filenames):
+        rows = []
+        for i, fn in enumerate(filenames):
+            rows.append({"station": f"STA{i:03d}", "variable": "EC", "filename": fn})
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _ref_name(row):
+        return f'{row["filename"]}::{row["station"]}/{row["variable"]}'
+
+    def test_catalog_length_matches_df(self):
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        df = self._make_df(["f1.dss", "f2.dss"])
+        cat = build_catalog_from_dataframe(df, reader, self._ref_name)
+        assert len(cat) == 2
+
+    def test_same_pathname_different_files_both_present(self):
+        """Entries with same station/variable but different filenames must both appear."""
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        rows = [
+            {"station": "STA000", "variable": "EC", "filename": "f1.dss"},
+            {"station": "STA000", "variable": "EC", "filename": "f2.dss"},
+        ]
+        df = pd.DataFrame(rows)
+        cat = build_catalog_from_dataframe(df, reader, self._ref_name)
+        assert len(cat) == 2  # different filename → different key → both stored
+
+    def test_different_files_same_path_both_stored(self):
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        rows = [
+            {"station": "STA000", "variable": "EC", "filename": "f1.dss"},
+            {"station": "STA000", "variable": "EC", "filename": "f2.dss"},
+        ]
+        df = pd.DataFrame(rows)
+        cat = build_catalog_from_dataframe(df, reader, self._ref_name)
+        assert len(cat) == 2
+
+    def test_cache_enabled_on_all_refs(self):
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        df = self._make_df(["f1.dss", "f2.dss"])
+        cat = build_catalog_from_dataframe(df, reader, self._ref_name)
+        for ref in cat.list():
+            assert ref._cache_enabled
+
+    def test_attributes_stored_on_ref(self):
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        df = self._make_df(["f1.dss"])
+        cat = build_catalog_from_dataframe(df, reader, self._ref_name)
+        ref = cat.list()[0]
+        assert ref.get_attribute("filename") == "f1.dss"
+        assert ref.get_attribute("station") == "STA000"
+
+    def test_geometry_excluded_from_attrs_stored_in_geometry(self):
+        import shapely.geometry as sg
+        import geopandas as gpd
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        rows = [{"station": "STA000", "variable": "EC", "filename": "f1.dss",
+                 "geometry": sg.Point(1.0, 2.0)}]
+        gdf = gpd.GeoDataFrame(rows, geometry="geometry")
+        cat = build_catalog_from_dataframe(gdf, reader, self._ref_name, crs="EPSG:4326")
+        ref = cat.list()[0]
+        # geometry stored as attribute (not excluded for geoviews use)
+        assert ref.get_attribute("geometry") is not None
 
