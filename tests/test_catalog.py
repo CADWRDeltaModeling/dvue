@@ -1945,3 +1945,169 @@ class TestBuildCatalogFromDataframe:
         # geometry stored as attribute (not excluded for geoviews use)
         assert ref.get_attribute("geometry") is not None
 
+
+# ===========================================================================
+# ref_type class attribute
+# ===========================================================================
+
+
+class TestRefType:
+    def test_data_reference_default_ref_type(self):
+        ref = DataReference(source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})), name="r")
+        assert ref.ref_type == "raw"
+
+    def test_math_data_reference_ref_type(self):
+        m = MathDataReference("A", variable_map={"A": DataReference(
+            source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})), name="A"
+        )})
+        assert m.ref_type == "math"
+
+    def test_subclass_can_override_ref_type(self):
+        class CustomRef(DataReference):
+            ref_type = "custom"
+
+        ref = CustomRef(source="", name="c")
+        assert ref.ref_type == "custom"
+
+    def test_ref_type_readable_at_instance_level(self):
+        ref = DataReference(source="", name="r")
+        # Reading via the instance works even though it's a class attribute.
+        assert ref.ref_type == "raw"
+
+    def test_to_dataframe_includes_ref_type_column(self):
+        cat = DataCatalog()
+        cat.add(DataReference(
+            source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})),
+            name="raw_ref", variable="flow"
+        ))
+        m = MathDataReference("raw_ref", catalog=cat, name="math_ref", variable="flow_2")
+        cat.add(m)
+        df = cat.to_dataframe()
+        assert "ref_type" in df.columns
+        assert df.loc["raw_ref", "ref_type"] == "raw"
+        assert df.loc["math_ref", "ref_type"] == "math"
+
+    def test_to_dataframe_all_raw_shows_raw_type(self):
+        cat = DataCatalog()
+        cat.add(DataReference(
+            source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})),
+            name="r1"
+        ))
+        cat.add(DataReference(
+            source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [2.0]})),
+            name="r2"
+        ))
+        df = cat.to_dataframe()
+        assert "ref_type" in df.columns
+        assert (df["ref_type"] == "raw").all()
+
+
+# ===========================================================================
+# save_math_refs YAML round-trip
+# ===========================================================================
+
+
+from dvue.math_reference import save_math_refs  # noqa: E402
+
+
+class TestSaveMathRefsRoundTrip:
+    """save_math_refs → MathDataCatalogReader.build() must round-trip losslessly."""
+
+    def _make_catalog(self) -> DataCatalog:
+        cat = DataCatalog()
+        df = pd.DataFrame({"v": [1.0, 2.0]})
+        cat.add(DataReference(
+            source="", reader=InMemoryDataReferenceReader(df),
+            name="upstream", variable="flow", unit="cfs"
+        ))
+        cat.add(DataReference(
+            source="", reader=InMemoryDataReferenceReader(df),
+            name="downstream", variable="flow", unit="cfs"
+        ))
+        return cat
+
+    def test_round_trip_name_and_expression(self, tmp_path):
+        cat = self._make_catalog()
+        m = MathDataReference("upstream + downstream", name="total", catalog=cat,
+                               variable="flow", unit="cfs")
+        cat.add(m)
+        p = tmp_path / "out.yaml"
+        save_math_refs(cat, p)
+        refs = MathDataCatalogReader(parent_catalog=cat).build(p)
+        assert len(refs) == 1
+        assert refs[0].name == "total"
+        assert refs[0].expression == "upstream + downstream"
+
+    def test_round_trip_extra_attributes(self, tmp_path):
+        cat = self._make_catalog()
+        m = MathDataReference("upstream - downstream", name="diff", catalog=cat,
+                               variable="flow_diff", unit="cfs", station_id="S1")
+        cat.add(m)
+        p = tmp_path / "out.yaml"
+        save_math_refs(cat, p)
+        refs = MathDataCatalogReader(parent_catalog=cat).build(p)
+        assert refs[0].get_attribute("variable") == "flow_diff"
+        assert refs[0].get_attribute("station_id") == "S1"
+
+    def test_round_trip_search_map(self, tmp_path):
+        cat = self._make_catalog()
+        m = MathDataReference(
+            "obs - model",
+            name="bias",
+            catalog=cat,
+            search_map={
+                "obs": {"variable": "flow", "unit": "cfs"},
+                "model": {"variable": "flow", "unit": "cfs"},
+            },
+        )
+        cat.add(m)
+        p = tmp_path / "out.yaml"
+        save_math_refs(cat, p)
+        refs = MathDataCatalogReader(parent_catalog=cat).build(p)
+        assert "obs" in refs[0]._search_map
+        assert "model" in refs[0]._search_map
+        # _require_single key must NOT appear in the criteria dict after a round-trip
+        assert "_require_single" not in refs[0]._search_map["obs"]
+
+    def test_round_trip_require_single_false(self, tmp_path):
+        cat = self._make_catalog()
+        m = MathDataReference(
+            "ws.mean(axis=1)",
+            name="mean_ws",
+            catalog=cat,
+            search_map={"ws": {"variable": "flow", "unit": "cfs"}},
+            search_require_single={"ws": False},
+        )
+        cat.add(m)
+        p = tmp_path / "out.yaml"
+        save_math_refs(cat, p)
+        refs = MathDataCatalogReader(parent_catalog=cat).build(p)
+        assert refs[0]._search_require_single.get("ws") is False
+
+    def test_round_trip_require_single_true_is_default(self, tmp_path):
+        """require_single=True is the default — it should NOT be written to YAML."""
+        import yaml
+        cat = self._make_catalog()
+        m = MathDataReference(
+            "obs * 2",
+            name="doubled",
+            catalog=cat,
+            search_map={"obs": {"variable": "flow"}},
+            search_require_single={"obs": True},
+        )
+        cat.add(m)
+        p = tmp_path / "out.yaml"
+        save_math_refs(cat, p)
+        raw = yaml.safe_load(p.read_text())
+        # The flag should be absent when it's the default True value.
+        obs_crit = raw[0]["search_map"]["obs"]
+        assert "_require_single" not in obs_crit
+
+    def test_raw_refs_not_included_in_yaml(self, tmp_path):
+        cat = self._make_catalog()  # contains only raw refs
+        p = tmp_path / "out.yaml"
+        save_math_refs(cat, p)
+        import yaml
+        data = yaml.safe_load(p.read_text())
+        assert data == [] or data is None
+

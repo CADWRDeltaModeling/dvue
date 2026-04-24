@@ -355,6 +355,13 @@ class DataReference:
     >>> ref.getData()   # instantiates FileDataReferenceReader("/data/flow.csv")
     """
 
+    #: Identifies the kind of reference.  Subclasses override this at class
+    #: level to advertise a different type string without needing a property::
+    #:
+    #:     class MyDataReference(DataReference):
+    #:         ref_type = "my_type"
+    ref_type: str = "raw"
+
     def __init__(
         self,
         source: str = "",
@@ -408,12 +415,18 @@ class DataReference:
         Returns a dict with keys ``name``, ``source``, ``reader`` (FQCN), and
         all metadata attributes.  Use :meth:`DataCatalog.to_csv` to write an
         entire catalog at once.
+
+        The ``ref_type`` key is included only when it differs from the default
+        ``"raw"`` so that existing plain CSV files remain unchanged.
         """
-        return {
+        d = {
             "name": self.name,
             "reader": self._reader_fqcn,
             **self._attributes,   # "source" is already in here
         }
+        if self.ref_type != "raw":
+            d["ref_type"] = self.ref_type
+        return d
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -1124,7 +1137,7 @@ class DataCatalog:
         """
         rows = []
         for ref in self._references.values():
-            row: Dict[str, Any] = {"name": ref.name}
+            row: Dict[str, Any] = {"name": ref.name, "ref_type": ref.ref_type}
             for raw_key, val in ref.attributes.items():
                 canonical = self._schema_map.get(raw_key, raw_key)
                 row[canonical] = val
@@ -1190,7 +1203,10 @@ class DataCatalog:
             name = str(d.pop("name", ""))
             source = str(d.pop("source", ""))
             reader = str(d.pop("reader", ""))
+            ref_type = str(d.pop("ref_type", "raw"))
             ref = DataReference(source=source, reader=reader, name=name, **d)
+            if ref_type != "raw":
+                ref.ref_type = ref_type
             catalog.add(ref)
         return catalog
 
@@ -1454,6 +1470,7 @@ def build_catalog_from_dataframe(
     reader: DataReferenceReader,
     ref_name_fn,
     crs: "Optional[str]" = None,
+    ref_class: type = DataReference,
 ) -> DataCatalog:
     """Build a :class:`DataCatalog` from a metadata DataFrame.
 
@@ -1475,6 +1492,10 @@ def build_catalog_from_dataframe(
         can look up the correct entry.
     crs : str, optional
         CRS string forwarded to :class:`DataCatalog`.
+    ref_class : type, optional
+        :class:`DataReference` subclass to instantiate for each row.
+        Defaults to :class:`DataReference`.  Pass a custom subclass to
+        attach a domain-specific ``ref_type`` (e.g. ``ref_type = "dsm2_dss"``).
 
     Returns
     -------
@@ -1486,7 +1507,7 @@ def build_catalog_from_dataframe(
         if "geometry" in row.index and row["geometry"] is not None:
             attrs["geometry"] = row["geometry"]
         catalog.add(
-            DataReference(
+            ref_class(
                 reader=reader,
                 name=ref_name_fn(row),
                 cache=True,

@@ -167,6 +167,62 @@ class TimeSeriesDataUIManager(DataUIManager):
         """
         return TimeSeriesPlotAction()
 
+    # ------------------------------------------------------------------
+    # Math reference helpers — available to all subclasses
+    # ------------------------------------------------------------------
+
+    def _has_math_refs(self) -> bool:
+        """Return True if the backing catalog contains at least one math reference.
+
+        Uses ``self.data_catalog`` when available (preferred — avoids rebuilding
+        the full display DataFrame).  Falls back to inspecting the ``ref_type``
+        column of the cached catalog DataFrame.
+        """
+        cat = getattr(self, "data_catalog", None)
+        if cat is not None:
+            return any(getattr(r, "ref_type", "raw") != "raw" for r in cat.list())
+        # Fallback: check cached DataFrame
+        cached = getattr(self, "_cached_catalog", None)
+        if cached is not None and "ref_type" in cached.columns:
+            return (cached["ref_type"] != "raw").any()
+        return False
+
+    def _enrich_catalog_with_math_ref_hints(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        """Fill blank ``expression`` cells for raw refs with their catalog key name.
+
+        When the catalog contains any math references, ``to_dataframe()``
+        includes an ``expression`` column.  For raw :class:`DataReference` rows
+        the column is empty/NaN.  This helper fills those blanks with the ref's
+        catalog key so users can see exactly which token to use in new
+        expressions.
+
+        Call this inside ``get_data_catalog()`` after calling
+        ``self._cat.to_dataframe()``:
+
+        .. code-block:: python
+
+            def get_data_catalog(self):
+                df = self._cat.to_dataframe().reset_index()
+                return self._enrich_catalog_with_math_ref_hints(df)
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame produced by :meth:`~dvue.catalog.DataCatalog.to_dataframe`
+            after ``reset_index()`` (so ``"name"`` is a regular column).
+
+        Returns
+        -------
+        pd.DataFrame
+            The same DataFrame with blank ``expression`` cells populated.
+        """
+        if "expression" not in df.columns:
+            return df
+        mask = df["expression"].isna() | (df["expression"].astype(str).str.strip() == "")
+        if "name" in df.columns:
+            df.loc[mask, "expression"] = df.loc[mask, "name"]
+        return df
+
     def get_data_actions(self):
         """Return default actions, replacing PlotAction with TimeSeriesPlotAction and
         optionally appending MathRefEditorAction when show_math_ref_editor is True."""

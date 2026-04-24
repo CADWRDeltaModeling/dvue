@@ -171,6 +171,9 @@ class MathDataReference(DataReference):
     >>> m.getData()
     """
 
+    #: Subclasses that further specialise MathDataReference can override this.
+    ref_type: str = "math"
+
     def __init__(
         self,
         expression: str,

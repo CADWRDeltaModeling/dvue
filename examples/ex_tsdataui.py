@@ -217,17 +217,12 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
         regular ``'name'`` column.  ``get_data_for_time_range()`` uses
         ``r["name"]`` to look up the corresponding DataReference at display time.
 
-        When math refs are present the ``expression`` column exists but is blank
-        for raw DataReferences.  Those blank cells are filled with the ref's
-        catalog name so users can see exactly what variable name to use when
-        writing new expressions.
+        :meth:`~dvue.tsdataui.TimeSeriesDataUIManager._enrich_catalog_with_math_ref_hints`
+        fills blank ``expression`` cells for raw refs with their catalog name so
+        users can see exactly what token to use in new expressions.
         """
         df = self._cat.to_dataframe().reset_index()  # 'name' becomes a regular column
-        if "expression" in df.columns:
-            # Fill blank expression cells for raw refs with their catalog name.
-            # This tells users "use this name as a variable in your expression".
-            mask = df["expression"].isna() | (df["expression"].astype(str).str.strip() == "")
-            df.loc[mask, "expression"] = df.loc[mask, "name"]
+        df = self._enrich_catalog_with_math_ref_hints(df)
         return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
     # -- get_data_for_time_range: delegate to DataReference.getData() ---------
@@ -255,12 +250,9 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
         return False
 
     # -- View layer -----------------------------------------------------------
-    def _has_math_refs(self) -> bool:
-        """Return True if the catalog contains at least one MathDataReference."""
-        return any(isinstance(r, MathDataReference) for r in self._cat.list())
-
     def get_table_column_width_map(self):
         widths = {
+            "ref_type": "6%",
             "station_id": "6%",
             "station_name": "12%",
             "variable": "14%",
@@ -270,7 +262,7 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
             "max_year": "6%",
         }
         if self._has_math_refs():
-            widths["expression"] = "50%"
+            widths["expression"] = "44%"
         return widths
 
     def get_table_columns(self):
@@ -281,6 +273,7 @@ class ExampleTimeSeriesDataUIManager(tsdataui.TimeSeriesDataUIManager):
 
     def get_table_filters(self):
         filterable = [
+            "ref_type",
             "station_name",
             "station_id",
             "variable",

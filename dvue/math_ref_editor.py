@@ -231,6 +231,16 @@ class MathRefEditorAction:
             "Each alias is resolved against the catalog at `getData()` time using the criteria.",
             sizing_mode="stretch_width",
         )
+        # Collect catalog attribute names for the picker (exclude internal cols).
+        try:
+            _df_cat_cols = [
+                c for c in catalog.to_dataframe().columns
+                if c not in ("source", "ref_type", "expression", "geometry")
+            ]
+        except Exception:
+            _df_cat_cols = []
+        _attr_picker_options = [""] + sorted(_df_cat_cols)
+
         sm_col_labels = pn.Row(
             pn.pane.Markdown("**Alias**", width=134, margin=(0, 4, 0, 4)),
             pn.pane.Markdown("**Join all**", width=88, margin=(0, 4, 0, 4)),
@@ -239,6 +249,7 @@ class MathRefEditorAction:
                 sizing_mode="stretch_width",
                 margin=(0, 4, 0, 4),
             ),
+            pn.pane.Markdown("**+ attr**", width=130, margin=(0, 4, 0, 4)),
             pn.pane.Markdown("", width=46),
             margin=(2, 0, 0, 0),
         )
@@ -281,6 +292,27 @@ class MathRefEditorAction:
                 sizing_mode="stretch_width",
                 margin=(2, 4, 4, 4),
             )
+            # Attr-name picker: selecting an attribute appends "attr=" to criteria.
+            _attr_sel = pn.widgets.Select(
+                value="",
+                options=_attr_picker_options,
+                width=126,
+                margin=(2, 4, 4, 4),
+            )
+
+            def _make_attr_append(sel=_attr_sel, inp=_crit_inp):
+                def _on_attr_pick(ev):
+                    attr = ev.new
+                    if not attr:
+                        return
+                    current = inp.value.strip()
+                    token = f"{attr}="
+                    inp.value = f"{current}, {token}" if current else token
+                    sel.value = ""  # reset picker
+                return _on_attr_pick
+
+            _attr_sel.param.watch(_make_attr_append(), "value")
+
             _rm_btn = pn.widgets.Button(
                 name="✕",
                 button_type="light",
@@ -293,6 +325,7 @@ class MathRefEditorAction:
                 _var_inp,
                 _multi_cb,
                 _crit_inp,
+                _attr_sel,
                 _rm_btn,
                 sizing_mode="stretch_width",
                 margin=(2, 0),
@@ -354,6 +387,13 @@ class MathRefEditorAction:
         )
 
         status_md = pn.pane.Markdown("", sizing_mode="stretch_width")
+        test_btn = pn.widgets.Button(
+            name="Test Expression",
+            button_type="light",
+            icon="player-play",
+            width=160,
+            margin=(6, 4, 4, 4),
+        )
         save_btn = pn.widgets.Button(name="Save", button_type="success", icon="device-floppy")
         cancel_btn = pn.widgets.Button(name="Cancel", button_type="default", icon="x")
 
@@ -372,39 +412,26 @@ class MathRefEditorAction:
 
         # ── Client-side YAML download ─────────────────────────────────────────
         def _yaml_download_callback():
-            """Called by FileDownload; returns an in-memory YAML byte stream."""
+            """Return an in-memory YAML byte stream using the canonical save_math_refs format."""
             from io import BytesIO
-            import yaml as _yaml
-            from .math_reference import MathDataReference
+            import tempfile, os
+            from .math_reference import save_math_refs
 
-            records = []
-            for ref in catalog.list():
-                if not isinstance(ref, MathDataReference):
-                    continue
-                entry = {"name": ref.name, "expression": ref.expression}
-                sm = getattr(ref, "_search_map", None)
-                req = getattr(ref, "_search_require_single", {})
-                if sm:
-                    entry["search_map"] = {
-                        var: {
-                            "criteria": crit,
-                            "require_single": req.get(var, True),
-                        }
-                        for var, crit in sm.items()
-                    }
-                extra = {
-                    k: v
-                    for k, v in ref.attributes.items()
-                    if k != "expression"
-                    and isinstance(v, (str, int, float, bool, type(None)))
-                }
-                if extra:
-                    entry["attributes"] = extra
-                records.append(entry)
-            buf = BytesIO()
-            buf.write(_yaml.dump(records, default_flow_style=False, allow_unicode=True).encode())
-            buf.seek(0)
-            return buf
+            # save_math_refs writes to a file path; use a temp file then read bytes.
+            with tempfile.NamedTemporaryFile(
+                suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+            ) as tmp:
+                tmp_path = tmp.name
+            try:
+                save_math_refs(catalog, tmp_path)
+                with open(tmp_path, "rb") as fh:
+                    data = fh.read()
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            return BytesIO(data)
 
         download_yaml_btn = pn.widgets.FileDownload(
             label="Download YAML",
@@ -435,8 +462,6 @@ class MathRefEditorAction:
         editor_panel = pn.Column(
             title_md,
             pn.layout.Divider(),
-            yaml_section,
-            pn.layout.Divider(),
             help_md,
             name_input,
             expr_input,
@@ -444,13 +469,17 @@ class MathRefEditorAction:
             pn.layout.Divider(),
             search_map_section,
             pn.layout.Divider(),
+            pn.Row(test_btn),
+            pn.layout.Divider(),
             attr_browser_md,
             catalog_names,
+            pn.layout.Divider(),
+            yaml_section,
             pn.layout.Divider(),
             status_md,
             pn.Row(save_btn, cancel_btn),
             sizing_mode="stretch_width",
-            width=580,
+            width=620,
         )
 
         def _on_save(event: Any) -> None:
@@ -510,7 +539,12 @@ class MathRefEditorAction:
                 if hasattr(dataui, "_dfcat"):
                     try:
                         dataui._dfcat = manager.get_data_catalog()
-                        dataui.display_table.value = dataui._dfcat[manager.get_table_columns()]
+                        new_cols = manager.get_table_columns()
+                        dataui.display_table.value = dataui._dfcat[new_cols]
+                        # Also refresh widths and filters — needed when this is
+                        # the first math ref added (new expression column appears).
+                        dataui.display_table.widths = manager.get_table_column_width_map()
+                        dataui.display_table.header_filters = manager.get_table_filters()
                     except Exception as _te:
                         logger.warning("Could not refresh table after save: %s", _te)
                 status_md.object = f"✅ **{action_word}** `{name}` in catalog."
@@ -580,12 +614,57 @@ class MathRefEditorAction:
 
         upload_btn.on_click(_on_upload_yaml)
 
+        def _on_test(event: Any) -> None:
+            """Evaluate the expression against real catalog data and show a preview."""
+            expr = expr_input.value.strip()
+            if not expr:
+                status_md.object = "⚠️ **Expression is required to test.**"
+                return
+            try:
+                # Build search_map from current widget state (same as _on_save).
+                _sm: Dict[str, Dict[str, str]] = {}
+                _req: Dict[str, bool] = {}
+                for _vi, _mc, _ci, _dr in sm_rows:
+                    _sv = _vi.value.strip()
+                    _sc = _ci.value.strip()
+                    if not _sv or not _sc:
+                        continue
+                    _criteria: Dict[str, str] = {}
+                    for _part in _sc.split(","):
+                        _part = _part.strip()
+                        if "=" in _part:
+                            _k, _, _v = _part.partition("=")
+                            _criteria[_k.strip()] = _v.strip()
+                    if _criteria:
+                        _sm[_sv] = _criteria
+                        _req[_sv] = not _mc.value
+                tmp_ref = MathDataReference(
+                    expression=expr,
+                    search_map=_sm if _sm else None,
+                    search_require_single=_req if _req else None,
+                )
+                tmp_ref.set_catalog(catalog)
+                result = tmp_ref.getData()
+                head = result.head(5)
+                # Format as a simple Markdown table.
+                try:
+                    table_md = head.to_markdown()
+                except Exception:
+                    table_md = head.to_string()
+                status_md.object = (
+                    f"✅ **Expression evaluated successfully** — shape `{result.shape}`\n\n"
+                    f"```\n{table_md}\n```"
+                )
+            except Exception as exc:
+                status_md.object = f"❌ **Test failed:** {exc}"
+
+        test_btn.on_click(_on_test)
+
         def _on_cancel(event: Any) -> None:
             editor_panel.objects = [pn.pane.Markdown("*Editor closed.*")]
 
         save_btn.on_click(_on_save)
         cancel_btn.on_click(_on_cancel)
-        upload_btn.on_click(_on_upload_yaml)
 
         # Show editor as a new tab in the display panel.
         if len(dataui._display_panel.objects) > 0 and isinstance(
