@@ -171,30 +171,50 @@ class MathRefEditorAction:
                 )
             return
 
+        # ── Identifying-attribute helper ──────────────────────────────────────
+        _SYSTEM_EXCLUDE = frozenset({
+            "source", "name", "ref_type", "expression", "geometry",
+            "file", "filename", "start_year", "max_year",
+        })
+
+        def _identifying_attrs(row_dict: Dict[str, Any]) -> Dict[str, str]:
+            """Return only identifying string attributes for search criteria."""
+            result: Dict[str, str] = {}
+            for k, v in row_dict.items():
+                if k in _SYSTEM_EXCLUDE:
+                    continue
+                if not isinstance(v, str):
+                    continue
+                v = v.strip()
+                if not v or v.lower() in ("nan", "none"):
+                    continue
+                result[k] = v
+            return result
+
         # ── Pre-populate from selected row if it is a MathDataReference ──────
         pre_name = ""
         pre_expr = ""
         pre_attrs = ""
-        is_edit = False
+        is_edit = [False]  # mutable list so _on_save can reset it
+        pre_ref: Optional[MathDataReference] = None
 
         selected = dataui.display_table.selection
         if selected:
             row = dataui.display_table.value.iloc[selected[0]]
             name_val = row.get("name", "") if hasattr(row, "get") else ""
-            ref = None
             try:
-                ref = catalog.get(str(name_val)) if name_val else None
+                pre_ref = catalog.get(str(name_val)) if name_val else None
             except KeyError:
                 pass
-            if isinstance(ref, MathDataReference):
-                is_edit = True
-                pre_name = ref.name
-                pre_expr = ref.expression
+            if isinstance(pre_ref, MathDataReference):
+                is_edit[0] = True
+                pre_name = pre_ref.name
+                pre_expr = pre_ref.expression
                 # Only put primitive values in the text area – non-primitives like
                 # Shapely geometry objects cannot round-trip through plain text.
                 extra = {
                     k: v
-                    for k, v in ref.attributes.items()
+                    for k, v in pre_ref.attributes.items()
                     if k != "expression" and isinstance(v, (str, int, float, bool, type(None)))
                 }
                 pre_attrs = "\n".join(f"{k}: {v}" for k, v in extra.items())
@@ -217,14 +237,48 @@ class MathRefEditorAction:
             placeholder="e.g. water_level_usgs - model_RIO001",
             height=90,
         )
+
+        # ── Alias hint buttons (below expression) ─────────────────────────────
+        alias_hint_row = pn.Row(
+            pn.pane.Markdown("**Aliases:**", margin=(6, 4, 0, 4)),
+            sizing_mode="stretch_width",
+            margin=(0, 0, 4, 0),
+        )
+
+        def _refresh_alias_hints() -> None:
+            """Rebuild alias hint buttons from current sm_rows variable aliases."""
+            btns = [pn.pane.Markdown("**Aliases:**", margin=(6, 4, 0, 4))]
+            for _vi, _mc, _ci, _rc in sm_rows:
+                alias = _vi.value.strip()
+                if not alias:
+                    continue
+                _btn = pn.widgets.Button(
+                    name=alias,
+                    button_type="light",
+                    width=max(50, len(alias) * 9),
+                    height=28,
+                    margin=(2, 4, 2, 0),
+                )
+
+                def _make_insert(a=alias):
+                    def _on_insert(ev: Any) -> None:
+                        current = expr_input.value
+                        expr_input.value = f"{current} {a}".lstrip()
+                    return _on_insert
+
+                _btn.on_click(_make_insert())
+                btns.append(_btn)
+            alias_hint_row.objects = btns
+
         attrs_input = pn.widgets.TextAreaInput(
             name="Attributes  (key: value — one per line)",
             value=pre_attrs,
             placeholder="variable: water_level_bias\nstationid: RIO001\nunit: m",
             height=110,
         )
+
         # ── Search Map: dynamic row editor ─────────────────────────────────────
-        sm_rows: list = []  # list of (var_inp, multi_cb, crit_inp, data_row)
+        sm_rows: list = []  # list of (var_inp, multi_cb, crit_inp, row_container)
 
         sm_header_md = pn.pane.Markdown(
             "**Search Map** — one row per expression variable.  "
@@ -242,15 +296,16 @@ class MathRefEditorAction:
         _attr_picker_options = [""] + sorted(_df_cat_cols)
 
         sm_col_labels = pn.Row(
-            pn.pane.Markdown("**Alias**", width=134, margin=(0, 4, 0, 4)),
-            pn.pane.Markdown("**Join all**", width=88, margin=(0, 4, 0, 4)),
+            pn.pane.Markdown("**Alias**", width=100, margin=(0, 4, 0, 4)),
+            pn.pane.Markdown("**Join all**", width=80, margin=(0, 4, 0, 4)),
             pn.pane.Markdown(
                 "**Catalog criteria** (`attr=val, attr=val …`)",
                 sizing_mode="stretch_width",
                 margin=(0, 4, 0, 4),
             ),
-            pn.pane.Markdown("**+ attr**", width=130, margin=(0, 4, 0, 4)),
-            pn.pane.Markdown("", width=46),
+            pn.pane.Markdown("**+attr**", width=96, margin=(0, 4, 0, 4)),
+            pn.pane.Markdown("", width=36),   # ▶ spacer
+            pn.pane.Markdown("", width=36),   # ✕ spacer
             margin=(2, 0, 0, 0),
         )
         add_var_btn = pn.widgets.Button(
@@ -275,15 +330,15 @@ class MathRefEditorAction:
         ) -> None:
             _var_inp = pn.widgets.TextInput(
                 value=var_name,
-                placeholder="alias (e.g. obs)",
+                placeholder="alias",
                 sizing_mode="fixed",
-                width=130,
+                width=96,
                 margin=(2, 4, 4, 4),
             )
             _multi_cb = pn.widgets.Checkbox(
                 name="Join all",
                 value=not keep_single,
-                width=84,
+                width=76,
                 margin=(8, 4, 0, 4),
             )
             _crit_inp = pn.widgets.TextInput(
@@ -296,12 +351,12 @@ class MathRefEditorAction:
             _attr_sel = pn.widgets.Select(
                 value="",
                 options=_attr_picker_options,
-                width=126,
+                width=92,
                 margin=(2, 4, 4, 4),
             )
 
             def _make_attr_append(sel=_attr_sel, inp=_crit_inp):
-                def _on_attr_pick(ev):
+                def _on_attr_pick(ev: Any) -> None:
                     attr = ev.new
                     if not attr:
                         return
@@ -313,12 +368,28 @@ class MathRefEditorAction:
 
             _attr_sel.param.watch(_make_attr_append(), "value")
 
+            # Per-row result pane (hidden until ▶ clicked)
+            _row_result_md = pn.pane.Markdown(
+                "",
+                sizing_mode="stretch_width",
+                styles={"font-size": "0.82em", "padding": "2px 6px"},
+            )
+
+            # ▶ per-row Test button
+            _test_row_btn = pn.widgets.Button(
+                name="▶",
+                button_type="light",
+                width=32,
+                height=34,
+                margin=(4, 2, 4, 2),
+            )
+
             _rm_btn = pn.widgets.Button(
                 name="✕",
                 button_type="light",
-                width=40,
+                width=32,
                 height=34,
-                margin=(4, 4, 4, 4),
+                margin=(4, 4, 4, 2),
                 styles={"color": "#c00", "font-weight": "bold"},
             )
             _data_row = pn.Row(
@@ -326,32 +397,99 @@ class MathRefEditorAction:
                 _multi_cb,
                 _crit_inp,
                 _attr_sel,
+                _test_row_btn,
                 _rm_btn,
                 sizing_mode="stretch_width",
                 margin=(2, 0),
             )
-            _row_ref = [_data_row]
+            _row_container = pn.Column(
+                _data_row,
+                _row_result_md,
+                sizing_mode="stretch_width",
+                margin=(0, 0),
+            )
+            _container_ref = [_row_container]
+
+            def _on_row_test(ev: Any) -> None:
+                """Test this variable's criteria against the catalog."""
+                crit_text = _crit_inp.value.strip()
+                if not crit_text:
+                    _row_result_md.object = "⚠️ Enter criteria first."
+                    return
+                criteria: Dict[str, str] = {}
+                for part in crit_text.split(","):
+                    part = part.strip()
+                    if "=" in part:
+                        k, _, v = part.partition("=")
+                        criteria[k.strip()] = v.strip()
+                if not criteria:
+                    _row_result_md.object = "⚠️ No valid `attr=val` pairs found."
+                    return
+                try:
+                    results = catalog.search(**criteria)
+                except Exception as exc:
+                    _row_result_md.object = f"❌ Search error: {exc}"
+                    return
+                n = len(results)
+                if n == 0:
+                    _row_result_md.object = "❌ **0 matches** — check criteria."
+                elif n == 1:
+                    ref_match = results[0]
+                    _row_result_md.object = f"✅ **1 match**: `{ref_match.name}`"
+                    # Auto-fill Attributes if currently blank
+                    if not attrs_input.value.strip():
+                        ident = _identifying_attrs(ref_match.attributes)
+                        if ident:
+                            attrs_input.value = "\n".join(
+                                f"{k}: {v}" for k, v in ident.items()
+                            )
+                else:
+                    names = [r.name for r in results[:8]]
+                    truncated = f" _…and {n - 8} more_" if n > 8 else ""
+                    names_md = ", ".join(f"`{nm}`" for nm in names) + truncated
+                    _row_result_md.object = f"⚠️ **{n} matches** — {names_md}"
+
+            _test_row_btn.on_click(_on_row_test)
+
+            # Watch alias input to update hint buttons
+            _var_inp.param.watch(lambda ev: _refresh_alias_hints(), "value")
 
             def _on_rm(ev: Any) -> None:
-                for _i, (_v, _m, _c, _r) in enumerate(sm_rows):
-                    if _r is _row_ref[0]:
+                for _i, (_v, _m, _c, _rc) in enumerate(sm_rows):
+                    if _rc is _container_ref[0]:
                         sm_rows.pop(_i)
                         break
                 search_map_section.objects = [
-                    _o for _o in search_map_section.objects if _o is not _row_ref[0]
+                    _o for _o in search_map_section.objects if _o is not _container_ref[0]
                 ]
+                _refresh_alias_hints()
 
             _rm_btn.on_click(_on_rm)
-            sm_rows.append((_var_inp, _multi_cb, _crit_inp, _data_row))
-            # Insert the new row before the add_var_btn (always the last item)
-            search_map_section.insert(len(search_map_section.objects) - 1, _data_row)
+            sm_rows.append((_var_inp, _multi_cb, _crit_inp, _row_container))
+            # Insert the new row container before the add_var_btn (always last item)
+            search_map_section.insert(len(search_map_section.objects) - 1, _row_container)
+            _refresh_alias_hints()
 
-        add_var_btn.on_click(lambda _e: _add_sm_row())
+        def _add_sm_row_from_selection(_e: Any) -> None:
+            """Add a row, pre-filling criteria from the currently selected table row."""
+            crit_str = ""
+            try:
+                sel = dataui.display_table.selection
+                if sel:
+                    sel_row = dataui.display_table.value.iloc[sel[0]]
+                    ident = _identifying_attrs(dict(sel_row))
+                    if ident:
+                        crit_str = ", ".join(f"{k}={v}" for k, v in ident.items())
+            except Exception:
+                pass
+            _add_sm_row(criteria_str=crit_str)
+
+        add_var_btn.on_click(_add_sm_row_from_selection)
 
         # Pre-populate rows when editing an existing MathDataReference.
-        if is_edit and ref is not None and getattr(ref, "_search_map", None):
-            for _sm_var, _sm_crit in ref._search_map.items():
-                _sm_keep = ref._search_require_single.get(_sm_var, True)
+        if is_edit[0] and pre_ref is not None and getattr(pre_ref, "_search_map", None):
+            for _sm_var, _sm_crit in pre_ref._search_map.items():
+                _sm_keep = pre_ref._search_require_single.get(_sm_var, True)
                 _sm_crit_str = ", ".join(f"{k}={v}" for k, v in _sm_crit.items())
                 _add_sm_row(_sm_var, _sm_crit_str, _sm_keep)
 
@@ -380,13 +518,8 @@ class MathRefEditorAction:
                 "_Could not read catalog attributes._", sizing_mode="stretch_width"
             )
 
-        catalog_names = pn.pane.Markdown(
-            "**Available catalog names:**  \n" + "  \n".join(sorted(catalog.list_names())),
-            sizing_mode="stretch_width",
-            styles={"font-size": "0.82em", "max-height": "140px", "overflow-y": "auto"},
-        )
-
         status_md = pn.pane.Markdown("", sizing_mode="stretch_width")
+        test_result_md = pn.pane.Markdown("", sizing_mode="stretch_width")
         test_btn = pn.widgets.Button(
             name="Test Expression",
             button_type="light",
@@ -465,21 +598,22 @@ class MathRefEditorAction:
             help_md,
             name_input,
             expr_input,
+            alias_hint_row,
             attrs_input,
             pn.layout.Divider(),
             search_map_section,
             pn.layout.Divider(),
             pn.Row(test_btn),
+            test_result_md,
             pn.layout.Divider(),
             attr_browser_md,
-            catalog_names,
             pn.layout.Divider(),
             yaml_section,
             pn.layout.Divider(),
             status_md,
             pn.Row(save_btn, cancel_btn),
             sizing_mode="stretch_width",
-            width=620,
+            min_width=640,
         )
 
         def _on_save(event: Any) -> None:
@@ -496,7 +630,7 @@ class MathRefEditorAction:
                 # Build search_map from the dynamic row widgets.
                 search_map: Dict[str, Dict[str, str]] = {}
                 search_req: Dict[str, bool] = {}
-                for _vi, _mc, _ci, _dr in sm_rows:
+                for _vi, _mc, _ci, _rc in sm_rows:
                     _sv = _vi.value.strip()
                     _sc = _ci.value.strip()
                     if not _sv or not _sc:
@@ -526,8 +660,8 @@ class MathRefEditorAction:
                 new_ref.set_catalog(catalog)
                 # When updating an existing ref, preserve non-primitive attributes
                 # (e.g. Shapely geometry) that cannot round-trip through the text area.
-                if is_edit and ref is not None:
-                    for _k, _v in ref.attributes.items():
+                if is_edit[0] and pre_ref is not None:
+                    for _k, _v in pre_ref.attributes.items():
                         if (
                             not isinstance(_v, (str, int, float, bool, type(None)))
                             and _k not in new_ref.attributes
@@ -548,6 +682,11 @@ class MathRefEditorAction:
                     except Exception as _te:
                         logger.warning("Could not refresh table after save: %s", _te)
                 status_md.object = f"✅ **{action_word}** `{name}` in catalog."
+                # Clear name/expr/attrs for the next entry; keep search map rows.
+                name_input.value = ""
+                expr_input.value = ""
+                attrs_input.value = ""
+                is_edit[0] = False
             except Exception as exc:
                 logger.exception("MathRefEditorAction save error")
                 status_md.object = f"❌ **Error:** {exc}"
@@ -618,13 +757,13 @@ class MathRefEditorAction:
             """Evaluate the expression against real catalog data and show a preview."""
             expr = expr_input.value.strip()
             if not expr:
-                status_md.object = "⚠️ **Expression is required to test.**"
+                test_result_md.object = "⚠️ **Expression is required to test.**"
                 return
             try:
                 # Build search_map from current widget state (same as _on_save).
                 _sm: Dict[str, Dict[str, str]] = {}
                 _req: Dict[str, bool] = {}
-                for _vi, _mc, _ci, _dr in sm_rows:
+                for _vi, _mc, _ci, _rc in sm_rows:
                     _sv = _vi.value.strip()
                     _sc = _ci.value.strip()
                     if not _sv or not _sc:
@@ -651,12 +790,12 @@ class MathRefEditorAction:
                     table_md = head.to_markdown()
                 except Exception:
                     table_md = head.to_string()
-                status_md.object = (
+                test_result_md.object = (
                     f"✅ **Expression evaluated successfully** — shape `{result.shape}`\n\n"
                     f"```\n{table_md}\n```"
                 )
             except Exception as exc:
-                status_md.object = f"❌ **Test failed:** {exc}"
+                test_result_md.object = f"❌ **Test failed:** {exc}"
 
         test_btn.on_click(_on_test)
 

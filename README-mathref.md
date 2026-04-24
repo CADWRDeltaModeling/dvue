@@ -18,6 +18,27 @@ When a Math Reference evaluates its expression it resolves each identifier in pr
 2. **`search_map`** — each alias is looked up in the catalog at `getData()` time using attribute criteria (e.g. `variable=wind_speed, interval=hourly`). This is the *recommended* approach because it keeps expressions portable.
 3. **Catalog name-lookup** — if the identifier matches a catalog key directly, that reference is used. This works for simple cases and for chaining one Math Reference into another.
 
+### `ref_type` — distinguishing raw from derived entries
+
+Every `DataReference` carries a `ref_type` class attribute:
+
+| Class | `ref_type` value |
+|---|---|
+| `DataReference` | `"raw"` |
+| `MathDataReference` | `"math"` |
+| Custom subclass | Override with `ref_type = "my_type"` in the class body |
+
+`DataCatalog.to_dataframe()` always includes a `ref_type` column. Subclasses
+that need to behave differently for derived vs. raw entries can branch on this
+value without using `isinstance` checks:
+
+```python
+df = catalog.to_dataframe()
+math_rows = df[df["ref_type"] == "math"]
+```
+
+---
+
 ### Available Functions
 
 Expressions run inside a safe NumPy namespace. The following are available without any import:
@@ -81,8 +102,6 @@ You can also list all names in code:
 catalog.list_names()
 # ['Station_A__wind_speed__hourly', 'Station_B__wind_speed__hourly', ...]
 ```
-
-Or via the **Catalog names** panel at the bottom of the Math Ref editor (shown automatically, scrollable).
 
 ```yaml
 # math_refs_tsdataui.yaml
@@ -230,52 +249,64 @@ The **Math Ref** button in the UI opens an inline editor panel for creating, edi
 
 ### Opening the editor
 
-Click the **Math Ref** button (⚙ icon, orange/warning style) in the action toolbar above the catalog table.
+Click the **Math Ref** button (orange/warning style) in the action toolbar above the catalog table. A new tab opens inside the display panel.
 
 ![Math Ref editor open](docs/screenshots/extsdataui_mathrefeditor.png)
 
-The editor has the following sections from top to bottom:
+The editor is laid out top-to-bottom as follows.
 
-#### YAML file
+#### Name
 
-A path input pre-filled with the default YAML path. Use the two buttons to:
-
-- **Load from YAML** — reads the file and merges all `MathDataReference` objects into the live catalog, then refreshes the table. No restart needed.
-- **Save to YAML** — writes all current Math References in the catalog out to the file.
+The catalog key used to store and retrieve this reference. Must be unique within the catalog.
 
 #### Expression
 
-The Python expression string. Use the short aliases you define in the Search Map (or full catalog key names for direct-lookup style).
+A Python expression string. Use the short aliases you define in the Search Map (or full catalog key names for direct-lookup style). See [Available Functions](#available-functions) for what is in scope.
+
+#### Alias hint buttons
+
+A row of clickable buttons appears immediately below the Expression field, one per alias currently defined in the Search Map. Clicking a button appends that alias name to the end of the expression — no typing needed. The buttons update live as you add or rename aliases.
 
 #### Attributes
 
-One `key: value` pair per line. These become the metadata attributes shown as columns in the catalog table (e.g. `variable`, `unit`, `interval`, `station_name`).
+One `key: value` pair per line. These become metadata attributes shown as columns in the catalog table (e.g. `variable`, `unit`, `interval`, `station_name`).
 
 #### Search Map
 
-One row per expression variable:
+One row per expression variable. Rows can be added with **+ Add variable** and removed with the **✕** button.
 
 | Field | Purpose |
 |---|---|
 | **Alias** | Short identifier used in the Expression (e.g. `obs`) |
 | **Join all** | When checked, all matching catalog entries are concatenated into a DataFrame (equivalent to `_require_single: false`) |
 | **Catalog criteria** | Comma-separated `attr=val` pairs used to search the catalog (e.g. `variable=wind_speed, interval=hourly`) |
+| **+ attr** | Drop-down picker; selecting an attribute name appends `attr=` to the criteria field so you only need to fill in the value |
+| **▶** | Per-row test button — runs the criteria against the live catalog and shows an inline badge: `✅ 1 match`, `⚠️ N matches`, or `❌ 0 matches`. If exactly one match is found and the **Attributes** field is empty, it is auto-filled with the match's identifying attributes |
 
-Click **+ Add variable** to add a row, click **✕** to remove one.
+**Criteria pre-fill from the table** — if you have a row selected in the catalog table when you click **+ Add variable**, the new row's criteria field is pre-populated with the identifying attributes of the selected row (station ID, variable, interval, etc.), saving manual typing.
+
+#### Test Expression
+
+The **Test Expression** button (▶ Play icon) evaluates the full expression against the live catalog and shows the result immediately below the button — shape, and the first five rows as a table. Any errors (unresolved aliases, type mismatches, etc.) are reported inline.
 
 #### Catalog attribute browser
 
-A read-only panel showing all attribute columns currently in the catalog and their unique values — handy for writing search criteria without guessing column names.
+A read-only section listing every attribute column currently in the catalog and its unique values — use this as a reference when writing search criteria.
 
-#### Saving and selecting a Math Ref
+#### YAML — Upload / Download
 
-Click **Save** to add the new Math Reference to the live catalog and refresh the table. If a reference with the same name already exists it is updated in-place.
+- **Upload YAML** — choose a `.yaml` / `.yml` file from your computer and click **Load Uploaded YAML**. All `MathDataReference` entries in the file are merged into the live catalog and the table refreshes. No server-side path is required.
+- **Download YAML** — downloads all current Math References in the catalog as a single YAML file to your browser's downloads folder. The file is in the canonical flat format and can be re-uploaded later.
 
-![Math Ref editor with all fields visible](docs/screenshots/extsdataui_mathrefeditor_full.png)
+#### Save
+
+Click **Save** to add the reference to the live catalog and refresh the table. After saving, the Name, Expression, and Attributes fields are cleared so you can immediately create the next reference. The Search Map rows are preserved — useful when creating a series of similar references that share the same variable criteria.
+
+If a reference with the same name already exists it is replaced in-place.
 
 ### Editing an existing Math Reference
 
-Select a row in the catalog table that corresponds to a Math Reference before clicking **Math Ref**. The editor pre-populates all fields from the selected reference so you can adjust the expression, attributes, or search criteria.
+Select a row in the catalog table that corresponds to a Math Reference before clicking **Math Ref**. The editor pre-populates Name, Expression, Attributes, and all Search Map rows from the selected reference.
 
 ![Math Ref row selected in table](docs/screenshots/extsdataui_mathrefselected.png)
 
@@ -332,6 +363,18 @@ catalog.add(m)
 
 ## Wire the editor into your `TimeSeriesDataUIManager`
 
+`TimeSeriesDataUIManager` includes the **Math Ref** editor by default — no extra wiring required. The button is shown automatically whenever `show_math_ref_editor` is `True` (the default).
+
+To hide it for a specific manager instance:
+
+```python
+mgr.show_math_ref_editor = False
+# or pass it to the constructor:
+mgr = MyManager(catalog, show_math_ref_editor=False)
+```
+
+To customise the suggested download filename or add the action to a manager that does not inherit from `TimeSeriesDataUIManager`:
+
 ```python
 from dvue.math_ref_editor import MathRefEditorAction
 
@@ -348,12 +391,12 @@ class MyManager(TimeSeriesDataUIManager):
             button_type="warning",
             icon="math-function",
             action_type="display",
-            callback=MathRefEditorAction(default_yaml_path="math_refs.yaml").callback,
+            callback=MathRefEditorAction(default_yaml_filename="my_math_refs.yaml").callback,
         ))
         return actions
 ```
 
-The `default_yaml_path` pre-fills the YAML path input in the editor so users don't have to type it manually.
+`default_yaml_filename` sets the suggested filename when the user clicks **Download YAML** in the editor.
 
 ---
 
