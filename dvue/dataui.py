@@ -921,11 +921,20 @@ class DataUI(param.Parameterized):
 
     def create_data_table(self, dfs):
         column_width_map = self._dataui_manager.get_table_column_width_map()
-        dfs = dfs[self._dataui_manager.get_table_columns()]
+        all_cols = self._dataui_manager.get_table_columns()
+        dfs = dfs[all_cols]
+        # Determine which columns to hide initially.  ref_type is hidden when
+        # all rows share the same type (homogeneous catalog).
+        initial_hidden = []
+        if "ref_type" in dfs.columns:
+            from dvue.tsdataui import TimeSeriesDataUIManager
+            if not TimeSeriesDataUIManager._has_mixed_ref_types(dfs):
+                initial_hidden = ["ref_type"]
         self.display_table = pn.widgets.Tabulator(
             dfs,
             disabled=True,
             widths=column_width_map,
+            hidden_columns=initial_hidden,
             show_index=False,
             sizing_mode="stretch_width",
             header_filters=self._dataui_manager.get_table_filters(),
@@ -1188,6 +1197,23 @@ class DataUI(param.Parameterized):
             "Table Options",
             self.param.use_regex_filter,
         )
+        # Column visibility picker — MultiChoice showing all table columns.
+        # Checked = visible; unchecked = hidden (but still filterable).
+        _all_cols = list(self.display_table.value.columns)
+        _initially_hidden = list(self.display_table.hidden_columns or [])
+        self._column_picker = pn.widgets.MultiChoice(
+            name="Show columns",
+            options=_all_cols,
+            value=[c for c in _all_cols if c not in _initially_hidden],
+            sizing_mode="stretch_width",
+        )
+
+        def _on_column_picker_change(event):
+            visible = event.new
+            self.display_table.hidden_columns = [c for c in list(self.display_table.value.columns) if c not in visible]
+
+        self._column_picker.param.watch(_on_column_picker_change, "value")
+        table_options.append(self._column_picker)
         if hasattr(self, "_map_features"):
             _extra_map_widgets = self._dataui_manager.get_map_option_widgets()
             _map_option_items = [

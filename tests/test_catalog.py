@@ -918,6 +918,23 @@ class TestMathDataReference:
         assert "sum" in repr(m)
         assert "A + B" in repr(m)
 
+    def test_dataframe_non_string_columns_normalised(self):
+        """DataFrame returned by an expression must have string column names.
+
+        vtools godin() (and similar filters) return a DataFrame whose single
+        column is the integer 0 when given a Series input.  HoloViews rejects
+        non-string column names, so _load_data must normalise them.
+        """
+        df = pd.DataFrame({0: [1.0, 2.0, 3.0]})
+        ref = DataReference(
+            source="", reader=InMemoryDataReferenceReader(df), name="raw"
+        )
+        m = MathDataReference("raw", variable_map={"raw": ref})
+        result = m.getData()
+        assert all(isinstance(c, str) for c in result.columns), (
+            f"Expected all string columns, got: {list(result.columns)}"
+        )
+
 
 # ===========================================================================
 # DataCatalog

@@ -162,8 +162,9 @@ class ExampleTimeSeriesPlotAction(tsdataui.TimeSeriesPlotAction):
         )
 
     def _append_value(self, new_value, value):
-        if new_value not in value:
-            value += f'{", " if value else ""}{new_value}'
+        new_value_str = str(new_value) if new_value is not None and str(new_value).lower() != "nan" else ""
+        if new_value_str and new_value_str not in value:
+            value += f'{", " if value else ""}{new_value_str}'
         return value
 
     def append_to_title_map(self, title_map, unit, r):

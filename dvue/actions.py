@@ -70,8 +70,10 @@ class PlotAction:
                 logger.warning("No rows selected for plotting")
                 return
 
-            # Get selected data
-            dfselected = dataui.display_table.value.iloc[dataui.display_table.selection]
+            # Use the full catalog DataFrame (_dfcat) rather than the
+            # display-column subset (display_table.value) so that the 'name'
+            # column is present for catalog lookup in get_data_reference().
+            dfselected = dataui._dfcat.iloc[dataui.display_table.selection]
 
             # Show 20% progress
             dataui.set_progress(20)
@@ -149,7 +151,8 @@ class DownloadDataAction:
                 logger.warning("No rows selected for download")
                 return None
 
-            dfselected = dataui.display_table.value.iloc[dataui.display_table.selection]
+            # Use full catalog rows (with 'name') for correct reference lookup.
+            dfselected = dataui._dfcat.iloc[dataui.display_table.selection]
 
             # Update progress to 30%
             dataui.set_progress(30)

@@ -31,6 +31,34 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 
+# Optional vtools filter functions — available when vtools/vtools3 is installed.
+_vtools_filters: Dict[str, Any] = {}
+try:
+    from vtools.functions.filter import cosine_lanczos, godin, butterworth, lanczos
+    from vtools.functions.filter import lowpass_cosine_lanczos_filter_coef
+
+    _vtools_filters = {
+        "cosine_lanczos": cosine_lanczos,
+        "godin": godin,
+        "butterworth": butterworth,
+        "lanczos": lanczos,
+        "lowpass_cosine_lanczos_filter_coef": lowpass_cosine_lanczos_filter_coef,
+    }
+except ImportError:
+    try:
+        from vtools3.functions.filter import cosine_lanczos, godin, butterworth, lanczos  # type: ignore[no-redef]
+        from vtools3.functions.filter import lowpass_cosine_lanczos_filter_coef  # type: ignore[no-redef]
+
+        _vtools_filters = {
+            "cosine_lanczos": cosine_lanczos,
+            "godin": godin,
+            "butterworth": butterworth,
+            "lanczos": lanczos,
+            "lowpass_cosine_lanczos_filter_coef": lowpass_cosine_lanczos_filter_coef,
+        }
+    except ImportError:
+        pass
+
 # DataReference is defined early in catalog.py, so this import is safe even
 # though catalog.py re-imports MathDataReference at its bottom for backward
 # compatibility.  Python's partial-module mechanism ensures DataReference is
@@ -85,6 +113,9 @@ _MATH_NAMESPACE: Dict[str, Any] = {
     "nan": float("nan"),
     "inf": float("inf"),
 }
+
+# Merge in vtools filter functions if available (cosine_lanczos, godin, etc.)
+_MATH_NAMESPACE.update(_vtools_filters)
 
 # Tokens that are part of the expression namespace, not variable names
 _RESERVED_TOKENS: frozenset = frozenset(_MATH_NAMESPACE) | {
@@ -316,6 +347,19 @@ class MathDataReference(DataReference):
             else:
                 resolved[tok] = data
 
+        # Upcast float32 → float64 so vtools filters (and other functions that
+        # assign NaN-filled float64 results back into the original container)
+        # don't hit pandas 3.x LossySetitemError.
+        for tok, val in resolved.items():
+            if isinstance(val, pd.Series) and val.dtype == "float32":
+                resolved[tok] = val.astype("float64")
+            elif isinstance(val, pd.DataFrame):
+                float32_cols = [c for c in val.columns if val[c].dtype == "float32"]
+                if float32_cols:
+                    resolved[tok] = val.copy()
+                    for c in float32_cols:
+                        resolved[tok][c] = resolved[tok][c].astype("float64")
+
         return resolved
 
     def _load_data(self, time_range=None) -> pd.DataFrame:
@@ -334,6 +378,9 @@ class MathDataReference(DataReference):
             raise ValueError(f"Failed to evaluate expression {self.expression!r}: {exc}") from exc
 
         if isinstance(result, pd.DataFrame):
+            if not all(isinstance(c, str) for c in result.columns):
+                result = result.copy()
+                result.columns = [str(c) for c in result.columns]
             return result
         if isinstance(result, pd.Series):
             return result.to_frame(name=self.name or "result")

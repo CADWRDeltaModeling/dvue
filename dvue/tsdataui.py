@@ -122,24 +122,16 @@ class TimeSeriesDataUIManager(DataUIManager):
     )
 
     def __init__(self, filename_column="FILE", file_number_column_name="FILE_NUM", **params):
-        # modify catalog if filename_column is present to include file number if multiple files are present
         self._cached_catalog = None
-        catalog = self.get_data_catalog()
-        self.change_color_cycle()
         self.filename_column = filename_column
         self.file_number_column_name = file_number_column_name
         self.display_fileno = False
-        if self.filename_column in catalog.columns:
-            unique_files = catalog[self.filename_column].unique()
-            if len(unique_files) > 1:
-                catalog[self.file_number_column_name] = catalog[self.filename_column].apply(
-                    lambda x: unique_files.tolist().index(x)
-                )
-                self.display_fileno = True
-        else:
-            self.file_number_column_name = None
-            self.display_fileno = False
-        self._cached_catalog = catalog
+        # Populate _cached_catalog for subclasses that don't expose data_catalog.
+        # Managers with a data_catalog property always rebuild fresh in get_data_catalog().
+        if self.data_catalog is None:
+            catalog = self.get_data_catalog()
+            self._cached_catalog = self._apply_fileno(catalog)
+        self.change_color_cycle()
         self.time_range = self.get_time_range(self.get_data_catalog())
         super().__init__(**params)
         table_columns = list(self.get_table_columns())
@@ -150,13 +142,38 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.param.color_cycle_column.objects = columns_with_blank
         self.param.plot_group_by_column.objects = columns_with_blank
 
+    def _apply_fileno(self, df):
+        """Inject a FILE_NUM column when multiple files are present.
+
+        Called during init (for legacy subclasses) and on every
+        ``get_data_catalog()`` rebuild for managers that expose a
+        ``data_catalog`` property.  Sets ``self.display_fileno`` as a
+        side-effect.
+        """
+        if self.filename_column and self.filename_column in df.columns:
+            unique_files = df[self.filename_column].unique()
+            if len(unique_files) > 1:
+                df = df.copy()
+                df[self.file_number_column_name] = df[self.filename_column].apply(
+                    lambda x: list(unique_files).index(x)
+                )
+                self.display_fileno = True
+                return df
+        if self.filename_column not in (df.columns if hasattr(df, 'columns') else []):
+            self.file_number_column_name = None
+        self.display_fileno = False
+        return df
+
     def get_data_catalog(self):
-        # Return cached catalog (with FILE_NUM if applicable) after init.
+        # When a live DataCatalog is available, always rebuild from it so that
+        # mutations (e.g. catalog.add() in the math-ref editor) are immediately
+        # visible without requiring a cache invalidation step.
+        if self.data_catalog is not None:
+            return self._apply_fileno(super().get_data_catalog())
+        # Legacy path: subclasses that override get_data_catalog() themselves
+        # (no data_catalog property) store the result in _cached_catalog.
         if hasattr(self, '_cached_catalog') and self._cached_catalog is not None:
             return self._cached_catalog
-        # Delegate to DataProvider when a data_catalog property is set.
-        if self.data_catalog is not None:
-            return super().get_data_catalog()
         raise NotImplementedError("Method get_data_catalog not implemented")
 
     def _make_plot_action(self):
@@ -242,6 +259,14 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="display",
                 callback=math_action.callback,
             ))
+        from .actions import ClearCacheAction
+        actions.append(dict(
+            name="Clear Cache",
+            button_type="light",
+            icon="trash",
+            action_type="inline",
+            callback=ClearCacheAction().callback,
+        ))
         return actions
 
     def get_time_range(self, dfcat):
@@ -464,7 +489,18 @@ class TimeSeriesDataUIManager(DataUIManager):
             if self.display_fileno:
                 column_width_map[self.file_number_column_name] = "5%"
             self.adjust_column_width(column_width_map)
+        # Always include ref_type so it is present in the Tabulator data slice
+        # (required for hidden-but-filterable behaviour).  Width is small since
+        # the column is hidden by default when all refs share the same type.
+        column_width_map["ref_type"] = "8%"
         return column_width_map
+
+    @staticmethod
+    def _has_mixed_ref_types(df: "pd.DataFrame") -> bool:
+        """Return True if *df* contains more than one distinct ``ref_type`` value."""
+        if df is None or "ref_type" not in df.columns:
+            return False
+        return df["ref_type"].nunique() > 1
 
     def get_color_style_mapping(self, unique_values):
         """
@@ -858,8 +894,10 @@ class TimeSeriesPlotAction(PlotAction):
         file_index_map = {}
         if manager.display_fileno:
             local_unique_files = df[manager.filename_column].unique()
-            short_unique_files = get_unique_short_names(local_unique_files)
-            file_index_map = dict(zip(local_unique_files, short_unique_files))
+            # Math references have NaN for filename; exclude them from path shortening.
+            valid_files = [f for f in local_unique_files if not pd.isna(f)]
+            short_unique_files = get_unique_short_names(valid_files)
+            file_index_map = dict(zip(valid_files, short_unique_files))
 
         style_maps = manager._prepare_style_maps(df)
 
@@ -895,8 +933,9 @@ class TimeSeriesPlotAction(PlotAction):
                 group_key = None
                 if manager.plot_group_by_column and manager.plot_group_by_column in row:
                     group_value = row[manager.plot_group_by_column]
-                    if group_value is not None and str(group_value).strip() != "":
-                        group_key = str(group_value)
+                    group_str = str(group_value).strip() if group_value is not None else ""
+                    if group_str and group_str.lower() != "nan":
+                        group_key = group_str
 
                 self._add_curve_to_layout(
                     layout_map, station_map, title_map, range_map,

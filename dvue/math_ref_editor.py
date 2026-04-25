@@ -200,7 +200,9 @@ class MathRefEditorAction:
 
         selected = dataui.display_table.selection
         if selected:
-            row = dataui.display_table.value.iloc[selected[0]]
+            # Use _dfcat (full catalog DataFrame with 'name' column) rather than
+            # display_table.value (display-column subset that strips 'name').
+            row = dataui._dfcat.iloc[selected[0]]
             name_val = row.get("name", "") if hasattr(row, "get") else ""
             try:
                 pre_ref = catalog.get(str(name_val)) if name_val else None
@@ -219,7 +221,12 @@ class MathRefEditorAction:
                 }
                 pre_attrs = "\n".join(f"{k}: {v}" for k, v in extra.items())
         # ── Build the editor form ─────────────────────────────────────────────
-        title_md = pn.pane.Markdown("### Math Reference Editor", sizing_mode="stretch_width")
+        _title_text = (
+            f"### Math Reference Editor \u2014 Editing: `{pre_name}`"
+            if is_edit[0]
+            else "### Math Reference Editor"
+        )
+        title_md = pn.pane.Markdown(_title_text, sizing_mode="stretch_width")
         help_md = pn.pane.Markdown(
             "**Expression** — use NumPy functions (`cumsum`, `sqrt`, `abs`, `where`, …) "
             "plus variable aliases defined in the Search Map.\n\n"
@@ -425,11 +432,14 @@ class MathRefEditorAction:
                 if not criteria:
                     _row_result_md.object = "⚠️ No valid `attr=val` pairs found."
                     return
+                dataui.set_progress(-1)
                 try:
                     results = catalog.search(**criteria)
                 except Exception as exc:
                     _row_result_md.object = f"❌ Search error: {exc}"
                     return
+                finally:
+                    dataui.hide_progress()
                 n = len(results)
                 if n == 0:
                     _row_result_md.object = "❌ **0 matches** — check criteria."
@@ -527,7 +537,7 @@ class MathRefEditorAction:
             width=160,
             margin=(6, 4, 4, 4),
         )
-        save_btn = pn.widgets.Button(name="Save", button_type="success", icon="device-floppy")
+        save_btn = pn.widgets.Button(name="Save to Catalog", button_type="success", icon="device-floppy")
         cancel_btn = pn.widgets.Button(name="Cancel", button_type="default", icon="x")
 
         # ── Client-side YAML upload ───────────────────────────────────────────
@@ -644,12 +654,21 @@ class MathRefEditorAction:
                     if _criteria:
                         search_map[_sv] = _criteria
                         search_req[_sv] = not _mc.value  # require_single = not join_all
-                # Remove an existing entry with the same name so the update lands cleanly.
+                # When renaming (edit mode, name changed), remove the original entry first.
+                action_word = "Created"
+                if is_edit[0] and pre_ref is not None and pre_ref.name != name:
+                    try:
+                        catalog.remove(pre_ref.name)
+                        action_word = "Renamed"
+                    except KeyError:
+                        pass
+                # Remove any existing entry with the new name (handles same-name update).
                 try:
                     catalog.remove(name)
-                    action_word = "Updated"
+                    if action_word == "Created":
+                        action_word = "Updated"
                 except KeyError:
-                    action_word = "Created"
+                    pass
                 new_ref = MathDataReference(
                     expression=expr,
                     name=name,
@@ -679,6 +698,21 @@ class MathRefEditorAction:
                         # the first math ref added (new expression column appears).
                         dataui.display_table.widths = manager.get_table_column_width_map()
                         dataui.display_table.header_filters = manager.get_table_filters()
+                        # Auto-show ref_type column when catalog becomes mixed.
+                        # Update the column picker to reflect the new state.
+                        from dvue.tsdataui import TimeSeriesDataUIManager
+                        if (
+                            "ref_type" in dataui._dfcat.columns
+                            and TimeSeriesDataUIManager._has_mixed_ref_types(dataui._dfcat)
+                        ):
+                            hidden = list(dataui.display_table.hidden_columns or [])
+                            if "ref_type" in hidden:
+                                hidden.remove("ref_type")
+                                dataui.display_table.hidden_columns = hidden
+                            if hasattr(dataui, "_column_picker"):
+                                visible = list(dataui._column_picker.value)
+                                if "ref_type" not in visible:
+                                    dataui._column_picker.value = visible + ["ref_type"]
                     except Exception as _te:
                         logger.warning("Could not refresh table after save: %s", _te)
                 status_md.object = f"✅ **{action_word}** `{name}` in catalog."
@@ -759,6 +793,7 @@ class MathRefEditorAction:
             if not expr:
                 test_result_md.object = "⚠️ **Expression is required to test.**"
                 return
+            dataui.set_progress(-1)
             try:
                 # Build search_map from current widget state (same as _on_save).
                 _sm: Dict[str, Dict[str, str]] = {}
@@ -783,7 +818,8 @@ class MathRefEditorAction:
                     search_require_single=_req if _req else None,
                 )
                 tmp_ref.set_catalog(catalog)
-                result = tmp_ref.getData()
+                time_range = getattr(manager, "time_range", None)
+                result = tmp_ref.getData(time_range=time_range)
                 head = result.head(5)
                 # Format as a simple Markdown table.
                 try:
@@ -796,6 +832,8 @@ class MathRefEditorAction:
                 )
             except Exception as exc:
                 test_result_md.object = f"❌ **Test failed:** {exc}"
+            finally:
+                dataui.hide_progress()
 
         test_btn.on_click(_on_test)
 
