@@ -75,6 +75,20 @@ search_map:
 Inject dynamic metadata via `ref.set_dynamic_metadata(key, value)`. Read it back with
 `ref.get_dynamic_metadata(key, default=None)`.
 
+### Type coercion in matches()
+
+The math ref editor's search map text input always produces **string values** (e.g.
+`url_num=0` becomes the string `'0'`). `matches()` handles this automatically: when
+`actual != expected` and their types differ, it attempts `type(actual)(expected)` before
+returning `False`.
+
+- `url_num=0` (int in dynamic metadata) matched with `'0'` (string from editor) → `int('0') == 0` ✓
+- `geoid='437'` (string attribute) matched with `437` (int) → `str(437) == '437'` ✓
+
+**Do not coerce values in the parser** (`_parse_search_map`). Type coercion belongs
+exclusively in `matches()` so the logic is in one place and both typed (YAML-loaded)
+and untyped (editor text) criteria work without special handling.
+
 ---
 
 ## 4. MathDataReference — Variable Resolution Rules
@@ -93,6 +107,17 @@ x.iloc[:, 1] - x.iloc[:, 0]  # ✅ works when ≥2 matches
 
 Never write `match_all` expressions that assume a Series — they will break when the
 catalog grows.
+
+### match_all concat strategy — axis=1 preferred, axis=0 warns
+
+When multiple refs match a `match_all` variable, results are combined with
+`pd.concat(frames, axis=1)` (columns share the time index — the normal case).
+If that fails (incompatible indices), it falls back to `pd.concat(axis=0)` **and
+emits a `UserWarning`** explaining that `iloc[:,N]` will raise `IndexError`.
+
+If you see this warning, the matched refs likely have non-overlapping or
+misaligned time indices. Fix the search criteria so only refs with a shared
+time index are matched.
 
 ### require_single variables are always Series (when single-column)
 
