@@ -4,14 +4,20 @@
 - ✅ Phase 1 — Bug fixes (YAML download format, table refresh) — **DONE**
 - ✅ Phase 2 — Base class integration (`ref_type`, `_has_math_refs`, `_enrich_catalog_with_math_ref_hints`) — **DONE**
 - ✅ Phase 3a — Layout reorder (YAML to bottom) — **DONE**
+- ✅ Phase 3b-FIX — Test Expression result visibility — **DONE**
 - ✅ Phase 3c — Attr picker per search-map row — **DONE**
-- 🔲 Phase 3b-FIX — Test Expression result is invisible
-- 🔲 Phase 3d — Per-variable ▶ Test button (badge + match list + attr auto-fill)
-- 🔲 Phase 3e — Criteria pre-fill from selected catalog table row
-- 🔲 Phase 3f — Expression alias hint buttons
-- 🔲 Phase 3g — Save keeps editor open, clears form
-- 🔲 Phase 3h — Remove catalog names section
+- ✅ Phase 3d — Per-variable ▶ Test button — **DONE**
+- ✅ Phase 3e — Criteria pre-fill from selected catalog table row — **DONE**
+- ✅ Phase 3f — Expression alias hint buttons — **DONE**
+- ✅ Phase 3g — Save keeps editor open, clears form — **DONE**
+- ✅ Phase 3h — Remove catalog names section — **DONE**
 - ✅ Phase 4 — Tests (YAML round-trip, ref_type, enrich helper) — **DONE**
+- ✅ Phase 5 — Stale catalog cache fix + ClearCacheAction — **DONE**
+- ✅ Phase 6 — Plot/Download use `_dfcat` rows; Test Expression respects time_range — **DONE**
+- ✅ Phase 7 — Pre-populate fix; edit-mode title; rename logic; Save to Catalog label — **DONE**
+- ✅ Phase 8 — vtools filter functions in expression namespace; non-string column normalisation — **DONE**
+- ✅ Phase 9 — Column picker + `ref_type` auto-show for mixed catalogs — **DONE**
+- ✅ Phase 10 — Rename `_require_single` → `match_all` in YAML; warn on silently dropped matches — **DONE**
 
 ---
 
@@ -19,7 +25,7 @@
 
 ### 1a. Fix YAML download format mismatch — DONE
 - `_yaml_download_callback()` now calls `save_math_refs()` internally, producing the
-  canonical flat format. The old nested `{criteria: {...}, require_single: ...}` /
+  canonical flat format. The old nested `{criteria: {...}, match_all: ...}` /
   `attributes: {...}` structure is gone.
 
 ### 1b. Fix table refresh on first math ref save — DONE
@@ -159,6 +165,68 @@ Row(save, cancel)
 
 ---
 
+## Phase 5 — Stale Catalog Cache Fix ✅
+
+### Root cause
+`TimeSeriesDataUIManager.__init__` stored the catalog DataFrame in `_cached_catalog` once and never invalidated it. Any `catalog.add()` call (e.g. from math ref editor save) was invisible to subsequent `get_data_catalog()` calls in all managers that relied on the base-class path.
+
+### Fix — `tsdataui.py`
+- Extracted `_apply_fileno(df)` helper (was inline in `__init__`) to re-apply `FILE_NUM` column on demand.
+- Changed `get_data_catalog()` priority:
+  1. If `self.data_catalog is not None` → always rebuild fresh from live catalog (`super().get_data_catalog()`) + `_apply_fileno()`.
+  2. Else fall back to `_cached_catalog` (legacy path for subclasses without `data_catalog` property).
+- `_cached_catalog` is now only populated at init for legacy subclasses (no `data_catalog` property).
+
+### Fix — `dsm2ui.py`
+- Removed `DSM2TidefileUIManager.get_data_catalog()` override (`return self.dfcat`).
+  The base class now rebuilds from `self._dvue_catalog` automatically.
+- All other affected managers (`DSM2DataUIManager`, `DSSDataUIManager`, `DeltaCDNodesUIManager`, `DeltaCDUIManager`) benefit automatically — no per-class changes needed.
+
+### ClearCacheAction wired in
+- `ClearCacheAction` existed in `actions.py` but was never registered.
+- Added as the last action in `TimeSeriesDataUIManager.get_data_actions()`.
+
+---
+
+## Phase 6 — Plot/Download Row Lookup + Test Expression Time Range ✅
+
+### Bug: `nan::CHAN_1+2_UP/flow` KeyError on plot
+`PlotAction.callback` and `DownloadDataAction.callback` used `display_table.value.iloc[selection]` to get selected rows. `display_table.value` is the display-column subset of `_dfcat` — it strips the `name` column. `get_data_reference(row)` then fell through to `_build_ref_key(row)`, which produced `nan::...` for math refs (no `filename` attribute).
+
+**Fix (`actions.py`)**: Both callbacks now use `dataui._dfcat.iloc[selection]`. Integer selection indices are identical across `_dfcat` and `display_table.value`.
+
+### Bug: Test Expression ignored time window
+`_on_test` called `tmp_ref.getData()` with no `time_range`, loading full series.
+
+**Fix (`math_ref_editor.py`)**: Pass `getattr(manager, "time_range", None)` to `getData()`.
+
+### Math ref curve labels — `dsm2ui.py`
+- `DSM2TidefileUIManager.build_station_name`: returns `row["name"]` for `ref_type == "math"`.
+- `_TidefilePlotAction.create_curve`: uses catalog name as `crvlabel` for math refs.
+
+---
+
+## Phase 7 — Editor Pre-populate, Edit Mode, Rename ✅
+
+### Bug: editor always opened blank even when a math ref row was selected
+Pre-populate block read `display_table.value.iloc[selected[0]]` — `name` column stripped.
+
+**Fix**: Read `dataui._dfcat.iloc[selected[0]]` so `name_val` resolves correctly and `pre_ref` is found in the catalog.
+
+### Edit mode indicator
+Title now shows `### Math Reference Editor — Editing: \`<name>\`` when opened from a selected math ref row.
+
+### Rename logic
+`_on_save` previously called `catalog.remove(name)` where `name` was the *new* name — old entry stayed on rename. New logic:
+1. If editing and name changed → remove `pre_ref.name` (old) → status `"Renamed"`.
+2. Remove new name if already exists (same-name update) → status `"Updated"`.
+3. No prior entry → status `"Created"`.
+
+### Save button label
+`"Save"` → `"Save to Catalog"`.
+
+---
+
 ## Phase 4 — Tests ✅
 
 Added to `tests/test_catalog.py`:
@@ -175,10 +243,43 @@ New file `tests/test_math_ref_editor.py`:
 
 | File | Changes |
 |------|---------|
-| `dvue/math_ref_editor.py` | Phase 3b-FIX, 3d, 3e, 3f, 3g, 3h |
+| `dvue/math_ref_editor.py` | Ph 3–7: editor UI, pre-populate, rename, time_range test; auto-show `ref_type` on save ✅ |
 | `dvue/catalog.py` | `ref_type` class attr, `to_dataframe()` `ref_type` column ✅ |
-| `dvue/math_reference.py` | `MathDataReference.ref_type = "math"` ✅ |
-| `dvue/tsdataui.py` | `_has_math_refs()`, `_enrich_catalog_with_math_ref_hints()` ✅ |
+| `dvue/math_reference.py` | `MathDataReference.ref_type = "math"`; `match_all` YAML key; warn on silently dropped matches ✅ |
+| `dvue/tsdataui.py` | `_has_math_refs()`, `_enrich_catalog_with_math_ref_hints()`, `_apply_fileno()`, cache fix, `ClearCacheAction`, `ref_type` in column map, `_has_mixed_ref_types()` ✅ |
+| `dvue/actions.py` | `PlotAction`/`DownloadAction` use `_dfcat` rows; `ClearCacheAction` registered ✅ |
+| `dvue/dataui.py` | `hidden_columns` init in `create_data_table`; `_column_picker` MultiChoice in Table Options ✅ |
 | `examples/ex_tsdataui.py` | Uses base helpers, `ref_type` column in table ✅ |
-| `tests/test_catalog.py` | `TestRefType`, `TestSaveMathRefsRoundTrip` ✅ |
+| `dsm2ui/dsm2ui.py` | Removed stale `get_data_catalog()` override; math ref curve labels ✅ |
+| `tests/test_catalog.py` | `TestRefType`, `TestSaveMathRefsRoundTrip`, `test_dataframe_non_string_columns_normalised`; update `match_all` YAML key in round-trip tests ✅ |
 | `tests/test_math_ref_editor.py` | YAML + enrich tests ✅ |
+| `tests/test_tsdataui.py` | FILE_NUM, `ClearCacheAction`, cache rebuild tests ✅ |
+
+---
+
+## Phase 8 — vtools Filter Functions + Column Normalisation ✅
+
+### vtools functions in expression namespace
+- `math_reference.py` now attempts `from vtools.functions.filter import cosine_lanczos, godin, butterworth, lanczos, lowpass_cosine_lanczos_filter_coef` at import time (falls back to `vtools3`, silently skips if neither is installed).
+- These are merged into `_MATH_NAMESPACE` so they are available in any `MathDataReference` expression (e.g. `godin(x1 + x2)`).
+
+### Non-string column name normalisation in `_load_data`
+- **Root cause**: `vtools.godin()` returns a DataFrame with integer column `0` when its input is a pandas Series. HoloViews rejects non-string column names with `DataError`.
+- **Fix**: `_load_data` checks `all(isinstance(c, str) for c in result.columns)` and casts to strings when the condition fails.
+- **Test**: `TestMathDataReference.test_dataframe_non_string_columns_normalised` in `tests/test_catalog.py`.
+
+---
+
+## Phase 9 — Column Picker + `ref_type` Auto-Show ✅
+
+### Column visibility picker in Table Options
+- `DataUI.create_view()` builds a `pn.widgets.MultiChoice` (`_column_picker`) listing all columns from `get_table_columns()`, placed in the existing "Table Options" sidebar tab.
+- Checked = visible; unchecked = hidden (Tabulator `hidden_columns` — column stays in data for filtering).
+- Initial state reflects the current hidden state of the Tabulator (so auto-hidden `ref_type` starts unchecked).
+- On change, `display_table.hidden_columns` is updated to the unchecked set.
+
+### `ref_type` auto-show/hide
+- `TimeSeriesDataUIManager.get_table_column_width_map()` always appends `ref_type: "8%"` so it is present in the Tabulator data slice.
+- `TimeSeriesDataUIManager._has_mixed_ref_types(df)` — static helper; returns `True` if `df["ref_type"].nunique() > 1`.
+- `DataUI.create_data_table()` sets `hidden_columns=["ref_type"]` initially when catalog is homogeneous.
+- When a math ref is saved in the editor, if catalog becomes mixed: `ref_type` is removed from `hidden_columns` and the picker value is updated to include it.
