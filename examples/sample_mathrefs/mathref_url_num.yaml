@@ -1,0 +1,78 @@
+# mathref_url_num.yaml
+#
+# Demonstrates url_num-based source discrimination.
+#
+# When two or more files are loaded into the same catalog (e.g. a baseline
+# and a scenario run), dvue assigns each source an integer url_num (0, 1, …)
+# that is stored as dynamic metadata on every DataReference from that source.
+# Math ref search_map criteria can filter by url_num to pin a variable to a
+# specific file without needing a different attribute in the data itself.
+#
+# This is the cleanest alternative to match_all when you want positional
+# indexing across exactly two known sources: you get two named Series instead
+# of one DataFrame with unnamed columns, and the expression reads naturally.
+#
+# File 0 = baseline run, file 1 = scenario run (same station / variable).
+
+# -- 1. Simple difference: scenario minus baseline ----------------------------
+- name: flow_diff__chipps__scenario_minus_baseline
+  variable: flow_diff
+  unit: cfs
+  geoid: '437'
+  id: CHAN_437_UP_DIFF
+  expression: flow_1.resample('1h').mean() - flow_0.resample('1h').mean()
+  search_map:
+    flow_0:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      url_num: 0
+    flow_1:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      url_num: 1
+
+# -- 2. Cumulative difference (drift over time) -------------------------------
+- name: flow_cumsum_diff__chipps__scenario_minus_baseline
+  variable: flow_cumsum_diff
+  unit: cfs·hr
+  geoid: '437'
+  id: CHAN_437_UP_CUMDIFF
+  expression: np.cumsum((flow_1.resample('1h').mean() - flow_0.resample('1h').mean()))
+  search_map:
+    flow_0:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      url_num: 0
+    flow_1:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      url_num: 1
+
+# -- 3. Percent change --------------------------------------------------------
+- name: flow_pct_change__chipps__scenario_vs_baseline
+  variable: flow_pct_change
+  unit: '%'
+  geoid: '437'
+  id: CHAN_437_UP_PCT
+  expression: (flow_1.resample('1h').mean() - flow_0.resample('1h').mean()) / flow_0.resample('1h').mean().abs() * 100
+  search_map:
+    flow_0:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      url_num: 0
+    flow_1:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      url_num: 1

@@ -1,0 +1,28 @@
+- name: godinx
+  source: ''
+  A: FILL+CHAN
+  B: RSAC054_GODIN
+  C: STAGE
+  F: DWR-DMS-202312
+  E: 15MIN
+  expression: godin(x)
+  search_map:
+    x:
+      A: FILL+CHAN
+      B: RSAC054
+      C: STAGE
+      E: 15MIN
+- name: czx
+  source: ''
+  A: FILL+CHAN
+  B: RSAC054_CZ40H
+  C: STAGE
+  F: DWR-DMS-202312
+  E: 15MIN
+  expression: cosine_lanczos(x, cutoff_period='40H')
+  search_map:
+    x:
+      A: FILL+CHAN
+      B: RSAC054
+      C: STAGE
+      E: 15MIN

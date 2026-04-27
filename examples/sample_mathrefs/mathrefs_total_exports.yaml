@@ -1,0 +1,44 @@
+- name: total_exports
+  source: ''
+  A: CALC
+  B: TOTAL_EXPORTS
+  C: FLOW-EXPORT
+  E: 15MIN
+  expression: exports.resample('1D').sum(axis=1)
+  search_map:
+    exports:
+      A: FILL+CHAN
+      C: FLOW-EXPORT
+      E: 15MIN
+      F: DWR-DMS-202312
+      match_all: true
+
+- name: total_boundary_flows
+  source: ''
+  A: CALC
+  B: TOTAL_BOUNDARY_FLOWS
+  C: FLOW
+  E: 15MIN
+  expression: boundary_flows.resample('1D').sum(axis=1)
+  search_map:
+    boundary_flows:
+      A: FILL+CHAN
+      C: FLOW
+      E: 15MIN
+      F: DWR-DMS-202312
+      match_all: true
+
+- name: total_net_flow
+  source: ''
+  A: CALC
+  B: TOTAL_NET_FLOW
+  C: FLOW
+  E: 15MIN
+  expression: bflows - exports
+  search_map:
+    bflows:
+      A: CALC
+      B: TOTAL_BOUNDARY_FLOWS
+    exports:
+      A: CALC
+      B: TOTAL_EXPORTS
