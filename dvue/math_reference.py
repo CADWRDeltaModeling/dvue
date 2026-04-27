@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -143,10 +144,11 @@ class MathDataReference(DataReference):
 
     1. *variable_map* – direct ``{name: DataReference}`` bindings.
     2. *search_map* – each variable is looked up in the attached catalog by
-       metadata criteria.  When *require_single* is ``True`` (the default)
-       only the first result is used; when ``False`` all matching results are
-       fetched and joined into a single DataFrame (axis=1 join by index;
-       falls back to axis=0 row-concat if the join cannot be performed).
+       metadata criteria.  By default only the first match is used.  Set
+       ``match_all: true`` in the YAML (or ``require_single=False`` in the
+       Python API) to fetch all matching results and join them into a single
+       DataFrame (axis=1 join by index; falls back to axis=0 row-concat if
+       the join cannot be performed).
     3. Catalog name-lookup – if the identifier matches a reference name in the
        attached catalog it is used directly.
 
@@ -165,7 +167,9 @@ class MathDataReference(DataReference):
         See also :meth:`set_search`.
     search_require_single : dict, optional
         ``{variable_name: bool}`` per-variable *require_single* flag.
-        When not present for a variable the flag defaults to ``True``.
+        When not present for a variable the flag defaults to ``True``
+        (only the first match is used).  In YAML files this is expressed
+        as ``match_all: true`` inside the variable's search criteria.
     catalog : DataCatalog, optional
         Used to look up variables not present in *variable_map* / *search_map*.
     name : str, optional
@@ -200,6 +204,15 @@ class MathDataReference(DataReference):
     ...     search_require_single={"inflow": False, "outflow": False},
     ...     catalog=cat)
     >>> m.getData()
+
+    In a YAML file the equivalent is ``match_all: true`` inside each
+    variable's ``search_map`` criteria block::
+
+        search_map:
+          inflow:
+            variable: discharge
+            location: upstream
+            match_all: true
     """
 
     #: Subclasses that further specialise MathDataReference can override this.
@@ -310,6 +323,14 @@ class MathDataReference(DataReference):
                         f"{criteria!r} returned no results."
                     )
                 if require_single:
+                    if len(results) > 1:
+                        warnings.warn(
+                            f"Variable {tok!r}: search matched {len(results)} entries "
+                            f"but only the first is used. "
+                            f"Set 'match_all: true' in the search_map criteria to "
+                            f"combine all matches.",
+                            stacklevel=4,
+                        )
                     # Use only the first matching result.
                     ref = results[0]
                 else:
@@ -371,6 +392,14 @@ class MathDataReference(DataReference):
                 "Populate variable_map or call set_catalog()."
             )
 
+        # Capture unit from the first resolved variable before eval.
+        # godin(x), cosine_lanczos(x, ...) etc. preserve the physical unit of
+        # their input, and vtools filters may not copy df.attrs to the result.
+        _first_var = next(iter(variables.values()), None)
+        _inherited_unit: Any = (
+            getattr(_first_var, "attrs", {}).get("unit") if _first_var is not None else None
+        )
+
         ns = {**_MATH_NAMESPACE, **variables}
         try:
             result = eval(self.expression, ns)  # noqa: S307
@@ -381,11 +410,23 @@ class MathDataReference(DataReference):
             if not all(isinstance(c, str) for c in result.columns):
                 result = result.copy()
                 result.columns = [str(c) for c in result.columns]
-            return result
-        if isinstance(result, pd.Series):
-            return result.to_frame(name=self.name or "result")
-        # Scalar result
-        return pd.DataFrame({"result": [result]})
+        elif isinstance(result, pd.Series):
+            # Preserve attrs (including unit) that to_frame() would otherwise drop.
+            _series_unit = result.attrs.get("unit")
+            result = result.to_frame(name=self.name or "result")
+            if _series_unit:
+                result.attrs["unit"] = _series_unit
+        else:
+            # Scalar result
+            result = pd.DataFrame({"result": [result]})
+
+        # Propagate unit from the first resolved variable when the expression
+        # result carries no unit of its own (inherited unit is lower priority
+        # than any unit the expression itself already has in attrs).
+        if not result.attrs.get("unit") and _inherited_unit:
+            result.attrs["unit"] = _inherited_unit
+
+        return result
 
     # ------------------------------------------------------------------
     # Arithmetic operators – produce new MathDataReference trees
@@ -530,7 +571,7 @@ class MathDataCatalogReader(CatalogBuilder):
               variable: wind_speed
               interval: hourly
 
-        # Multi-station aggregate: _require_single: false concatenates all
+        # Multi-station aggregate: match_all: true concatenates all
         # matching references into a DataFrame (axis=1 join).
         - name: mean_wind_speed__all_stations__hourly
           expression: ws.mean(axis=1)
@@ -541,7 +582,7 @@ class MathDataCatalogReader(CatalogBuilder):
             ws:
               variable: wind_speed
               interval: hourly
-              _require_single: false
+              match_all: true
 
     As a fallback, omitting ``search_map`` causes each expression token to be
     looked up directly by name in the parent catalog::
@@ -592,13 +633,15 @@ class MathDataCatalogReader(CatalogBuilder):
             search_require_single: Dict[str, bool] = {}
 
             if search_map_raw:
-                # Extract the special _require_single key from each criteria dict.
+                # Extract the special match_all key from each criteria dict.
                 cleaned: Dict[str, Dict[str, Any]] = {}
                 for var, criteria in search_map_raw.items():
                     criteria = dict(criteria)
-                    req = criteria.pop("_require_single", True)
+                    match_all = criteria.pop("match_all", False)
+                    # match_all: true  →  require_single=False (use all matches)
+                    # match_all: false / absent  →  require_single=True (first only)
                     # Coerce to bool in case the YAML was written as a string.
-                    search_require_single[var] = bool(req)
+                    search_require_single[var] = not bool(match_all)
                     cleaned[var] = criteria
                 search_map_raw = cleaned
 
@@ -627,7 +670,7 @@ def save_math_refs(catalog: Any, path: Union[str, Path]) -> None:
     The produced file can be loaded back with :class:`MathDataCatalogReader`.
     Each entry preserves ``name``, ``expression``, all metadata attributes,
     the ``search_map`` (scalar criteria only – callable predicates are dropped),
-    and the per-variable ``_require_single`` flags.
+    and the per-variable ``match_all`` flags.
 
     Parameters
     ----------
@@ -659,12 +702,12 @@ def save_math_refs(catalog: Any, path: Union[str, Path]) -> None:
                     for k, v in criteria.items()
                     if isinstance(v, (str, int, float, bool, type(None)))
                 }
-                # Embed the require_single flag so the YAML is self-contained.
+                # Embed the match_all flag so the YAML is self-contained.
                 req = ref._search_require_single.get(var, True)
                 if not req:
-                    # Only write the flag when it differs from the default (True)
-                    # to keep YAML concise.
-                    safe_criteria["_require_single"] = False
+                    # Only write the flag when it differs from the default
+                    # (require_single=True / match_all absent) to keep YAML concise.
+                    safe_criteria["match_all"] = True
                 if safe_criteria:
                     safe_search[var] = safe_criteria
             if safe_search:

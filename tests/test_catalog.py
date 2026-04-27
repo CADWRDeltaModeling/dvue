@@ -1552,7 +1552,7 @@ class TestMathDataCatalogReader:
     obs:
       variable: temp
       unit: K
-      _require_single: false
+      match_all: true
 """
         p = tmp_path / "search_map.yaml"
         p.write_text(content)
@@ -1658,15 +1658,15 @@ math_refs:
         assert ref._search_map is not None
         assert "obs" in ref._search_map
 
-    def test_build_search_map_strips_require_single(self, search_map_yaml):
-        """_require_single must not appear inside the cleaned criteria dict."""
+    def test_build_search_map_strips_match_all(self, search_map_yaml):
+        """match_all must not appear inside the cleaned criteria dict."""
         refs = MathDataCatalogReader().build(str(search_map_yaml))
         criteria = refs[0]._search_map["obs"]
-        assert "_require_single" not in criteria
+        assert "match_all" not in criteria
 
-    def test_build_search_map_captures_require_single(self, search_map_yaml):
+    def test_build_search_map_captures_match_all(self, search_map_yaml):
         refs = MathDataCatalogReader().build(str(search_map_yaml))
-        # _require_single: false → stored as False in _search_require_single
+        # match_all: true → stored as require_single=False in _search_require_single
         assert refs[0]._search_require_single.get("obs") is False
 
     # ------------------------------------------------------------------
@@ -2118,7 +2118,7 @@ class TestSaveMathRefsRoundTrip:
         raw = yaml.safe_load(p.read_text())
         # The flag should be absent when it's the default True value.
         obs_crit = raw[0]["search_map"]["obs"]
-        assert "_require_single" not in obs_crit
+        assert "match_all" not in obs_crit
 
     def test_raw_refs_not_included_in_yaml(self, tmp_path):
         cat = self._make_catalog()  # contains only raw refs

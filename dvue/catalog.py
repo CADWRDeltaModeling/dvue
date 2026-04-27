@@ -382,6 +382,9 @@ class DataReference:
         self.name = name
         self._cache_enabled: bool = cache
         self._cached_data: Dict[Any, pd.DataFrame] = {}
+        # Metadata discovered at load time (e.g. unit from DSS reader).
+        # Separate from _attributes so static YAML values can always override.
+        self._dynamic_metadata: Dict[str, Any] = {}
         # source is always the first attribute so it appears first in to_dataframe()
         self._attributes: Dict[str, Any] = {"source": source, **attributes}
         self._key_attributes: Optional[List[str]] = None  # None → all attributes
@@ -598,6 +601,11 @@ class DataReference:
 
         data = self._load_data(time_range=time_range)
 
+        # Populate dynamic metadata from df.attrs (e.g. unit set by the reader).
+        # Runs on the first real load for each unique time_range; subsequent
+        # cache-hits skip _load_data entirely.
+        self._cache_attrs_as_dynamic_metadata(data.attrs)
+
         if self._cache_enabled:
             self._cached_data[cache_key] = data
             return data.copy()
@@ -619,6 +627,34 @@ class DataReference:
         else:
             self._cached_data.pop(self._make_cache_key(time_range), None)
         return self
+
+    # ------------------------------------------------------------------
+    # Dynamic metadata (populated lazily from df.attrs on first getData)
+    # ------------------------------------------------------------------
+
+    def set_dynamic_metadata(self, key: str, value: Any) -> None:
+        """Store a single metadata item discovered at data-load time.
+
+        No-op when the stored value is already equal to *value*, so
+        repeated loads do not dirty the dict unnecessarily.
+        """
+        if self._dynamic_metadata.get(key) != value:
+            self._dynamic_metadata[key] = value
+
+    def get_dynamic_metadata(self, key: str, default: Any = None) -> Any:
+        """Return a dynamically discovered metadata value, or *default*."""
+        return self._dynamic_metadata.get(key, default)
+
+    def _cache_attrs_as_dynamic_metadata(self, attrs: Dict[str, Any]) -> None:
+        """Populate *_dynamic_metadata* from *df.attrs* returned by a reader.
+
+        Called inside :meth:`getData` after the first real load so that
+        reader-supplied metadata (e.g. ``unit`` set by DSSReader) becomes
+        visible in :meth:`DataCatalog.to_dataframe` without requiring an
+        explicit attribute on the reference.
+        """
+        for key, value in attrs.items():
+            self.set_dynamic_metadata(key, value)
 
     def _load_data(self, time_range: Any = None) -> pd.DataFrame:
         """Delegate loading to the attached :class:`DataReferenceReader`.
@@ -1138,6 +1174,10 @@ class DataCatalog:
         rows = []
         for ref in self._references.values():
             row: Dict[str, Any] = {"name": ref.name, "ref_type": ref.ref_type}
+            # Dynamic metadata has lower priority: apply first so static
+            # _attributes can override it (e.g. explicit unit: in YAML wins
+            # over the unit inherited from a loaded variable).
+            row.update(ref._dynamic_metadata)
             for raw_key, val in ref.attributes.items():
                 canonical = self._schema_map.get(raw_key, raw_key)
                 row[canonical] = val
