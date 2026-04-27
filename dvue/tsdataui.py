@@ -360,6 +360,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.color_cycle = hv.Cycle(color_list)
 
     def get_widgets(self):
+        tr_start, tr_end = self.time_range if self.time_range else (None, None)
         control_widgets = pn.Column(
             pn.pane.HTML("Change time range of data to display:"),
             pn.Param(
@@ -368,6 +369,8 @@ class TimeSeriesDataUIManager(DataUIManager):
                     "time_range": {
                         "widget_type": pn.widgets.DatetimeRangeInput,
                         "format": "%Y-%m-%d %H:%M",
+                        "start": tr_start,
+                        "end": tr_end,
                     }
                 },
             ),
