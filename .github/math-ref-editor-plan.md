@@ -18,6 +18,13 @@
 - ✅ Phase 8 — vtools filter functions in expression namespace; non-string column normalisation — **DONE**
 - ✅ Phase 9 — Column picker + `ref_type` auto-show for mixed catalogs — **DONE**
 - ✅ Phase 10 — Rename `_require_single` → `match_all` in YAML; warn on silently dropped matches — **DONE**
+- ✅ Phase 11 — `match_all` upload parsing bug; `match_all` variables always DataFrame — **DONE**
+  - `MathDataCatalogReader.build_from_data(data, parent_catalog)` — canonical parser for in-memory YAML lists; `_on_upload_yaml` delegates here (never duplicate this logic)
+  - `match_all=True` variables always resolve to DataFrame (even for 1 match); expressions must use DataFrame semantics (`.iloc[:,N]`, `.mean(axis=1)`, etc.)
+- ✅ Phase 12 — `url_column`/`url_num` rename; `url_num` dynamic metadata; `matches()` dynamic fallback — **DONE**
+  - `filename_column` → `url_column`, `FILE_NUM` → `url_num` throughout dvue + dsm2ui
+  - `_apply_url_num(df, catalog)` injects `url`/`url_num` as dynamic metadata on each `DataReference`; enables `catalog.search(url_num=0)` and math ref `search_map: {x: {url_num: 0}}`
+  - `DataReference.matches()` falls back to `_dynamic_metadata` for keys absent from `_attributes` (`_attributes` wins on conflict)
 
 ---
 
@@ -243,17 +250,20 @@ New file `tests/test_math_ref_editor.py`:
 
 | File | Changes |
 |------|---------|
-| `dvue/math_ref_editor.py` | Ph 3–7: editor UI, pre-populate, rename, time_range test; auto-show `ref_type` on save ✅ |
+| `dvue/math_ref_editor.py` | Ph 3–7: editor UI, pre-populate, rename, time_range test; auto-show `ref_type` on save; Ph 11: upload delegates to `build_from_data()` ✅ |
 | `dvue/catalog.py` | `ref_type` class attr, `to_dataframe()` `ref_type` column ✅ |
-| `dvue/math_reference.py` | `MathDataReference.ref_type = "math"`; `match_all` YAML key; warn on silently dropped matches ✅ |
-| `dvue/tsdataui.py` | `_has_math_refs()`, `_enrich_catalog_with_math_ref_hints()`, `_apply_fileno()`, cache fix, `ClearCacheAction`, `ref_type` in column map, `_has_mixed_ref_types()` ✅ |
+| `dvue/math_reference.py` | `MathDataReference.ref_type = "math"`; `match_all` YAML key; warn on silently dropped matches; Ph 11: `build_from_data()`, `match_all` always DataFrame ✅ |
+| `dvue/tsdataui.py` | `_has_math_refs()`, `_enrich_catalog_with_math_ref_hints()`, cache fix, `ClearCacheAction`, `ref_type` in column map, `_has_mixed_ref_types()`; Ph 12: `url_column`/`url_num_column`/`display_url_num`, `_apply_url_num()` ✅ |
+| `dvue/catalog.py` | `ref_type` class attr, `to_dataframe()` `ref_type` column; Ph 12: `matches()` dynamic metadata fallback ✅ |
 | `dvue/actions.py` | `PlotAction`/`DownloadAction` use `_dfcat` rows; `ClearCacheAction` registered ✅ |
 | `dvue/dataui.py` | `hidden_columns` init in `create_data_table`; `_column_picker` MultiChoice in Table Options ✅ |
 | `examples/ex_tsdataui.py` | Uses base helpers, `ref_type` column in table ✅ |
-| `dsm2ui/dsm2ui.py` | Removed stale `get_data_catalog()` override; math ref curve labels ✅ |
-| `tests/test_catalog.py` | `TestRefType`, `TestSaveMathRefsRoundTrip`, `test_dataframe_non_string_columns_normalised`; update `match_all` YAML key in round-trip tests ✅ |
-| `tests/test_math_ref_editor.py` | YAML + enrich tests ✅ |
-| `tests/test_tsdataui.py` | FILE_NUM, `ClearCacheAction`, cache rebuild tests ✅ |
+| `dsm2ui/dsm2ui.py` | Removed stale `get_data_catalog()` override; math ref curve labels; Ph 12: `url_column`/`display_url_num` ✅ |
+| `dsm2ui/dssui/dssui.py` | Ph 12: `url_column` kwarg, `manager.url_column` ✅ |
+| `dsm2ui/deltacdui/deltacdui.py` + `deltacduimgr.py` | Ph 12: `url_column` kwarg ✅ |
+| `tests/test_catalog.py` | `TestRefType`, `TestSaveMathRefsRoundTrip`, `test_dataframe_non_string_columns_normalised`; Ph 11: `TestMathDataCatalogReaderBuildFromData`, `TestResolveVariablesMatchAllType`; Ph 12: `TestMatchesDynamicMetadata` ✅ |
+| `tests/test_math_ref_editor.py` | YAML + enrich tests; Ph 11: `TestUploadYamlMatchAll` ✅ |
+| `tests/test_tsdataui.py` | `url_num`/`display_url_num` tests; `ClearCacheAction`, cache rebuild; Ph 12: `TestUrlNumSearchable` ✅ |
 
 ---
 

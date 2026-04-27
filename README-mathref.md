@@ -278,7 +278,7 @@ One row per expression variable. Rows can be added with **+ Add variable** and r
 | Field | Purpose |
 |---|---|
 | **Alias** | Short identifier used in the Expression (e.g. `obs`) |
-| **Join all** | When checked, all matching catalog entries are concatenated into a DataFrame (equivalent to `_require_single: false`) |
+| **Match all** | When checked, all matching catalog entries are concatenated into a DataFrame (equivalent to `_require_single: false`) |
 | **Catalog criteria** | Comma-separated `attr=val` pairs used to search the catalog (e.g. `variable=wind_speed, interval=hourly`) |
 | **+ attr** | Drop-down picker; selecting an attribute name appends `attr=` to the criteria field so you only need to fill in the value |
 | **▶** | Per-row test button — runs the criteria against the live catalog and shows an inline badge: `✅ 1 match`, `⚠️ N matches`, or `❌ 0 matches`. If exactly one match is found and the **Attributes** field is empty, it is auto-filled with the match's identifying attributes |
