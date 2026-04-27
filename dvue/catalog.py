@@ -531,6 +531,13 @@ class DataReference:
                 if not expected(actual):
                     return False
             elif actual != expected:
+                # Try type coercion when scalar types differ 
+                try:
+                    if type(actual) is not type(expected):
+                        if actual == type(actual)(expected):
+                            continue
+                except (ValueError, TypeError):
+                    pass
                 return False
         return True
 

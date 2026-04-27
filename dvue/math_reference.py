@@ -358,8 +358,16 @@ class MathDataReference(DataReference):
                         d = r.getData(time_range=time_range)
                         frames.append(d if isinstance(d, pd.DataFrame) else d.to_frame())
                     try:
-                        data = pd.concat(frames, axis=1).sort_index()
-                    except Exception:
+                        data = pd.concat(frames, axis=1)
+                    except Exception as exc:
+                        warnings.warn(
+                            f"Variable {tok!r}: pd.concat(axis=1) failed "
+                            f"({exc}); falling back to axis=0 (row-stack). "
+                            f"Expressions using column indexing (e.g. .iloc[:,1]) "
+                            f"will raise IndexError. Check that all matched refs "
+                            f"share a compatible time index.",
+                            stacklevel=4,
+                        )
                         data = pd.concat(frames, axis=0).sort_index()
                     # Always keep as DataFrame when match_all is set so that
                     # expressions using positional indexing (e.g. x.iloc[:,1])
