@@ -1696,10 +1696,255 @@ math_refs:
 
 
 # ===========================================================================
+# MathDataCatalogReader.build_from_data — in-memory YAML list parsing
+# ===========================================================================
+
+
+class TestMathDataCatalogReaderBuildFromData:
+    """build_from_data() must behave identically to build() for match_all handling."""
+
+    def _simple_entry(self, **overrides):
+        base = {"name": "ref1", "expression": "x + 1", "unit": "cfs"}
+        base.update(overrides)
+        return base
+
+    def test_basic_round_trip(self):
+        data = [self._simple_entry()]
+        refs = MathDataCatalogReader().build_from_data(data)
+        assert len(refs) == 1
+        r = refs[0]
+        assert r.name == "ref1"
+        assert r.expression == "x + 1"
+
+    def test_extra_attrs_preserved(self):
+        data = [self._simple_entry(station_id="S1", variable="flow")]
+        refs = MathDataCatalogReader().build_from_data(data)
+        assert refs[0].get_attribute("unit") == "cfs"
+        assert refs[0].get_attribute("station_id") == "S1"
+        assert refs[0].get_attribute("variable") == "flow"
+
+    def test_strips_match_all_from_criteria(self):
+        data = [{
+            "name": "diff",
+            "expression": "x.iloc[:,1] - x.iloc[:,0]",
+            "search_map": {"x": {"geoid": "437", "match_all": True}},
+        }]
+        refs = MathDataCatalogReader().build_from_data(data)
+        criteria = refs[0]._search_map["x"]
+        assert "match_all" not in criteria
+
+    def test_match_all_true_sets_require_single_false(self):
+        data = [{
+            "name": "diff",
+            "expression": "x.iloc[:,1] - x.iloc[:,0]",
+            "search_map": {"x": {"geoid": "437", "match_all": True}},
+        }]
+        refs = MathDataCatalogReader().build_from_data(data)
+        assert refs[0]._search_require_single.get("x") is False
+
+    def test_match_all_false_sets_require_single_true(self):
+        data = [{
+            "name": "single",
+            "expression": "x * 2",
+            "search_map": {"x": {"geoid": "437", "match_all": False}},
+        }]
+        refs = MathDataCatalogReader().build_from_data(data)
+        assert refs[0]._search_require_single.get("x") is True
+
+    def test_absent_match_all_defaults_to_require_single_true(self):
+        data = [{
+            "name": "single",
+            "expression": "x * 2",
+            "search_map": {"x": {"geoid": "437"}},
+        }]
+        refs = MathDataCatalogReader().build_from_data(data)
+        # Default is require_single=True (absent match_all means first-match-only)
+        assert refs[0]._search_require_single.get("x") is True
+
+    def test_parent_catalog_wired(self):
+        cat = DataCatalog()
+        data = [self._simple_entry()]
+        refs = MathDataCatalogReader().build_from_data(data, parent_catalog=cat)
+        assert refs[0]._catalog is cat
+
+    def test_dict_wrapped_data(self):
+        data = {"math_refs": [self._simple_entry()]}
+        refs = MathDataCatalogReader().build_from_data(data)
+        assert len(refs) == 1
+        assert refs[0].name == "ref1"
+
+    def test_none_data_returns_empty_list(self):
+        refs = MathDataCatalogReader().build_from_data(None)
+        assert refs == []
+
+    def test_multiple_variables_each_stripped(self):
+        data = [{
+            "name": "combined",
+            "expression": "a.mean(axis=1) - b",
+            "search_map": {
+                "a": {"variable": "flow", "match_all": True},
+                "b": {"variable": "stage", "match_all": False},
+            },
+        }]
+        refs = MathDataCatalogReader().build_from_data(data)
+        r = refs[0]
+        assert "match_all" not in r._search_map["a"]
+        assert "match_all" not in r._search_map["b"]
+        assert r._search_require_single["a"] is False
+        assert r._search_require_single["b"] is True
+
+
+# ===========================================================================
+# _resolve_variables — match_all type stability
+# ===========================================================================
+
+
+def _make_two_col_catalog():
+    """Catalog with 2 refs sharing the same search attribute (geoid='437')."""
+    idx = pd.date_range("2020-01-01", periods=3, freq="D")
+    df_up = pd.DataFrame({"flow": [1.0, 2.0, 3.0]}, index=idx)
+    df_dn = pd.DataFrame({"flow": [4.0, 5.0, 6.0]}, index=idx)
+    cat = DataCatalog()
+    cat.add(DataReference(
+        source="", reader=InMemoryDataReferenceReader(df_up),
+        name="chan_437_up", geoid="437", subloc="UP",
+    ))
+    cat.add(DataReference(
+        source="", reader=InMemoryDataReferenceReader(df_dn),
+        name="chan_437_dn", geoid="437", subloc="DOWN",
+    ))
+    return cat
+
+
+class TestResolveVariablesMatchAllType:
+    """match_all variables must always resolve to DataFrame regardless of match count."""
+
+    def test_match_all_two_results_is_dataframe(self):
+        cat = _make_two_col_catalog()
+        ref = MathDataReference(
+            expression="x.mean(axis=1)",
+            search_map={"x": {"geoid": "437"}},
+            search_require_single={"x": False},
+        )
+        ref.set_catalog(cat)
+        variables = ref._resolve_variables()
+        assert isinstance(variables["x"], pd.DataFrame)
+        assert variables["x"].shape[1] == 2
+
+    def test_match_all_single_result_is_dataframe_not_series(self):
+        """Even when only 1 catalog entry matches, match_all must yield a DataFrame."""
+        cat = _make_two_col_catalog()
+        ref = MathDataReference(
+            expression="x.iloc[:, 0]",
+            # Over-specify criteria so only 1 result matches
+            search_map={"x": {"geoid": "437", "subloc": "UP"}},
+            search_require_single={"x": False},
+        )
+        ref.set_catalog(cat)
+        variables = ref._resolve_variables()
+        assert isinstance(variables["x"], pd.DataFrame), (
+            "match_all with 1 result must be DataFrame, got "
+            f"{type(variables['x']).__name__}"
+        )
+
+    def test_match_all_iloc_expression_works(self):
+        """Regression: expression using .iloc[:,N] must not raise IndexError."""
+        cat = _make_two_col_catalog()
+        ref = MathDataReference(
+            name="flowdiff",
+            expression="x.iloc[:,1] - x.iloc[:,0]",
+            search_map={"x": {"geoid": "437"}},
+            search_require_single={"x": False},
+        )
+        ref.set_catalog(cat)
+        result = ref.getData()
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 3
+
+    def test_match_all_single_result_iloc_expression_works(self):
+        """Regression: .iloc[:,0] must work even when match_all returns 1 result."""
+        cat = _make_two_col_catalog()
+        ref = MathDataReference(
+            name="single_col",
+            expression="x.iloc[:, 0]",
+            search_map={"x": {"geoid": "437", "subloc": "UP"}},
+            search_require_single={"x": False},
+        )
+        ref.set_catalog(cat)
+        result = ref.getData()
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 3
+
+
+# ===========================================================================
 # DataReferenceReader.fqcn() and _resolve_class
 # ===========================================================================
 
 from dvue.catalog import _resolve_class  # noqa: E402
+
+
+# ===========================================================================
+# DataReference.matches() — dynamic metadata fallback
+# ===========================================================================
+
+
+class TestMatchesDynamicMetadata:
+    """matches() must fall back to _dynamic_metadata for keys absent from _attributes,
+    with _attributes always taking priority on conflicts."""
+
+    def _ref(self, **attrs):
+        return DataReference(
+            source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})),
+            name="r", **attrs
+        )
+
+    def test_matches_dynamic_metadata_key(self):
+        ref = self._ref(variable="flow")
+        ref.set_dynamic_metadata("url_num", 0)
+        assert ref.matches(url_num=0) is True
+
+    def test_no_match_on_wrong_dynamic_value(self):
+        ref = self._ref(variable="flow")
+        ref.set_dynamic_metadata("url_num", 1)
+        assert ref.matches(url_num=0) is False
+
+    def test_static_attribute_takes_priority_over_dynamic(self):
+        """When _attributes has the key, _dynamic_metadata is ignored."""
+        ref = self._ref(variable="flow", url_num=99)
+        ref.set_dynamic_metadata("url_num", 0)
+        # Static value is 99, so search for 0 should not match
+        assert ref.matches(url_num=0) is False
+        assert ref.matches(url_num=99) is True
+
+    def test_matches_callable_against_dynamic(self):
+        ref = self._ref(variable="flow")
+        ref.set_dynamic_metadata("url_num", 2)
+        assert ref.matches(url_num=lambda v: v >= 2) is True
+        assert ref.matches(url_num=lambda v: v >= 3) is False
+
+    def test_unset_dynamic_key_returns_none_to_callable(self):
+        ref = self._ref(variable="flow")
+        # Key not in _attributes and not in _dynamic_metadata → actual=None
+        assert ref.matches(url_num=lambda v: v is None) is True
+
+    def test_static_only_key_unaffected(self):
+        """Keys that only exist in _attributes still work normally."""
+        ref = self._ref(variable="flow", station="A")
+        assert ref.matches(station="A") is True
+        assert ref.matches(station="B") is False
+
+    def test_catalog_search_uses_dynamic_metadata(self):
+        """DataCatalog.search() must find refs via dynamic metadata."""
+        cat = DataCatalog()
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
+        r0 = DataReference(source="", reader=reader, name="r0", variable="flow")
+        r1 = DataReference(source="", reader=reader, name="r1", variable="flow")
+        cat.add(r0)
+        cat.add(r1)
+        r0.set_dynamic_metadata("url_num", 0)
+        r1.set_dynamic_metadata("url_num", 1)
+        assert [r.name for r in cat.search(url_num=0)] == ["r0"]
+        assert [r.name for r in cat.search(url_num=1)] == ["r1"]
 
 
 class TestFqcnAndResolveClass:

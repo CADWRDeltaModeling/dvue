@@ -107,13 +107,18 @@ class PlotAction:
         except Exception as e:
             stack_str = full_stack()
             logger.error(stack_str)
-            dataui._display_panel.objects = [pn.pane.Markdown("```" + stack_str + "```")]
+            short_msg = f"{type(e).__name__}: {e}"
+            dataui._display_panel.objects = [
+                pn.pane.Markdown(
+                    f"**Error loading data**\n\n`{short_msg}`\n\n"
+                    "_See the application log for the full traceback._"
+                )
+            ]
             # Handle the case where notifications might be None
             if pn.state.notifications is not None:
-                pn.state.notifications.error("Error updating plots: " + str(stack_str), duration=0)
+                pn.state.notifications.error(short_msg, duration=8000)
             else:
-                # Log error when notifications is not available
-                logger.error(f"Could not display notification: {str(stack_str)}")
+                logger.error(f"Could not display notification: {short_msg}")
         finally:
             dataui._display_panel.loading = False
             # Hide progress after a short delay to show completion

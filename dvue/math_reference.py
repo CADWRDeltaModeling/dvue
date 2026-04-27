@@ -314,8 +314,14 @@ class MathDataReference(DataReference):
                         f"Variable {tok!r}: search_map entry requires a catalog – "
                         "call set_catalog() before getData()."
                     )
-                criteria = self._search_map[tok]
+                criteria = dict(self._search_map[tok])  # copy – never mutate stored map
+                # Pop match_all here as a defensive fallback: the YAML loader
+                # strips it before storing, but direct Python construction may
+                # leave it in the dict.  It must never reach catalog.search().
+                match_all_inline = criteria.pop("match_all", None)
                 require_single = self._search_require_single.get(tok, True)
+                if match_all_inline is not None and tok not in self._search_require_single:
+                    require_single = not bool(match_all_inline)
                 results = self._catalog.search(**criteria)
                 if not results:
                     raise ValueError(
@@ -337,6 +343,16 @@ class MathDataReference(DataReference):
                     # Join all matching results.  Prefer axis=1 (side-by-side
                     # columns sharing the time index); fall back to axis=0
                     # (stack rows) when the join fails.
+                    if len(results) == 1:
+                        warnings.warn(
+                            f"Variable {tok!r}: 'match_all: true' was set but the "
+                            f"catalog search with criteria {criteria!r} returned only "
+                            f"1 result. If the expression accesses multiple columns "
+                            f"(e.g. .iloc[:,1]), check that the search criteria are "
+                            f"not over-specified (remove any 'id' filter that restricts "
+                            f"to a single entry).",
+                            stacklevel=4,
+                        )
                     frames: List[pd.DataFrame] = []
                     for r in results:
                         d = r.getData(time_range=time_range)
@@ -345,13 +361,10 @@ class MathDataReference(DataReference):
                         data = pd.concat(frames, axis=1).sort_index()
                     except Exception:
                         data = pd.concat(frames, axis=0).sort_index()
-                    # Keep single-column results as Series so arithmetic with
-                    # other Series variables works naturally (same as the
-                    # single-result branch below).
-                    if isinstance(data, pd.DataFrame) and len(data.columns) == 1:
-                        resolved[tok] = data.iloc[:, 0]
-                    else:
-                        resolved[tok] = data
+                    # Always keep as DataFrame when match_all is set so that
+                    # expressions using positional indexing (e.g. x.iloc[:,1])
+                    # behave consistently regardless of how many entries matched.
+                    resolved[tok] = data
                     continue
 
             elif self._catalog is not None and tok in self._catalog:
@@ -375,11 +388,14 @@ class MathDataReference(DataReference):
             if isinstance(val, pd.Series) and val.dtype == "float32":
                 resolved[tok] = val.astype("float64")
             elif isinstance(val, pd.DataFrame):
-                float32_cols = [c for c in val.columns if val[c].dtype == "float32"]
-                if float32_cols:
-                    resolved[tok] = val.copy()
-                    for c in float32_cols:
-                        resolved[tok][c] = resolved[tok][c].astype("float64")
+                # Use positional iteration to handle duplicate column names
+                # (which arise when match_all concat produces repeated labels).
+                if (val.dtypes == "float32").any():
+                    result = val.copy()
+                    for i, dtype in enumerate(val.dtypes):
+                        if dtype == "float32":
+                            result.iloc[:, i] = result.iloc[:, i].astype("float64")
+                    resolved[tok] = result
 
         return resolved
 
@@ -624,6 +640,34 @@ class MathDataCatalogReader(CatalogBuilder):
         if isinstance(data, dict):
             data = data.get("math_refs", [])
 
+        return self.build_from_data(data, parent_catalog=self._parent_catalog)
+
+    def build_from_data(
+        self,
+        data: Optional[list],
+        parent_catalog: Optional[Any] = None,
+    ) -> list:
+        """Build :class:`MathDataReference` objects from an already-parsed YAML list.
+
+        Parameters
+        ----------
+        data : list or None
+            The already-parsed YAML sequence (e.g. output of ``yaml.safe_load``).
+            Both bare lists and dicts with a ``math_refs`` key are accepted.
+        parent_catalog : DataCatalog, optional
+            Catalog wired into each reference; falls back to ``self._parent_catalog``
+            when *None*.
+
+        Returns
+        -------
+        list of MathDataReference
+        """
+        catalog = parent_catalog if parent_catalog is not None else self._parent_catalog
+
+        # Accept both a bare list and a ``{math_refs: [...]}`` wrapper.
+        if isinstance(data, dict):
+            data = data.get("math_refs", [])
+
         refs = []
         for entry in data or []:
             entry = dict(entry)  # defensive copy
@@ -634,13 +678,13 @@ class MathDataCatalogReader(CatalogBuilder):
 
             if search_map_raw:
                 # Extract the special match_all key from each criteria dict.
+                # match_all: true  →  require_single=False (use all matches)
+                # match_all: false / absent  →  require_single=True (first only)
+                # Coerce to bool in case the YAML was written as a string.
                 cleaned: Dict[str, Dict[str, Any]] = {}
                 for var, criteria in search_map_raw.items():
                     criteria = dict(criteria)
                     match_all = criteria.pop("match_all", False)
-                    # match_all: true  →  require_single=False (use all matches)
-                    # match_all: false / absent  →  require_single=True (first only)
-                    # Coerce to bool in case the YAML was written as a string.
                     search_require_single[var] = not bool(match_all)
                     cleaned[var] = criteria
                 search_map_raw = cleaned
@@ -653,8 +697,8 @@ class MathDataCatalogReader(CatalogBuilder):
                 search_require_single=search_require_single if search_require_single else None,
                 **attrs,
             )
-            if self._parent_catalog is not None:
-                ref.set_catalog(self._parent_catalog)
+            if catalog is not None:
+                ref.set_catalog(catalog)
             refs.append(ref)
         return refs
 

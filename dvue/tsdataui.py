@@ -95,7 +95,7 @@ class TimeSeriesDataUIManager(DataUIManager):
     sensible_percentile_range = param.Range(
         default=(0.01, 0.99), bounds=(0, 1), step=0.01, doc="Percentile range"
     )
-    file_number_column_name = param.String(default="FILE_NUM", allow_None=True)
+    url_num_column = param.String(default="url_num", allow_None=True)
     color_cycle_name = param.Selector(
         objects=list(get_categorical_color_maps().keys()),
         default="glasbey_dark.colorcet",
@@ -121,16 +121,16 @@ class TimeSeriesDataUIManager(DataUIManager):
         doc="Show the Math Ref editor button in the action bar. Set to False to hide it.",
     )
 
-    def __init__(self, filename_column="FILE", file_number_column_name="FILE_NUM", **params):
+    def __init__(self, url_column="url", url_num_column="url_num", **params):
         self._cached_catalog = None
-        self.filename_column = filename_column
-        self.file_number_column_name = file_number_column_name
-        self.display_fileno = False
+        self.url_column = url_column
+        self.url_num_column = url_num_column
+        self.display_url_num = False
         # Populate _cached_catalog for subclasses that don't expose data_catalog.
         # Managers with a data_catalog property always rebuild fresh in get_data_catalog().
         if self.data_catalog is None:
             catalog = self.get_data_catalog()
-            self._cached_catalog = self._apply_fileno(catalog)
+            self._cached_catalog = self._apply_url_num(catalog)
         self.change_color_cycle()
         self.time_range = self.get_time_range(self.get_data_catalog())
         super().__init__(**params)
@@ -142,26 +142,46 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.param.color_cycle_column.objects = columns_with_blank
         self.param.plot_group_by_column.objects = columns_with_blank
 
-    def _apply_fileno(self, df):
-        """Inject a FILE_NUM column when multiple files are present.
+    def _apply_url_num(self, df, catalog=None):
+        """Inject a ``url_num`` column when multiple URLs/files are present.
 
         Called during init (for legacy subclasses) and on every
         ``get_data_catalog()`` rebuild for managers that expose a
-        ``data_catalog`` property.  Sets ``self.display_fileno`` as a
+        ``data_catalog`` property.  Sets ``self.display_url_num`` as a
         side-effect.
+
+        When *catalog* is provided, each :class:`~dvue.catalog.DataReference`
+        in the catalog also receives ``url`` and ``url_num`` as dynamic
+        metadata so that :class:`~dvue.catalog.DataCatalog.search` and math
+        ref ``search_map`` criteria can filter by source URL index.
         """
-        if self.filename_column and self.filename_column in df.columns:
-            unique_files = df[self.filename_column].unique()
-            if len(unique_files) > 1:
+        if self.url_column and self.url_column in df.columns:
+            unique_urls = [u for u in df[self.url_column].unique() if not pd.isna(u)]
+            if len(unique_urls) > 1:
+                url_index = {u: i for i, u in enumerate(unique_urls)}
                 df = df.copy()
-                df[self.file_number_column_name] = df[self.filename_column].apply(
-                    lambda x: list(unique_files).index(x)
+                df[self.url_num_column] = df[self.url_column].apply(
+                    lambda x: url_index.get(x, None)
                 )
-                self.display_fileno = True
+                # Propagate url / url_num into dynamic metadata so catalog.search works.
+                if catalog is not None:
+                    for _, row in df.iterrows():
+                        ref_name = row.get("name") if "name" in df.columns else None
+                        if ref_name is None or pd.isna(ref_name):
+                            continue
+                        try:
+                            ref = catalog.get(str(ref_name))
+                        except KeyError:
+                            continue
+                        url_val = row.get(self.url_column)
+                        if url_val is not None and not pd.isna(url_val):
+                            ref.set_dynamic_metadata("url", url_val)
+                            ref.set_dynamic_metadata("url_num", url_index[url_val])
+                self.display_url_num = True
                 return df
-        if self.filename_column not in (df.columns if hasattr(df, 'columns') else []):
-            self.file_number_column_name = None
-        self.display_fileno = False
+        if self.url_column not in (df.columns if hasattr(df, 'columns') else []):
+            self.url_num_column = None
+        self.display_url_num = False
         return df
 
     def get_data_catalog(self):
@@ -169,7 +189,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         # mutations (e.g. catalog.add() in the math-ref editor) are immediately
         # visible without requiring a cache invalidation step.
         if self.data_catalog is not None:
-            return self._apply_fileno(super().get_data_catalog())
+            return self._apply_url_num(super().get_data_catalog(), catalog=self.data_catalog)
         # Legacy path: subclasses that override get_data_catalog() themselves
         # (no data_catalog property) store the result in _cached_catalog.
         if hasattr(self, '_cached_catalog') and self._cached_catalog is not None:
@@ -484,10 +504,10 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def get_table_column_width_map(self):
         column_width_map = self._get_table_column_width_map()
-        if self.filename_column:
-            column_width_map[self.filename_column] = "10%"
-            if self.display_fileno:
-                column_width_map[self.file_number_column_name] = "5%"
+        if self.url_column:
+            column_width_map[self.url_column] = "10%"
+            if self.display_url_num and self.url_num_column:
+                column_width_map[self.url_num_column] = "5%"
             self.adjust_column_width(column_width_map)
         # Always include ref_type so it is present in the Tabulator data slice
         # (required for hidden-but-filterable behaviour).  Width is small since
@@ -890,12 +910,12 @@ class TimeSeriesPlotAction(PlotAction):
         """
         time_range = manager.time_range
 
-        # File-index label map (short unique names per file when display_fileno is set)
+        # URL-index label map (short unique names per URL when display_url_num is set)
         file_index_map = {}
-        if manager.display_fileno:
-            local_unique_files = df[manager.filename_column].unique()
-            # Math references have NaN for filename; exclude them from path shortening.
-            valid_files = [f for f in local_unique_files if not pd.isna(f)]
+        if manager.display_url_num:
+            local_unique_urls = df[manager.url_column].unique()
+            # Math references have NaN for url; exclude them from path shortening.
+            valid_files = [f for f in local_unique_urls if not pd.isna(f)]
             short_unique_files = get_unique_short_names(valid_files)
             file_index_map = dict(zip(valid_files, short_unique_files))
 
@@ -922,8 +942,8 @@ class TimeSeriesPlotAction(PlotAction):
                 data = manager._process_curve_data(data, row, time_range)
 
                 file_index = (
-                    file_index_map.get(row[manager.filename_column], "")
-                    if manager.display_fileno
+                    file_index_map.get(row[manager.url_column], "")
+                    if manager.display_url_num
                     else ""
                 )
                 curve = self.create_curve(data, row, unit, file_index=file_index)

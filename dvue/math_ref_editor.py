@@ -56,7 +56,7 @@ class MathRefEditorAction:
     row contains:
 
     * **Alias** — the short identifier used inside the expression (e.g. ``obs``).
-    * **Join all** checkbox — when enabled, *all* catalog entries that match
+    * **Match all** checkbox — when enabled, *all* catalog entries that match
       the criteria are concatenated column-wise instead of taking the first
       result only (equivalent to ``require_single=False``).
     * **Catalog criteria** — comma-separated ``attr=val`` pairs that are
@@ -304,7 +304,7 @@ class MathRefEditorAction:
 
         sm_col_labels = pn.Row(
             pn.pane.Markdown("**Alias**", width=100, margin=(0, 4, 0, 4)),
-            pn.pane.Markdown("**Join all**", width=80, margin=(0, 4, 0, 4)),
+            pn.pane.Markdown("**Match all**", width=80, margin=(0, 4, 0, 4)),
             pn.pane.Markdown(
                 "**Catalog criteria** (`attr=val, attr=val …`)",
                 sizing_mode="stretch_width",
@@ -343,7 +343,7 @@ class MathRefEditorAction:
                 margin=(2, 4, 4, 4),
             )
             _multi_cb = pn.widgets.Checkbox(
-                name="Join all",
+                name="Match all",
                 value=not keep_single,
                 width=76,
                 margin=(8, 4, 0, 4),
@@ -731,37 +731,13 @@ class MathRefEditorAction:
                 return
             try:
                 import yaml as _yaml
-                from .math_reference import MathDataReference
+                from .math_reference import MathDataReference, MathDataCatalogReader
 
                 raw = upload_widget.value  # bytes
                 data = _yaml.safe_load(raw)
-                if isinstance(data, dict):
-                    data = data.get("math_refs", [])
-                # Build refs from the parsed list — same logic as
-                # MathDataCatalogReader.build() but without re-reading a file.
-                refs = []
-                for entry in data or []:
-                    entry = dict(entry)
-                    name = entry.pop("name")
-                    expression = entry.pop("expression")
-                    sm_raw = entry.pop("search_map", None)
-                    req: Dict[str, bool] = {}
-                    if sm_raw:
-                        cleaned = {}
-                        for var, crit in sm_raw.items():
-                            crit = dict(crit)
-                            req[var] = bool(crit.pop("_require_single", True))
-                            cleaned[var] = crit
-                        sm_raw = cleaned
-                    ref = MathDataReference(
-                        expression=expression,
-                        name=name,
-                        search_map=sm_raw if sm_raw else None,
-                        search_require_single=req if req else None,
-                        **entry,
-                    )
-                    ref.set_catalog(catalog)
-                    refs.append(ref)
+                # Delegate parsing to MathDataCatalogReader.build_from_data() so
+                # match_all handling is always in sync with the canonical loader.
+                refs = MathDataCatalogReader().build_from_data(data, parent_catalog=catalog)
                 added = 0
                 for r in refs:
                     try:

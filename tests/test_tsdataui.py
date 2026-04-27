@@ -1,4 +1,4 @@
-"""Tests for TimeSeriesDataUIManager FILE_NUM column logic."""
+"""Tests for TimeSeriesDataUIManager url_num column logic."""
 
 import pandas as pd
 import pytest
@@ -43,9 +43,9 @@ def _build_catalog(filenames):
 class _StubManager(TimeSeriesDataUIManager):
     """Minimal concrete subclass for unit-testing."""
 
-    def __init__(self, catalog, filename_column="filename", **kwargs):
+    def __init__(self, catalog, url_column="filename", **kwargs):
         self._test_catalog = catalog
-        super().__init__(filename_column=filename_column, **kwargs)
+        super().__init__(url_column=url_column, **kwargs)
 
     @property
     def data_catalog(self):
@@ -84,66 +84,66 @@ class _StubManager(TimeSeriesDataUIManager):
 
 
 # ---------------------------------------------------------------------------
-# Tests — single file (no FILE_NUM)
+# Tests — single file (no url_num)
 # ---------------------------------------------------------------------------
 
 
 class TestSingleFile:
-    def test_display_fileno_is_false(self):
+    def test_display_url_num_is_false(self):
         cat = _build_catalog(["file_a.dss"])
         mgr = _StubManager(cat)
-        assert mgr.display_fileno is False
+        assert mgr.display_url_num is False
 
-    def test_file_num_not_in_table_columns(self):
+    def test_url_num_not_in_table_columns(self):
         cat = _build_catalog(["file_a.dss"])
         mgr = _StubManager(cat)
-        assert "FILE_NUM" not in mgr.get_table_columns()
+        assert "url_num" not in mgr.get_table_columns()
 
-    def test_file_num_not_in_catalog_df(self):
+    def test_url_num_not_in_catalog_df(self):
         cat = _build_catalog(["file_a.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
-        assert "FILE_NUM" not in df.columns
+        assert "url_num" not in df.columns
 
 
 # ---------------------------------------------------------------------------
-# Tests — multiple files (FILE_NUM must exist)
+# Tests — multiple files (url_num must exist)
 # ---------------------------------------------------------------------------
 
 
 class TestMultipleFiles:
-    def test_display_fileno_is_true(self):
+    def test_display_url_num_is_true(self):
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
-        assert mgr.display_fileno is True
+        assert mgr.display_url_num is True
 
-    def test_file_num_in_table_columns(self):
+    def test_url_num_in_table_columns(self):
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
-        assert "FILE_NUM" in mgr.get_table_columns()
+        assert "url_num" in mgr.get_table_columns()
 
-    def test_file_num_in_catalog_df(self):
+    def test_url_num_in_catalog_df(self):
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
-        assert "FILE_NUM" in df.columns
+        assert "url_num" in df.columns
 
-    def test_file_num_values_correct(self):
+    def test_url_num_values_correct(self):
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
         # First file → 0, second file → 1
-        assert list(df["FILE_NUM"]) == [0, 1]
+        assert list(df["url_num"]) == [0, 1]
 
     def test_get_data_catalog_consistent_across_calls(self):
-        """Regression: second call must also include FILE_NUM."""
+        """Regression: second call must also include url_num."""
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df1 = mgr.get_data_catalog()
         df2 = mgr.get_data_catalog()
-        assert "FILE_NUM" in df1.columns
-        assert "FILE_NUM" in df2.columns
-        assert list(df1["FILE_NUM"]) == list(df2["FILE_NUM"])
+        assert "url_num" in df1.columns
+        assert "url_num" in df2.columns
+        assert list(df1["url_num"]) == list(df2["url_num"])
 
 
 # ---------------------------------------------------------------------------
@@ -176,19 +176,19 @@ class TestTableColumnsSubsetOfCatalog:
 
 
 class TestNoFilenameColumn:
-    def test_display_fileno_false_when_no_column(self):
+    def test_display_url_num_false_when_no_column(self):
         reader = _make_reader()
         cat = DataCatalog()
         cat.add(DataReference(reader=reader, name="r0", X="val"))
-        mgr = _StubManager(cat, filename_column="nonexistent")
-        assert mgr.display_fileno is False
+        mgr = _StubManager(cat, url_column="nonexistent")
+        assert mgr.display_url_num is False
 
-    def test_file_number_column_name_is_none(self):
+    def test_url_num_column_is_none(self):
         reader = _make_reader()
         cat = DataCatalog()
         cat.add(DataReference(reader=reader, name="r0", X="val"))
-        mgr = _StubManager(cat, filename_column="nonexistent")
-        assert mgr.file_number_column_name is None
+        mgr = _StubManager(cat, url_column="nonexistent")
+        assert mgr.url_num_column is None
 
 
 # ---------------------------------------------------------------------------
@@ -231,4 +231,87 @@ class TestClearCacheActionRegistered:
             mock_state.notifications = None  # suppress Panel notification
             ClearCacheAction().callback(None, fake_dataui)
 
+        # Warm up the cache
+        for ref in cat.list():
+            ref.getData()
+        assert any(ref._cached_data for ref in cat.list())
+
+        # Build a fake dataui with the manager attached
+        fake_dataui = MagicMock()
+        fake_dataui._dataui_manager = mgr
+
+        with patch("panel.state") as mock_state:
+            mock_state.notifications = None  # suppress Panel notification
+            ClearCacheAction().callback(None, fake_dataui)
+
         assert all(not ref._cached_data for ref in cat.list())
+
+
+# ---------------------------------------------------------------------------
+# Tests — url_num dynamic metadata searchable in catalog
+# ---------------------------------------------------------------------------
+
+
+class TestUrlNumSearchable:
+    """After _apply_url_num with a catalog, refs get url/url_num dynamic metadata
+    so that catalog.search(url_num=0) correctly filters by source file."""
+
+    def test_single_file_no_dynamic_metadata_injected(self):
+        """Single-file catalog: no url_num dynamic metadata needed."""
+        cat = _build_catalog(["file_a.dss"])
+        mgr = _StubManager(cat)
+        mgr.get_data_catalog()  # triggers _apply_url_num
+        ref = cat.get("ref_0")
+        # No url_num should be set (only 1 file, display_url_num=False)
+        assert ref.get_dynamic_metadata("url_num") is None
+
+    def test_url_num_dynamic_metadata_injected_on_multi_file(self):
+        """Multi-file catalog: refs must carry url_num as dynamic metadata."""
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        mgr = _StubManager(cat)
+        mgr.get_data_catalog()
+        assert cat.get("ref_0").get_dynamic_metadata("url_num") == 0
+        assert cat.get("ref_1").get_dynamic_metadata("url_num") == 1
+
+    def test_url_dynamic_metadata_injected(self):
+        """url dynamic metadata must also be set to the actual filename value."""
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        mgr = _StubManager(cat)
+        mgr.get_data_catalog()
+        assert cat.get("ref_0").get_dynamic_metadata("url") == "file_a.dss"
+        assert cat.get("ref_1").get_dynamic_metadata("url") == "file_b.dss"
+
+    def test_catalog_search_by_url_num(self):
+        """catalog.search(url_num=0) must return only refs from the first file."""
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        mgr = _StubManager(cat)
+        mgr.get_data_catalog()  # inject dynamic metadata
+        results = cat.search(url_num=0)
+        assert len(results) == 1
+        assert results[0].name == "ref_0"
+
+    def test_catalog_search_by_url_num_1(self):
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        mgr = _StubManager(cat)
+        mgr.get_data_catalog()
+        results = cat.search(url_num=1)
+        assert len(results) == 1
+        assert results[0].name == "ref_1"
+
+    def test_math_ref_search_map_filters_by_url_num(self):
+        """A MathDataReference with search_map url_num: 0 must resolve to file-0 refs."""
+        from dvue.math_reference import MathDataReference
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        mgr = _StubManager(cat)
+        mgr.get_data_catalog()  # inject dynamic metadata
+        ref = MathDataReference(
+            expression="x * 2",
+            search_map={"x": {"C": "EC", "url_num": 0}},
+        )
+        ref.set_catalog(cat)
+        variables = ref._resolve_variables()
+        assert "x" in variables
+        # Only the file_a.dss ref should be matched (url_num=0)
+        matched_ref = cat.search(C="EC", url_num=0)
+        assert len(matched_ref) == 1
+        assert matched_ref[0].name == "ref_0"

@@ -222,3 +222,120 @@ class TestYamlDownloadFormat:
         assert "_require_single" not in r._search_map["obs"]
         assert r._search_require_single.get("obs") is True
         assert r._search_require_single.get("model") is False
+
+
+# ---------------------------------------------------------------------------
+# YAML upload handler — match_all parsing (regression for upload bug)
+# ---------------------------------------------------------------------------
+
+class TestUploadYamlMatchAll:
+    """_on_upload_yaml must handle match_all correctly via build_from_data."""
+
+    # Simulate what _on_upload_yaml does after receiving raw bytes:
+    # parse YAML → call MathDataCatalogReader().build_from_data(data, parent_catalog=cat)
+    def _simulate_upload(self, yaml_text: str, catalog):
+        import yaml as _yaml
+        from dvue.math_reference import MathDataCatalogReader
+        data = _yaml.safe_load(yaml_text.encode())
+        return MathDataCatalogReader().build_from_data(data, parent_catalog=catalog)
+
+    def test_match_all_not_stored_as_attribute(self):
+        """match_all must not appear in ref._attributes after upload."""
+        cat = _make_raw_catalog()
+        yaml_text = """
+- name: diff
+  expression: "x.iloc[:,1] - x.iloc[:,0]"
+  unit: cfs
+  search_map:
+    x:
+      variable: flow
+      match_all: true
+"""
+        refs = self._simulate_upload(yaml_text, cat)
+        assert len(refs) == 1
+        r = refs[0]
+        assert "match_all" not in r._attributes
+        assert "match_all" not in r._search_map.get("x", {})
+
+    def test_match_all_sets_require_single_false(self):
+        """match_all: true must translate to _search_require_single[var]=False."""
+        cat = _make_raw_catalog()
+        yaml_text = """
+- name: diff
+  expression: "x.iloc[:,1] - x.iloc[:,0]"
+  search_map:
+    x:
+      variable: flow
+      match_all: true
+"""
+        refs = self._simulate_upload(yaml_text, cat)
+        assert refs[0]._search_require_single.get("x") is False
+
+    def test_no_match_all_defaults_to_require_single_true(self):
+        """Absent match_all must default to require_single=True."""
+        cat = _make_raw_catalog()
+        yaml_text = """
+- name: single
+  expression: "x * 2"
+  search_map:
+    x:
+      variable: flow
+"""
+        refs = self._simulate_upload(yaml_text, cat)
+        assert refs[0]._search_require_single.get("x") is True
+
+    def test_flowdiff_yaml_round_trip(self):
+        """Exact YAML from the bug report must parse without match_all as attribute."""
+        cat = _make_raw_catalog()
+        yaml_text = """
+- name: flowdiff
+  source: ''
+  variable: flow
+  id: CHAN_437_DIFF
+  geoid: '437'
+  unit: ft/s
+  expression: flow_chipps.iloc[:,1]-flow_chipps.iloc[:,0]
+  search_map:
+    flow_chipps:
+      geoid: '437'
+      id: CHAN_437_UP
+      variable: flow
+      unit: ft/s
+      match_all: true
+"""
+        refs = self._simulate_upload(yaml_text, cat)
+        assert len(refs) == 1
+        r = refs[0]
+        assert r.name == "flowdiff"
+        assert r.expression == "flow_chipps.iloc[:,1]-flow_chipps.iloc[:,0]"
+        # match_all must NOT be stored anywhere as an attribute
+        assert "match_all" not in r._attributes
+        fc_criteria = r._search_map.get("flow_chipps", {})
+        assert "match_all" not in fc_criteria
+        # And the flag must be set correctly
+        assert r._search_require_single.get("flow_chipps") is False
+        # Other attributes preserved
+        assert r.get_attribute("unit") == "ft/s"
+        assert r.get_attribute("geoid") == "437"
+
+    def test_multiple_variables_all_stripped(self):
+        """All variables with match_all must be stripped, others defaulted."""
+        cat = _make_raw_catalog()
+        yaml_text = """
+- name: combined
+  expression: "a.mean(axis=1) - b"
+  search_map:
+    a:
+      variable: flow
+      match_all: true
+    b:
+      variable: flow
+      match_all: false
+"""
+        refs = self._simulate_upload(yaml_text, cat)
+        r = refs[0]
+        assert "match_all" not in r._search_map["a"]
+        assert "match_all" not in r._search_map["b"]
+        assert r._search_require_single["a"] is False
+        assert r._search_require_single["b"] is True
+

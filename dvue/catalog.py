@@ -523,6 +523,10 @@ class DataReference:
         """
         for key, expected in criteria.items():
             actual = self._attributes.get(key)
+            # Fall back to dynamic metadata when not found in static attributes.
+            # _attributes always takes priority: dynamic metadata is lower priority.
+            if actual is None and key not in self._attributes:
+                actual = self._dynamic_metadata.get(key)
             if callable(expected):
                 if not expected(actual):
                     return False
