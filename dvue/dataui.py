@@ -763,7 +763,14 @@ class DataUI(param.Parameterized):
                 current_view = current_view.loc[current_view.is_valid]
             current_table_selected = self._dfcat.iloc[selection]
             current_selected = current_table_selected
-        current_selection = current_view.index.get_indexer(current_selected.index).tolist()
+        # Filter out -1 entries: math refs with NaN geometry are absent from
+        # current_view (filtered by .is_valid above) so get_indexer returns -1
+        # for them. Passing -1 to Bokeh's selected= is interpreted as "last row"
+        # (Python-style negative index), selecting the wrong geo point on the map.
+        current_selection = [
+            i for i in current_view.index.get_indexer(current_selected.index).tolist()
+            if i >= 0
+        ]
         try:
             if len(query) > 0:
                 current_view = current_view.query(query)
@@ -842,9 +849,20 @@ class DataUI(param.Parameterized):
             merged_indices = (
                 self._dfcat.reset_index().merge(dfs)["index"].to_list()
             )  # index matching
-            selected_indices = self._dfcat.index.get_indexer(
+            geo_selected_indices = self._dfcat.index.get_indexer(
                 merged_indices
             ).tolist()  # positional indices on table
+            # Preserve currently-selected rows that have no map representation
+            # (e.g. math refs with NaN geometry excluded from _map_features).
+            # Without this guard, every map click silently deselects them.
+            non_geo_positions = []
+            if isinstance(self._dfcat, gpd.GeoDataFrame) and table.selection:
+                has_no_geo = self._dfcat.geometry.isna()
+                non_geo_positions = [
+                    i for i in table.selection
+                    if i < len(self._dfcat) and has_no_geo.iloc[i]
+                ]
+            selected_indices = sorted(set(non_geo_positions + geo_selected_indices))
         # with param.discard_events(table.param.selection):
         table.param.update(selection=selected_indices)
 
@@ -967,9 +985,18 @@ class DataUI(param.Parameterized):
         return gspec
 
     def setup_location_sync(self):
+        def _do_sync():
+            if pn.state.location:
+                pn.state.location.param.watch(self.update_view_from_location, "hash")
+                self.update_view_from_location()
+        # Defer registration until a session is active so that
+        # pn.state.location is guaranteed to be available (it is None
+        # when create_view() is called at module level before serving).
         if pn.state.location:
-            pn.state.location.param.watch(self.update_view_from_location, "hash")
-            self.update_view_from_location()
+            # Already in a session context (e.g. inside pn.state.onload).
+            _do_sync()
+        else:
+            pn.state.onload(_do_sync)
 
     def get_version(self):
         try:
@@ -1150,33 +1177,45 @@ class DataUI(param.Parameterized):
             pn.widgets.Button(name="Display", button_type="success"),
         )
 
-        def set_hash(event):
-            button_name = event.obj.name.lower().split()[0]
-            pn.state.location.hash = f"#{button_name}"
+        def set_view(event):
+            view_name = event.obj.name.lower()
+            # Directly update the layout — don't rely on the hash→watch
+            # round-trip, which may not fire when location.hash is set from
+            # Python (timing depends on session context availability).
+            self._apply_view_type(view_name)
+            # Also update the URL hash for browser history / bookmarking.
+            if pn.state.location:
+                pn.state.location.hash = f"#{view_name}"
 
         for btn in nav_buttons:
-            btn.on_click(set_hash)
+            btn.on_click(set_view)
 
         return nav_buttons
 
-    def update_view_from_location(self, event=None):
-        """Update the view based on the URL hash value"""
-        hash_value = pn.state.location.hash.lstrip("#")
+    def _apply_view_type(self, view_name):
+        """Switch the main content area to *view_name* ('combined', 'table', or 'display').
 
-        # Map hash values to view types
-        if hash_value == "table":
-            self.view_type = "table"
-        elif hash_value == "display":
-            self.view_type = "display"
-        else:
-            self.view_type = "combined"
-
-        # Update only the content area so the nav_bar at the top of
-        # _main_view is preserved across view-type switches.
+        This is the single authoritative place that mutates ``_main_content``.
+        Called both from button clicks (direct) and from the hash watcher
+        (browser back/forward).  Guards against no-op updates so the layout is
+        not recreated unnecessarily.
+        """
+        if view_name not in ("table", "display"):
+            view_name = "combined"
+        if self.view_type == view_name and hasattr(self, "_main_content"):
+            return  # Already showing this view — nothing to do
+        self.view_type = view_name
         if hasattr(self, "_main_content"):
             self._main_content.objects = [self._create_main_view()]
         elif hasattr(self, "_main_view"):
             self._main_view.objects = [self._create_main_view()]
+
+    def update_view_from_location(self, event=None):
+        """Update the view based on the URL hash value (browser back/forward)."""
+        if not pn.state.location:
+            return
+        hash_value = pn.state.location.hash.lstrip("#")
+        self._apply_view_type(hash_value)
 
     def create_view(self, title="Data User Interface"):
         main_panel = self.create_data_table(self._dfcat)
