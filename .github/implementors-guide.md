@@ -219,3 +219,59 @@ When updating a `TimeSeriesDataUIManager` subclass for a breaking dvue change:
 | Math ref rows guarded with `pd.isna(url)` before key construction | |
 | No local `display_url_num = False` after `super().__init__()` | |
 | `get_data_reference()` handles NaN url (math refs) | |
+
+---
+
+## 11. Map / Geo Selection with Mixed Catalogs
+
+**Problem:** When `_dfcat` is a `GeoDataFrame` containing both raw refs (with geometry)
+and math refs (NaN geometry), two separate bugs interact to silently deselect math ref
+rows whenever the user interacts with the map:
+
+### Bug A — `-1` indices passed to Bokeh (`update_map_features`)
+
+`current_view` is filtered to valid-geometry rows via `.is_valid` before `build_map_of_features`.
+`pandas.Index.get_indexer` returns `-1` for any label absent from `current_view` (i.e. every
+math ref). Without filtering, `-1` is passed directly to `selected=` on the GeoViews Points
+opts. Bokeh interprets `-1` as Python-style "last element", visually selecting the wrong geo
+point on the map.
+
+**Fix (already applied in `dataui.py → update_map_features`):**
+```python
+# Strip -1 (math refs absent from the geo-only view)
+current_selection = [
+    i for i in current_view.index.get_indexer(current_selected.index).tolist()
+    if i >= 0
+]
+```
+
+### Bug B — map callback overwrites table selection (`select_data_catalog`)
+
+`select_data_catalog` rebuilds the table selection from `self._map_features.dframe()`, which
+only contains geo rows. Math refs were never added to `_map_features`, so they can never
+survive a `merge` with `_dfcat`. `table.param.update(selection=...)` then blindly replaces
+the entire table selection — erasing every math ref row on every map click.
+
+**Fix (already applied in `dataui.py → select_data_catalog`):**
+Before overwriting, collect any currently-selected rows whose geometry is NaN (they have no
+map representation) and include them in the final selection:
+```python
+geo_selected_indices = self._dfcat.index.get_indexer(merged_indices).tolist()
+non_geo_positions = []
+if isinstance(self._dfcat, gpd.GeoDataFrame) and table.selection:
+    has_no_geo = self._dfcat.geometry.isna()
+    non_geo_positions = [
+        i for i in table.selection
+        if i < len(self._dfcat) and has_no_geo.iloc[i]
+    ]
+selected_indices = sorted(set(non_geo_positions + geo_selected_indices))
+```
+
+### Invariant to maintain
+
+> Any row in `_dfcat` that is absent from `_map_features` (because it has NaN or invalid
+> geometry) must be **preserved in the table selection** across all map interaction callbacks.
+> Use `ref_type` or `geometry.isna()` to identify such rows.
+
+Both fixes and their regression tests live in
+`dvue/tests/test_dataui_geo_selection.py`.
