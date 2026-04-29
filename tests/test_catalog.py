@@ -989,6 +989,95 @@ class TestMathDataReference:
 
 
 
+# ===========================================================================
+# DataUIManager.set_progress / hide_progress  (status label behaviour)
+# ===========================================================================
+
+
+class _FakeProgressBar:
+    """Minimal stand-in for pn.indicators.Progress."""
+
+    def __init__(self):
+        self.visible = False
+        self.indeterminate = False
+        self.value = 0
+
+
+class _FakeStatusLabel:
+    """Minimal stand-in for pn.pane.HTML used as _status_label."""
+
+    def __init__(self):
+        self.object = ""
+        self.visible = False
+
+
+class _FakeDataUI:
+    """Duck-typed subset of DataUIManager needed to test progress helpers."""
+
+    def __init__(self):
+        self.progress_bar = _FakeProgressBar()
+        self._status_label = _FakeStatusLabel()
+
+    # copy the exact implementations from DataUIManager
+    def set_progress(self, value, status=None):
+        self.progress_bar.visible = True
+        if value == -1:
+            self.progress_bar.indeterminate = True
+        else:
+            self.progress_bar.indeterminate = False
+            self.progress_bar.value = max(0, min(100, value))
+        if status is not None:
+            self._status_label.object = (
+                f'<span style="font-size:11px;color:#666;white-space:nowrap;">'
+                f"{status}</span>"
+            )
+            self._status_label.visible = True
+
+    def hide_progress(self):
+        self.progress_bar.visible = False
+        self.progress_bar.value = 0
+        self.progress_bar.indeterminate = False
+        self._status_label.object = ""
+        self._status_label.visible = False
+
+
+class TestSetProgress:
+    def test_indeterminate_shows_bar(self):
+        ui = _FakeDataUI()
+        ui.set_progress(-1)
+        assert ui.progress_bar.visible is True
+        assert ui.progress_bar.indeterminate is True
+
+    def test_deterministic_value_clamped(self):
+        ui = _FakeDataUI()
+        ui.set_progress(150)
+        assert ui.progress_bar.value == 100
+        ui.set_progress(-50)
+        assert ui.progress_bar.value == 0
+
+    def test_status_text_shown(self):
+        ui = _FakeDataUI()
+        ui.set_progress(-1, "Loading 1 of 5: station_A")
+        assert ui._status_label.visible is True
+        assert "Loading 1 of 5: station_A" in ui._status_label.object
+
+    def test_status_none_leaves_label_unchanged(self):
+        ui = _FakeDataUI()
+        ui.set_progress(-1, "initial")
+        ui.set_progress(50)  # no status kwarg
+        assert "initial" in ui._status_label.object
+
+    def test_hide_clears_everything(self):
+        ui = _FakeDataUI()
+        ui.set_progress(75, "Rendering plot…")
+        ui.hide_progress()
+        assert ui.progress_bar.visible is False
+        assert ui.progress_bar.value == 0
+        assert ui.progress_bar.indeterminate is False
+        assert ui._status_label.visible is False
+        assert ui._status_label.object == ""
+
+
 class TestDataCatalog:
     def test_add_and_get(self, simple_df):
         cat = DataCatalog()

@@ -1077,14 +1077,17 @@ class DataUI(param.Parameterized):
         else:  # combined — action panel above the resizable GridStack
             return pn.Column(self._action_panel, self._main_panel, sizing_mode="stretch_both")
 
-    def set_progress(self, value):
+    def set_progress(self, value, status=None):
         """
-        Set the progress bar value.
+        Set the progress bar value and optional status message.
 
         Parameters:
         -----------
         value : int
             Value between 0-100 for progress percentage, or -1 for indeterminate progress
+        status : str or None
+            Short status message displayed below the progress bar.  Pass
+            ``None`` to leave the current message unchanged.
         """
         self.progress_bar.visible = True
         if value == -1:
@@ -1093,12 +1096,20 @@ class DataUI(param.Parameterized):
         else:
             self.progress_bar.indeterminate = False
             self.progress_bar.value = max(0, min(100, value))  # Ensure value is between 0-100
+        if status is not None:
+            self._status_label.object = (
+                f'<span style="font-size:11px;color:#666;white-space:nowrap;">'
+                f"{status}</span>"
+            )
+            self._status_label.visible = True
 
     def hide_progress(self):
-        """Hide the progress bar."""
+        """Hide the progress bar and clear the status message."""
         self.progress_bar.visible = False
         self.progress_bar.value = 0
         self.progress_bar.indeterminate = False
+        self._status_label.object = ""
+        self._status_label.visible = False
 
     def show_in_display_panel(self, title, content):
         """Add *content* as a closable tab in the display panel."""
@@ -1229,8 +1240,14 @@ class DataUI(param.Parameterized):
             value=0,
             min_width=400,
             sizing_mode="stretch_width",
-            margin=(10, 5, 10, 5),
+            margin=(10, 5, 0, 5),
             bar_color="primary",
+            visible=False,
+        )
+        self._status_label = pn.pane.HTML(
+            "",
+            height=18,
+            margin=(0, 5, 6, 5),
             visible=False,
         )
 
@@ -1351,12 +1368,14 @@ class DataUI(param.Parameterized):
                     ("Map Options", map_options),
                 ),
                 self.progress_bar,
+                self._status_label,
                 sizing_mode="stretch_both",
             )
         else:
             sidebar_view = pn.Column(
                 pn.Tabs(("Options", control_widgets), ("Table Options", table_options)),
                 self.progress_bar,
+                self._status_label,
                 sizing_mode="stretch_both",
             )
         # Create view navigation buttons.
@@ -1460,8 +1479,14 @@ class DataUI(param.Parameterized):
             name="Progress",
             value=0,
             sizing_mode="stretch_width",
-            margin=(5, 5),
+            margin=(5, 5, 0, 5),
             bar_color="primary",
+            visible=False,
+        )
+        self._status_label = pn.pane.HTML(
+            "",
+            height=18,
+            margin=(0, 5, 6, 5),
             visible=False,
         )
 
@@ -1476,6 +1501,7 @@ class DataUI(param.Parameterized):
             ),
             self._action_panel,
             self.progress_bar,
+            self._status_label,
         ]
         if advanced_panel is not None:
             main_items.append(advanced_panel)
