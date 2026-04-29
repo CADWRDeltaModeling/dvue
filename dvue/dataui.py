@@ -571,10 +571,12 @@ class DataUI(param.Parameterized):
         self._dataui_manager = dataui_manager
         self._dataui_manager._dataui = self  # insert a reference to self in the dataui_manager for progress bar updates for example
         self._dfcat = self._dataui_manager.get_data_catalog()
-        self.param.map_color_category.objects = self._dataui_manager.get_map_color_columns()
-        self.map_color_category = self.param.map_color_category.objects[0]
-        self.param.map_marker_category.objects = self._dataui_manager.get_map_marker_columns()
-        self.map_marker_category = self.param.map_marker_category.objects[0]
+        self.param.map_color_category.objects = self._dataui_manager.get_map_color_columns() or []
+        if self.param.map_color_category.objects:
+            self.map_color_category = self.param.map_color_category.objects[0]
+        self.param.map_marker_category.objects = self._dataui_manager.get_map_marker_columns() or []
+        if self.param.map_marker_category.objects:
+            self.map_marker_category = self.param.map_marker_category.objects[0]
         self._dfmapcat = self._get_map_catalog()
 
         if isinstance(self._dfcat, gpd.GeoDataFrame):
