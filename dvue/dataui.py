@@ -237,7 +237,7 @@ class DataProvider(param.Parameterized):
             )
         return cat.get(ref_name)
 
-    def get_data(self, df: pd.DataFrame):
+    def get_data(self, df: pd.DataFrame, time_range=None):
         """Yield data :class:`pandas.DataFrame` objects for each selected row.
 
         Default: calls :meth:`get_data_reference` then ``.getData()`` for
@@ -249,13 +249,17 @@ class DataProvider(param.Parameterized):
         df : pd.DataFrame
             A subset of the catalog DataFrame (selected rows from the UI
             table).
+        time_range : tuple of (start, end), optional
+            Forwarded to :meth:`~dvue.catalog.DataReference.getData` so that
+            only the requested time window is loaded (and cached under the
+            same key used by the plot action).
 
         Yields
         ------
         pd.DataFrame
         """
         for _, row in df.iterrows():
-            yield self.get_data_reference(row).getData()
+            yield self.get_data_reference(row).getData(time_range=time_range)
 
     def create_panel(self, df: pd.DataFrame):
         """Return a Panel object for displaying the selected data.

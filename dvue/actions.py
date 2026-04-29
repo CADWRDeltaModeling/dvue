@@ -182,8 +182,9 @@ class DownloadDataAction:
             doc.add_next_tick_callback(
                 lambda: dataui.set_progress(30, "Loading data…")
             )
+            time_range = getattr(dataui._dataui_manager, "time_range", None)
             dfdata = pd.concat(
-                [df for df in dataui._dataui_manager.get_data(dfselected)], axis=1
+                [df for df in dataui._dataui_manager.get_data(dfselected, time_range=time_range)], axis=1
             )
             doc.add_next_tick_callback(
                 lambda: dataui.set_progress(80, "Serialising to CSV…")
