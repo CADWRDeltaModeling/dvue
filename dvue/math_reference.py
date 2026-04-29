@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -117,6 +118,11 @@ _MATH_NAMESPACE: Dict[str, Any] = {
 
 # Merge in vtools filter functions if available (cosine_lanczos, godin, etc.)
 _MATH_NAMESPACE.update(_vtools_filters)
+
+# Thread-local set of MathDataReference ids currently being evaluated.  Used
+# by _load_data to detect circular dependencies before Python's recursion limit
+# is hit.
+_eval_stack: threading.local = threading.local()
 
 # Tokens that are part of the expression namespace, not variable names
 _RESERVED_TOKENS: frozenset = frozenset(_MATH_NAMESPACE) | {
@@ -426,55 +432,70 @@ class MathDataReference(DataReference):
         return resolved
 
     def _load_data(self, time_range=None) -> pd.DataFrame:
-        variables = self._resolve_variables(time_range=time_range)
-
-        if not variables:
+        # Cycle detection: raise early instead of hitting Python's recursion limit.
+        if not hasattr(_eval_stack, "refs"):
+            _eval_stack.refs = set()
+        ref_id = id(self)
+        if ref_id in _eval_stack.refs:
             raise ValueError(
-                f"No variables could be resolved for expression {self.expression!r}. "
-                "Populate variable_map or call set_catalog()."
+                f"Circular dependency detected: MathDataReference {self.name!r} "
+                "references itself (directly or indirectly) through the catalog. "
+                "Check that the search_map criteria do not match the reference's "
+                "own metadata attributes."
+            )
+        _eval_stack.refs.add(ref_id)
+        try:
+            variables = self._resolve_variables(time_range=time_range)
+
+            if not variables:
+                raise ValueError(
+                    f"No variables could be resolved for expression {self.expression!r}. "
+                    "Populate variable_map or call set_catalog()."
+                )
+
+            # Capture unit from the first resolved variable before eval.
+            # godin(x), cosine_lanczos(x, ...) etc. preserve the physical unit of
+            # their input, and vtools filters may not copy df.attrs to the result.
+            _first_var = next(iter(variables.values()), None)
+            _inherited_unit: Any = (
+                getattr(_first_var, "attrs", {}).get("unit") if _first_var is not None else None
             )
 
-        # Capture unit from the first resolved variable before eval.
-        # godin(x), cosine_lanczos(x, ...) etc. preserve the physical unit of
-        # their input, and vtools filters may not copy df.attrs to the result.
-        _first_var = next(iter(variables.values()), None)
-        _inherited_unit: Any = (
-            getattr(_first_var, "attrs", {}).get("unit") if _first_var is not None else None
-        )
+            ns = {**_MATH_NAMESPACE, **variables}
+            try:
+                result = eval(self.expression, ns)  # noqa: S307
+            except Exception as exc:
+                raise ValueError(f"Failed to evaluate expression {self.expression!r}: {exc}") from exc
 
-        ns = {**_MATH_NAMESPACE, **variables}
-        try:
-            result = eval(self.expression, ns)  # noqa: S307
-        except Exception as exc:
-            raise ValueError(f"Failed to evaluate expression {self.expression!r}: {exc}") from exc
+            if isinstance(result, pd.DataFrame):
+                if not all(isinstance(c, str) for c in result.columns):
+                    result = result.copy()
+                    result.columns = [str(c) for c in result.columns]
+            elif isinstance(result, pd.Series):
+                # Preserve attrs (including unit) that to_frame() would otherwise drop.
+                _series_unit = result.attrs.get("unit")
+                result = result.to_frame(name=self.name or "result")
+                if _series_unit:
+                    result.attrs["unit"] = _series_unit
+            else:
+                # Scalar result
+                result = pd.DataFrame({"result": [result]})
 
-        if isinstance(result, pd.DataFrame):
-            if not all(isinstance(c, str) for c in result.columns):
-                result = result.copy()
-                result.columns = [str(c) for c in result.columns]
-        elif isinstance(result, pd.Series):
-            # Preserve attrs (including unit) that to_frame() would otherwise drop.
-            _series_unit = result.attrs.get("unit")
-            result = result.to_frame(name=self.name or "result")
-            if _series_unit:
-                result.attrs["unit"] = _series_unit
-        else:
-            # Scalar result
-            result = pd.DataFrame({"result": [result]})
+            # Propagate unit from the first resolved variable when the expression
+            # result carries no unit of its own (inherited unit is lower priority
+            # than any unit the expression itself already has in attrs).
+            if not result.attrs.get("unit") and _inherited_unit:
+                result.attrs["unit"] = _inherited_unit
 
-        # Propagate unit from the first resolved variable when the expression
-        # result carries no unit of its own (inherited unit is lower priority
-        # than any unit the expression itself already has in attrs).
-        if not result.attrs.get("unit") and _inherited_unit:
-            result.attrs["unit"] = _inherited_unit
+            # Normalise PeriodIndex → DatetimeIndex so downstream comparisons
+            # against Timestamps (e.g. time-range slicing in tsdataui) do not fail
+            # with "'>=' not supported between instances of 'Period' and 'Timestamp'".
+            if isinstance(result.index, pd.PeriodIndex):
+                result.index = result.index.to_timestamp()
 
-        # Normalise PeriodIndex → DatetimeIndex so downstream comparisons
-        # against Timestamps (e.g. time-range slicing in tsdataui) do not fail
-        # with "'>=' not supported between instances of 'Period' and 'Timestamp'".
-        if isinstance(result.index, pd.PeriodIndex):
-            result.index = result.index.to_timestamp()
-
-        return result
+            return result
+        finally:
+            _eval_stack.refs.discard(ref_id)
 
     # ------------------------------------------------------------------
     # Arithmetic operators – produce new MathDataReference trees

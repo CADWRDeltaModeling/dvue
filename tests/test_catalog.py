@@ -968,10 +968,25 @@ class TestMathDataReference:
             f"Expected all string columns, got: {list(result.columns)}"
         )
 
+    def test_circular_self_reference_raises(self, ab_refs):
+        """A MathDataReference whose search_map matches its own attributes raises ValueError."""
+        a, _ = ab_refs
+        cat = DataCatalog()
+        cat.add(a)
+        # The math ref has variable="ec" and searches for variable="ec" — finds itself.
+        m = MathDataReference(
+            "obs * 1.0",
+            name="ec_copy",
+            search_map={"obs": {"variable": "ec"}},
+            variable="ec",
+        )
+        cat.add(m)
+        m.set_catalog(cat)
+        with pytest.raises(ValueError, match="Circular dependency"):
+            m.getData()
 
-# ===========================================================================
-# DataCatalog
-# ===========================================================================
+
+
 
 
 class TestDataCatalog:
