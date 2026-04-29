@@ -551,12 +551,15 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def _process_curve_data(self, data, r, time_range):
         """Process time series data based on index type and apply transformations."""
+        # Normalise PeriodIndex → DatetimeIndex so Timestamp comparisons work
+        # uniformly.  pyhecdss sometimes returns an object-dtype index whose
+        # elements are pd.Period values rather than a proper pd.PeriodIndex, so
+        # check both forms.
         if isinstance(data.index, pd.PeriodIndex):
-            data = data[
-                (data.index.start_time >= time_range[0]) & (data.index.end_time <= time_range[1])
-            ]
-        else:  # Assume DatetimeIndex
-            data = data[(data.index >= time_range[0]) & (data.index <= time_range[1])]
+            data.index = data.index.to_timestamp()
+        elif len(data.index) > 0 and isinstance(data.index[0], pd.Period):
+            data.index = pd.PeriodIndex(data.index).to_timestamp()
+        data = data[(data.index >= time_range[0]) & (data.index <= time_range[1])]
 
         # Apply optional data transformations
         if self.fill_gap > 0:

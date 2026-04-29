@@ -389,6 +389,24 @@ class MathDataReference(DataReference):
             else:
                 resolved[tok] = data
 
+        # Normalise PeriodIndex → DatetimeIndex on every resolved variable so
+        # that pandas can align them during arithmetic.  A mix of PeriodIndex
+        # (from pyhecdss daily records) and DatetimeIndex (from other sources)
+        # causes silent all-NaN results when the expression tries to add/subtract
+        # the two series.  Also handle object-dtype indexes whose elements are
+        # pd.Period instances (another pyhecdss quirk).
+        for tok, val in list(resolved.items()):
+            if isinstance(val, (pd.Series, pd.DataFrame)):
+                idx = val.index
+                if isinstance(idx, pd.PeriodIndex):
+                    val = val.copy()
+                    val.index = idx.to_timestamp()
+                    resolved[tok] = val
+                elif len(idx) > 0 and isinstance(idx[0], pd.Period):
+                    val = val.copy()
+                    val.index = pd.PeriodIndex(idx).to_timestamp()
+                    resolved[tok] = val
+
         # Upcast float32 → float64 so vtools filters (and other functions that
         # assign NaN-filled float64 results back into the original container)
         # don't hit pandas 3.x LossySetitemError.
@@ -449,6 +467,12 @@ class MathDataReference(DataReference):
         # than any unit the expression itself already has in attrs).
         if not result.attrs.get("unit") and _inherited_unit:
             result.attrs["unit"] = _inherited_unit
+
+        # Normalise PeriodIndex → DatetimeIndex so downstream comparisons
+        # against Timestamps (e.g. time-range slicing in tsdataui) do not fail
+        # with "'>=' not supported between instances of 'Period' and 'Timestamp'".
+        if isinstance(result.index, pd.PeriodIndex):
+            result.index = result.index.to_timestamp()
 
         return result
 
