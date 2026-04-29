@@ -473,7 +473,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Process each row, updating progress as we go
         for i, (_, r) in enumerate(df.iterrows()):
             if use_catalog:
-                data = self.get_data_reference(r).getData()
+                data = self.get_data_reference(r).getData(time_range=self.time_range)
             else:
                 data, _, _ = self.get_data_for_time_range(r, self.time_range)
 
