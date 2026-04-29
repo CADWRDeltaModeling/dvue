@@ -953,6 +953,16 @@ class TimeSeriesPlotAction(PlotAction):
                     else ""
                 )
                 curve = self.create_curve(data, row, unit, file_index=file_index)
+                # Apply curve connection (interpolation) from manager params
+                try:
+                    connection = (
+                        manager.irregular_curve_connection
+                        if manager.is_irregular(row)
+                        else manager.regular_curve_connection
+                    )
+                except NotImplementedError:
+                    connection = manager.regular_curve_connection
+                curve = curve.opts(opts.Curve(interpolation=connection))
                 station_name = manager.build_station_name(row)
 
                 # Determine group key: custom column > unit
