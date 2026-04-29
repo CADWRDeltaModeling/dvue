@@ -112,7 +112,13 @@ class MathRefEditorAction:
 
     @staticmethod
     def _parse_search_map(text: str):
-        """Parse ``var[multi]: key=val, key=val`` lines.
+        """Parse ``var[multi]: key=val, key~regex, …`` lines.
+
+        Supports two operators per attribute token:
+
+        * ``attr=value`` — exact match (stored as the plain string ``value``).
+        * ``attr~pattern`` — regex fullmatch, case-insensitive (stored as
+          ``"~pattern"`` so the tilde prefix is visible in round-trips).
 
         Returns
         -------
@@ -135,7 +141,15 @@ class MathRefEditorAction:
             criteria: Dict[str, str] = {}
             for part in criteria_str.split(","):
                 part = part.strip()
-                if "=" in part:
+                # Detect operator: ~ (regex) takes priority over = (exact).
+                tilde_pos = part.find("~")
+                eq_pos = part.find("=")
+                if tilde_pos != -1 and (eq_pos == -1 or tilde_pos < eq_pos):
+                    k, _, v = part.partition("~")
+                    k = k.strip()
+                    if k:
+                        criteria[k] = "~" + v.strip()
+                elif eq_pos != -1:
                     k, _, v = part.partition("=")
                     criteria[k.strip()] = v.strip()
             if var and criteria:
@@ -145,12 +159,22 @@ class MathRefEditorAction:
 
     @staticmethod
     def _render_search_map(search_map: Dict[str, Any], req: Dict[str, bool]) -> str:
-        """Render ``search_map`` + ``search_require_single`` to editor text."""
+        """Render ``search_map`` + ``search_require_single`` to editor text.
+
+        Regex criteria (stored with a ``~`` prefix) are emitted as
+        ``attr~pattern``; exact criteria are emitted as ``attr=value``.
+        """
         lines = []
         for var, criteria in search_map.items():
             require_single = req.get(var, True)
             tag = "" if require_single else "[multi]"
-            criteria_str = ", ".join(f"{k}={v}" for k, v in criteria.items())
+            parts = []
+            for k, v in criteria.items():
+                if isinstance(v, str) and v.startswith("~"):
+                    parts.append(f"{k}{v}")  # e.g. "variable~EC.*"
+                else:
+                    parts.append(f"{k}={v}")
+            criteria_str = ", ".join(parts)
             lines.append(f"{var}{tag}: {criteria_str}")
         return "\n".join(lines)
 
@@ -306,7 +330,7 @@ class MathRefEditorAction:
             pn.pane.Markdown("**Alias**", width=100, margin=(0, 4, 0, 4)),
             pn.pane.Markdown("**Match all**", width=80, margin=(0, 4, 0, 4)),
             pn.pane.Markdown(
-                "**Catalog criteria** (`attr=val, attr=val …`)",
+                "**Catalog criteria** (`attr=val` exact · `attr~regex` pattern)",
                 sizing_mode="stretch_width",
                 margin=(0, 4, 0, 4),
             ),
@@ -426,11 +450,19 @@ class MathRefEditorAction:
                 criteria: Dict[str, str] = {}
                 for part in crit_text.split(","):
                     part = part.strip()
-                    if "=" in part:
+                    # Detect operator: ~ (regex) takes priority over = (exact).
+                    tilde_pos = part.find("~")
+                    eq_pos = part.find("=")
+                    if tilde_pos != -1 and (eq_pos == -1 or tilde_pos < eq_pos):
+                        k, _, v = part.partition("~")
+                        k = k.strip()
+                        if k:
+                            criteria[k] = "~" + v.strip()
+                    elif eq_pos != -1:
                         k, _, v = part.partition("=")
                         criteria[k.strip()] = v.strip()
                 if not criteria:
-                    _row_result_md.object = "⚠️ No valid `attr=val` pairs found."
+                    _row_result_md.object = "⚠️ No valid `attr=val` or `attr~regex` pairs found."
                     return
                 dataui.set_progress(-1)
                 try:

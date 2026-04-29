@@ -351,6 +351,39 @@ class TestDataReference:
         assert ref.matches(year=lambda y: y >= 2019)
         assert not ref.matches(year=lambda y: y >= 2021)
 
+    def test_matches_regex_tilde_full_match(self, simple_df):
+        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="EC_daily")
+        assert ref.matches(variable="~EC_daily")       # exact pattern, fullmatch
+        assert ref.matches(variable="~EC.*")           # suffix wildcard
+        assert ref.matches(variable="~[Ee][Cc].*")     # char-class pattern
+        assert not ref.matches(variable="~flow.*")     # wrong prefix
+
+    def test_matches_regex_partial_requires_dotstar(self, simple_df):
+        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="EC_daily")
+        # "~EC" alone does NOT match "EC_daily" — fullmatch, not search
+        assert not ref.matches(variable="~EC")
+        # "~EC.*" does match
+        assert ref.matches(variable="~EC.*")
+
+    def test_matches_regex_case_insensitive(self, simple_df):
+        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="EC_DAILY")
+        assert ref.matches(variable="~ec_daily")
+        assert ref.matches(variable="~ec.*")
+        assert ref.matches(variable="~EC_DAILY")
+
+    def test_matches_exact_unaffected_by_regex(self, simple_df):
+        # Values not starting with ~ continue to use exact match
+        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="EC_daily")
+        assert ref.matches(variable="EC_daily")
+        assert not ref.matches(variable="EC")
+        assert not ref.matches(variable="EC_daily_extra")
+
+    def test_matches_regex_none_value(self, simple_df):
+        # Attribute absent / None — regex against empty string
+        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r")
+        assert ref.matches(variable="~")       # empty pattern matches empty string
+        assert not ref.matches(variable="~EC.*")
+
     # ------------------------------------------------------------------
     # Operator overloading
     # ------------------------------------------------------------------
@@ -1085,6 +1118,41 @@ class TestDataCatalog:
         cat = DataCatalog()
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="T"))
         assert cat.search(variable="X") == []
+
+    def test_search_regex_attribute(self, simple_df):
+        cat = DataCatalog()
+        r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="EC_daily")
+        r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r2", variable="EC_hourly")
+        r3 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r3", variable="flow")
+        cat.add(r1); cat.add(r2); cat.add(r3)
+        # ~EC.* matches both EC_ refs but not flow
+        results = cat.search(variable="~EC.*")
+        assert set(r.name for r in results) == {"r1", "r2"}
+
+    def test_search_regex_name(self, simple_df):
+        cat = DataCatalog()
+        r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="station_a")
+        r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="station_b")
+        r3 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="other")
+        cat.add(r1); cat.add(r2); cat.add(r3)
+        results = cat.search(name="~station.*")
+        assert set(r.name for r in results) == {"station_a", "station_b"}
+
+    def test_search_regex_case_insensitive(self, simple_df):
+        cat = DataCatalog()
+        r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="EC_daily")
+        cat.add(r1)
+        assert cat.search(variable="~ec.*") == [r1]
+        assert cat.search(variable="~EC_DAILY") == [r1]
+
+    def test_search_regex_combined_with_exact(self, simple_df):
+        cat = DataCatalog()
+        r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="EC_daily", interval="hourly")
+        r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r2", variable="EC_daily", interval="daily")
+        cat.add(r1); cat.add(r2)
+        # regex on variable, exact on interval
+        results = cat.search(variable="~EC.*", interval="hourly")
+        assert results == [r1]
 
     # ------------------------------------------------------------------
     # Schema map

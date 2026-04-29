@@ -76,7 +76,7 @@
       variable: precipitation
       interval: hourly
 
-# -- Example 4: Multi-station mean with _require_single: false ----------------
+# -- Example 4: Multi-station mean with match_all: true ----------------------
 # ws resolves to ALL catalog entries where variable=wind_speed + interval=hourly
 # (one per station).  They are concatenated into a DataFrame (axis=1 join by
 # timestamp index) so ws.mean(axis=1) produces the mean across all stations.
@@ -93,7 +93,7 @@
     ws:
       variable: wind_speed
       interval: hourly
-      _require_single: false
+      match_all: true
 
 # -- Example 5: Chain via catalog name (MathDataReference → MathDataReference) --
 # References wind_speed_mph__A__hourly, itself a MathDataReference defined

@@ -59,7 +59,7 @@
 
 # -- 4. Multi-station mean wind speed (all matching stations) -----------------
 #
-# _require_single: false tells the resolver to concat all matching references
+# match_all: true tells the resolver to concat all matching references
 # into a DataFrame.  ws.mean(axis=1) then computes the column-wise mean so
 # the result is a single Series regardless of how many stations match.
 - name: mean_wind_speed__all_stations__hourly
@@ -71,4 +71,4 @@
     ws:
       variable: wind_speed
       interval: hourly
-      _require_single: false
+      match_all: true

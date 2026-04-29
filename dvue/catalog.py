@@ -296,6 +296,33 @@ def _resolve_class(fqcn: str) -> type:
     return getattr(module, class_name)
 
 
+def _criterion_matches(actual: Any, expected: Any) -> bool:
+    """Return ``True`` if *actual* satisfies the *expected* criterion.
+
+    * ``expected`` is a **string starting with "~"** — treated as a
+      case-insensitive regular expression; ``re.fullmatch`` is used so the
+      pattern must cover the entire attribute value.  Use ``~EC.*`` (not
+      ``~EC``) to match values that *start with* ``EC``.
+    * ``expected`` is a **callable** — delegated to the caller (not handled
+      here; callers should check ``callable(expected)`` first).
+    * Otherwise — exact equality with transparent type coercion when scalar
+      types differ (e.g. string ``'0'`` vs integer ``0``).
+    """
+    if isinstance(expected, str) and expected.startswith("~"):
+        pattern = expected[1:]
+        return bool(re.fullmatch(pattern, str(actual) if actual is not None else "", re.IGNORECASE))
+    if actual != expected:
+        # Try type coercion when scalar types differ.
+        try:
+            if type(actual) is not type(expected):
+                if actual == type(actual)(expected):
+                    return True
+        except (ValueError, TypeError):
+            pass
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # DataReference
 # ---------------------------------------------------------------------------
@@ -519,6 +546,8 @@ class DataReference:
         Each criterion value can be:
 
         * a **scalar** – exact equality check.
+        * a **string starting with "~"** – case-insensitive regex fullmatch
+          (e.g. ``variable="~EC.*"`` matches ``"EC_daily"`` or ``"ec_hourly"``).
         * a **callable** ``f(value) -> bool`` – custom predicate.
         """
         for key, expected in criteria.items():
@@ -530,14 +559,7 @@ class DataReference:
             if callable(expected):
                 if not expected(actual):
                     return False
-            elif actual != expected:
-                # Try type coercion when scalar types differ 
-                try:
-                    if type(actual) is not type(expected):
-                        if actual == type(actual)(expected):
-                            continue
-                except (ValueError, TypeError):
-                    pass
+            elif not _criterion_matches(actual, expected):
                 return False
         return True
 
@@ -1078,12 +1100,17 @@ class DataCatalog:
         Each criterion value may be:
 
         * a **scalar** – exact equality check.
+        * a **string starting with "~"** – case-insensitive regex fullmatch
+          (e.g. ``name="~station.*"`` matches any name beginning with
+          ``station``, case-insensitively).
         * a **callable** ``f(value) -> bool`` – custom predicate.
 
         Examples
         --------
         >>> catalog.search(variable="temperature")
         >>> catalog.search(name="my_ref")
+        >>> catalog.search(name="~station.*")           # regex on name
+        >>> catalog.search(variable="~EC.*")            # regex on attribute
         >>> catalog.search(year=lambda y: int(y) >= 2020)
         >>> catalog.search(variable="temperature", unit="degC")
         """
@@ -1097,7 +1124,7 @@ class DataCatalog:
                 if callable(name_criterion):
                     if not name_criterion(r.name):
                         continue
-                elif r.name != name_criterion:
+                elif not _criterion_matches(r.name, name_criterion):
                     continue
             if r.matches(**raw_criteria):
                 results.append(r)

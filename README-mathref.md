@@ -179,7 +179,7 @@ Each expression variable is a short alias resolved by catalog attribute criteria
       variable: precipitation
       interval: hourly
 
-# Multi-station mean: _require_single: false concatenates ALL matches into a DataFrame
+# Multi-station mean: match_all: true concatenates ALL matches into a DataFrame
 - name: mean_wind_speed__all_stations__hourly
   expression: ws.mean(axis=1)
   variable: mean_wind_speed
@@ -189,10 +189,109 @@ Each expression variable is a short alias resolved by catalog attribute criteria
     ws:
       variable: wind_speed
       interval: hourly
-      _require_single: false
+      match_all: true
 ```
 
-> **`_require_single: false`** — when set inside a `search_map` criteria block, *all* catalog entries matching those criteria are fetched and concatenated column-wise (axis=1 join by timestamp index) so the alias resolves to a DataFrame. Use this for multi-station aggregates such as `ws.mean(axis=1)`.
+> **`match_all: true`** — when set inside a `search_map` criteria block, *all* catalog entries matching those criteria are fetched and concatenated column-wise (axis=1 join by timestamp index) so the alias resolves to a DataFrame. Use this for multi-station aggregates such as `ws.mean(axis=1)`.
+
+### Regex matching in criteria
+
+By default, every `attr=value` criterion in a `search_map` block (or in a `catalog.search()` call) performs an **exact equality check**. You can switch to a **case-insensitive regular expression** by using `~` instead of `=` as the operator, or by passing a tilde-prefixed string in code.
+
+#### Rules
+
+| Rule | Detail |
+|---|---|
+| Operator | `~` in the editor/YAML; `"~pattern"` (tilde-prefixed string) in Python |
+| Matching | `re.fullmatch` — the pattern must match the **entire** attribute value |
+| Case | Case-insensitive (`re.IGNORECASE`) |
+| Partial match | Use `.*` to allow leading/trailing characters (e.g. `~EC.*`) |
+
+#### YAML examples
+
+```yaml
+search_map:
+  # Exact match (default) — only "wind_speed" qualifies, not "wind_speed_mph"
+  obs:
+    variable: wind_speed
+    interval: hourly
+
+  # Regex fullmatch — matches "wind_speed" AND "wind_speed_mph" (starts with "wind_speed")
+  obs_any:
+    variable: ~wind_speed.*
+    interval: hourly
+
+  # Case-insensitive — "EC", "ec", "Ec" all match
+  salinity:
+    variable: ~ec
+    interval: ~15min.*
+
+  # Match several known prefixes with alternation
+  flow_or_stage:
+    variable: ~(flow|stage)
+    interval: hourly
+```
+
+#### Python `set_search()` / `search_map` dict examples
+
+```python
+# Regex via set_search() — matches "EC", "ec_hourly", "EC_daily", etc.
+m = (MathDataReference("obs * 1.0", name="ec_copy")
+     .set_search("obs", variable="~EC.*", interval="hourly")
+     .set_catalog(catalog))
+
+# Regex in a search_map dict passed to the constructor
+m = MathDataReference(
+    "a + b",
+    search_map={
+        "a": {"variable": "~flow.*", "location": "upstream"},
+        "b": {"variable": "~flow.*", "location": "downstream"},
+    },
+    name="net_flow",
+)
+
+# catalog.search() with regex — find all refs whose name starts with "station"
+refs = catalog.search(name="~station.*")
+# catalog.search() with regex attribute — find all EC-family variables
+refs = catalog.search(variable="~EC.*")
+```
+
+#### Using regex in the editor
+
+Type criteria using `~` instead of `=` to indicate regex:
+
+```
+variable~EC.*
+variable~EC.*, interval=hourly
+```
+
+The **`+attr`** picker always appends `attr=`. To switch to regex, manually replace `=` with `~` in the criteria field after picking the attribute name.
+
+#### Partial vs full match
+
+`re.fullmatch` is used, so the pattern must match the **entire** attribute value, not just a substring:
+
+| Pattern | Attribute value | Matches? |
+|---|---|---|
+| `~EC` | `"EC"` | ✅ yes — exact fullmatch |
+| `~EC` | `"EC_daily"` | ❌ no — `EC` alone doesn't cover `_daily` |
+| `~EC.*` | `"EC_daily"` | ✅ yes — `.*` absorbs the suffix |
+| `~ec` | `"EC"` | ✅ yes — case-insensitive |
+| `~ec` | `"EC_DAILY"` | ❌ no — same fullmatch rule applies |
+| `~ec.*` | `"EC_DAILY"` | ✅ yes |
+| `~(flow\|stage)` | `"flow"` | ✅ yes |
+| `~(flow\|stage)` | `"velocity"` | ❌ no |
+
+#### Limitation — literal `~` values
+
+If a metadata attribute value legitimately starts with `~` (unusual), it **cannot** be matched using `=` with a tilde-prefixed expected value, because any value beginning with `~` is interpreted as a regex pattern. As a workaround, use a callable predicate in Python:
+
+```python
+# Match the literal value "~special" exactly
+refs = catalog.search(variable=lambda v: v == "~special")
+```
+
+This limitation does not apply to the YAML or editor format, where you would simply use `variable=~special` to trigger regex mode.
 
 ### Chaining Math References
 
@@ -278,8 +377,8 @@ One row per expression variable. Rows can be added with **+ Add variable** and r
 | Field | Purpose |
 |---|---|
 | **Alias** | Short identifier used in the Expression (e.g. `obs`) |
-| **Match all** | When checked, all matching catalog entries are concatenated into a DataFrame (equivalent to `_require_single: false`) |
-| **Catalog criteria** | Comma-separated `attr=val` pairs used to search the catalog (e.g. `variable=wind_speed, interval=hourly`) |
+| **Match all** | When checked, all matching catalog entries are concatenated into a DataFrame (equivalent to `match_all: true` in YAML) |
+| **Catalog criteria** | Comma-separated `attr=val` (exact) or `attr~regex` (regex fullmatch) pairs used to search the catalog (e.g. `variable=wind_speed, interval=hourly` or `variable~EC.*, interval=hourly`) |
 | **+ attr** | Drop-down picker; selecting an attribute name appends `attr=` to the criteria field so you only need to fill in the value |
 | **▶** | Per-row test button — runs the criteria against the live catalog and shows an inline badge: `✅ 1 match`, `⚠️ N matches`, or `❌ 0 matches`. If exactly one match is found and the **Attributes** field is empty, it is auto-filled with the match's identifying attributes |
 
