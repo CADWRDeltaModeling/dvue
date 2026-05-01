@@ -596,6 +596,8 @@ class DataReference:
             value = self._attributes.get(key)
             if not isinstance(value, (str, int, float, bool)):
                 continue
+            if isinstance(value, float) and value != value:  # skip NaN
+                continue
             sanitized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip())
             sanitized = sanitized.strip("_")
             if sanitized:
@@ -1549,6 +1551,7 @@ def build_catalog_from_dataframe(
     ref_name_fn,
     crs: "Optional[str]" = None,
     ref_class: type = DataReference,
+    key_attributes: "Optional[List[str]]" = None,
 ) -> DataCatalog:
     """Build a :class:`DataCatalog` from a metadata DataFrame.
 
@@ -1574,6 +1577,14 @@ def build_catalog_from_dataframe(
         :class:`DataReference` subclass to instantiate for each row.
         Defaults to :class:`DataReference`.  Pass a custom subclass to
         attach a domain-specific ``ref_type`` (e.g. ``ref_type = "dsm2_dss"``).
+    key_attributes : list of str, optional
+        Attribute names that form the *identity key* of each reference —
+        the minimal set that uniquely identifies a series within this catalog
+        (e.g. ``["station_name", "variable"]``).  When provided,
+        :meth:`DataReference.set_key_attributes` is called on every created
+        reference so that :meth:`DataReference.ref_key` and
+        ``TransformToCatalogAction`` produce short, readable names instead of
+        joining all attributes (including NaN-valued ones).
 
     Returns
     -------
@@ -1584,12 +1595,13 @@ def build_catalog_from_dataframe(
         attrs = {k: v for k, v in row.items() if k != "geometry"}
         if "geometry" in row.index and row["geometry"] is not None:
             attrs["geometry"] = row["geometry"]
-        catalog.add(
-            ref_class(
-                reader=reader,
-                name=ref_name_fn(row),
-                cache=True,
-                **attrs,
-            )
+        ref = ref_class(
+            reader=reader,
+            name=ref_name_fn(row),
+            cache=True,
+            **attrs,
         )
+        if key_attributes is not None:
+            ref.set_key_attributes(key_attributes)
+        catalog.add(ref)
     return catalog

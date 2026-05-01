@@ -499,6 +499,163 @@ class MyManager(TimeSeriesDataUIManager):
 
 ---
 
+## Creating Math References from the Transform panel
+
+The **Transform → Ref** button (green, in the action toolbar) converts the currently-active
+transforms into a `MathDataReference` and saves it to the live catalog in a single click —
+no expression authoring needed.
+
+### Prerequisites
+
+1. Select one or more rows in the catalog table.
+2. Apply at least one transform in the **Transform** tab (see [Transforms](#transforms)).
+3. Click **Transform → Ref**.
+
+A notification confirms each new reference added. If a reference with the same derived name
+already exists it is silently replaced with the updated one.
+
+### Transform tab controls
+
+| Section | Controls |
+|---|---|
+| **Data Cleanup** | `fill_gap` — fill missing values |
+| **Resampling** | Period string (`1D`, `1H`, `15min`, …) + aggregation (`mean`, `max`, `min`, `sum`, `std`) |
+| **Smoothing** | Tidal filter (cosine-Lanczos 40 h) + Rolling window (offset string `24H`, `7D`, …) + aggregation |
+| **Derived** | Differencing (`diff_periods`) + cumulative sum |
+| **Scaling** | Scale factor (multiplicative constant; `1.0` = no-op) |
+
+### How the expression is built
+
+Transforms are combined into a single chained pandas expression applied to the variable `x`:
+
+| Active transforms | Expression |
+|---|---|
+| Resample 1D mean | `x.resample('1D').mean()` |
+| Tidal filter then resample | `cosine_lanczos(x, '40h').resample('1D').mean()` |
+| Rolling 24H mean | `x.rolling('24H').mean()` |
+| Differencing (1 period) | `x.diff(1)` |
+| Cumulative sum | `x.cumsum()` |
+| Scale by 0.3048 | `x * 0.3048` |
+| Resample + scale | `x.resample('1D').mean() * 0.3048` |
+
+> **Pipeline order**: tidal filter → resample → rolling → diff → cumsum → scale.
+> The tidal filter is always applied on the original sub-daily series; resampling comes after.
+
+### How the name is built
+
+```
+[f{n}_]{identity_key}__{tag}
+```
+
+| Part | Meaning |
+|---|---|
+| `f{n}_` | File index prefix, only in multi-file catalogs (e.g. `f0_`, `f1_`) |
+| `{identity_key}` | Short identity of the source reference (e.g. `RSAC054_FLOW`) |
+| `__` | Unambiguous separator — the sanitiser never produces `__` inside an identity key |
+| `{tag}` | Short code for the active transforms (see table below) |
+
+#### Transform tags
+
+| Active transform | Tag |
+|---|---|
+| Tidal filter | `tf` |
+| Resample 1D mean | `1D_mean` |
+| Resample 1H max | `1H_max` |
+| Rolling 24H mean | `r24H_mean` |
+| Differencing (1 period) | `diff` |
+| Differencing (N periods) | `diffN` |
+| Cumulative sum | `cumsum` |
+| Scale by 2.0 | `x2.0` |
+
+Multiple active transforms are joined with `_`:
+```
+resample_period=1D + scale_factor=0.3048  →  name: RSAC054_FLOW__1D_mean_x0.3048
+```
+
+### Controlling the identity key
+
+The identity part of the name comes from **one of three sources**, checked in priority order:
+
+1. **`ref.set_key_attributes([...])`** — set directly on the original `DataReference`.
+   The ref itself advertises which attributes constitute its identity.
+   ```python
+   ref.set_key_attributes(["B", "C"])   # DSS station (B) + variable (C)
+   # → identity key: "RSAC054_FLOW"
+   ```
+
+2. **`manager.identity_key_columns = [...]`** — a catalog-level default on the manager.
+   All refs in this catalog use the same attribute names for their identity.
+   ```python
+   mgr.identity_key_columns = ["B", "C"]
+   # → every Transform → Ref uses B+C as the identity part
+   ```
+
+3. **Fallback** — neither source is set. The full `ref_key()` is used. This is verbose
+   (includes all non-source attributes), but always produces a valid, unique name.
+
+### Attribute inheritance
+
+The new `MathDataReference` inherits **all attributes** from the original ref except `source`
+(the file path). This means it is groupable and filterable by the same station, variable, and
+interval criteria as the source:
+
+```
+Original ref:  B=RSAC054, C=FLOW, E=1HOUR, F=STUDY_V1, filename=base.dss
+New math ref:  B=RSAC054, C=FLOW, E=1HOUR, F=STUDY_V1+1D_mean
+                                              ↑ original F  ↑ transform tag appended
+```
+
+When the original ref has no `F` attribute, a `transform` attribute is added instead:
+```
+New math ref:  B=RSAC054, C=FLOW, transform=1D_mean
+```
+
+### Hiding the button
+
+```python
+mgr.show_transform_to_catalog = False
+```
+
+---
+
+## Transforms
+
+`TimeSeriesDataUIManager` applies an in-memory transform pipeline to every plotted series.
+Transforms are controlled from the **Transform** tab in the sidebar.
+
+> **Note**: transforms affect only what is plotted and what **Transform → Ref** captures.
+> They do not modify the underlying data in the catalog.
+
+### Pipeline order
+
+```
+raw data
+  → fill gap
+  → tidal filter (cosine-Lanczos 40 h)
+  → resample (period + aggregation)
+  → rolling window (offset + aggregation)
+  → differencing (n periods)
+  → cumulative sum
+  → scale factor
+```
+
+### Params reference
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `resample_period` | `str` | `""` | Pandas offset string (`"1D"`, `"1H"`, `"15min"`, …). Empty = disabled |
+| `resample_agg` | selector | `"mean"` | `mean`, `max`, `min`, `sum`, `std` |
+| `rolling_window` | `str` | `""` | Pandas offset string (`"24H"`, `"7D"`, …). Empty = disabled |
+| `rolling_agg` | selector | `"mean"` | `mean`, `max`, `min`, `std` |
+| `do_diff` | `bool` | `False` | Apply `Series.diff(diff_periods)` |
+| `diff_periods` | `int` | `1` | Number of periods for differencing |
+| `do_cumsum` | `bool` | `False` | Apply `Series.cumsum()` |
+| `scale_factor` | `float` | `1.0` | Multiply every value; `1.0` is a no-op |
+| `show_transform_to_catalog` | `bool` | `True` | Show "Transform → Ref" action button |
+| `identity_key_columns` | `list[str]` | `[]` | Attribute names forming the identity key for derived ref names |
+
+---
+
 ## Full working example
 
 See [`examples/ex_tsdataui.py`](examples/ex_tsdataui.py) for a complete end-to-end demonstration:
