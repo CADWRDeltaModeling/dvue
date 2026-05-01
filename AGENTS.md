@@ -39,6 +39,39 @@ Use this file when working in the `dvue/` workspace root.
 - When adding catalog attributes used for filtering/grouping, document them and keep table/map selection flow intact.
 - If changing math-reference behavior, update examples and docs linked from `README-mathref.md`.
 
+## TransformToCatalogAction — naming contract
+
+`TransformToCatalogAction` (in `dvue/actions.py`) converts active UI transforms into a
+`MathDataReference` and adds it to the live catalog. The name format is:
+
+```
+[f{url_num}_]{identity_key}__{tag}
+```
+
+- `__` (double underscore) is the separator between identity and tag. It is unambiguous
+  because `DataReference.ref_key()` sanitises all non-alphanumeric runs to a single `_`,
+  so `__` can never appear inside the identity part.
+- The identity key is resolved via this priority chain:
+  1. `orig_ref._key_attributes` (set via `orig_ref.set_key_attributes([...])`)
+  2. `manager.identity_key_columns` param (catalog-level default)
+  3. Fallback: full `orig_ref.ref_key()` (verbose but always valid)
+- After creation, `set_key_attributes()` is called on the new math ref so that
+  `expression` is excluded from its own `ref_key()`.
+- Short tags: `tf`, `1D_mean`, `r24H_mean`, `diff`, `diffN`, `cumsum`, `x{factor}`.
+  See `.github/transform-to-catalog-plan.md` for the full tag table.
+
+When subclassing `TimeSeriesDataUIManager`, set `identity_key_columns` to the attribute
+names that form the "identity" of a reference in your catalog (e.g. `["B", "C"]` for DSS
+station + variable). This ensures **Transform → Ref** generates short, readable names.
+
+```python
+class MyManager(TimeSeriesDataUIManager):
+    identity_key_columns = param.List(default=["station", "variable"])
+```
+
+Alternatively, call `ref.set_key_attributes(["station", "variable"])` on individual refs
+when you know their identity at construction time — this takes precedence over the manager param.
+
 ## Implementation Gotchas For Subclasses
 
 ### Mixed catalogs: math references alongside raw references
