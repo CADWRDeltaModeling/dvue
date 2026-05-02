@@ -155,6 +155,10 @@ class TimeSeriesDataUIManager(DataUIManager):
         default=True,
         doc="Show the 'Transform → Ref' button in the action bar. Set to False to hide it.",
     )
+    show_clear_cache = param.Boolean(
+        default=True,
+        doc="Show the 'Clear Cache' button in the action bar and transform panel. Set to False to hide it.",
+    )
     identity_key_columns = param.List(
         default=[],
         doc=(
@@ -334,14 +338,15 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="inline",
                 callback=xform_action.callback,
             ))
-        from .actions import ClearCacheAction
-        actions.append(dict(
-            name="Clear Cache",
-            button_type="light",
-            icon="trash",
-            action_type="inline",
-            callback=ClearCacheAction().callback,
-        ))
+        if self.show_clear_cache:
+            from .actions import ClearCacheAction
+            actions.append(dict(
+                name="Clear Cache",
+                button_type="light",
+                icon="trash",
+                action_type="inline",
+                callback=ClearCacheAction().callback,
+            ))
         return actions
 
     def get_time_range(self, dfcat):
@@ -541,8 +546,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             pn.Row(sensible_w, pct_range_w,
                    align="center", sizing_mode="stretch_width"),
             # ── Actions ───────────────────────────────────────────
-            pn.layout.Divider(margin=(8, 0, 4, 0)),
-            clear_cache_btn,
+            *([] if not self.show_clear_cache else [pn.layout.Divider(margin=(8, 0, 4, 0)), clear_cache_btn]),
             sizing_mode="stretch_width",
             margin=(4, 8, 4, 4),
         )

@@ -345,6 +345,10 @@ class DataUIManager(DataProvider):
             "or any other string for a custom notice. Leave None to omit."
         ),
     )
+    show_permalink = param.Boolean(
+        default=False,
+        doc="Show the 'Permalink' button in the action bar. Set to False to hide it.",
+    )
 
     @classmethod
     def help(cls):
@@ -500,7 +504,11 @@ class DataUIManager(DataProvider):
             filename="catalog.csv",
             callback=download_catalog.callback,
         )
-        return [plot_button, download_button, permalink_button, download_catalog_button]
+        actions = [plot_button, download_button]
+        if self.show_permalink:
+            actions.append(permalink_button)
+        actions.append(download_catalog_button)
+        return actions
 
     def get_mobile_table_columns(self) -> list:
         """Return column names to display in the condensed mobile table.
