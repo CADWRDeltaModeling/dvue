@@ -155,6 +155,13 @@ class TimeSeriesDataUIManager(DataUIManager):
         default=True,
         doc="Show the 'Transform → Ref' button in the action bar. Set to False to hide it.",
     )
+    show_source_compare = param.Boolean(
+        default=False,
+        doc=(
+            "Show the 'Source Compare' action.  When True, the 'Transform → Ref' and "
+            "'Source Compare' actions are merged into a single 'Add to Catalog' MenuButton."
+        ),
+    )
     show_clear_cache = param.Boolean(
         default=True,
         doc="Show the 'Clear Cache' button in the action bar and transform panel. Set to False to hide it.",
@@ -328,7 +335,23 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="display",
                 callback=math_action.callback,
             ))
-        if self.show_transform_to_catalog:
+        if self.show_source_compare:
+            # Combine Transform→Ref and Source Compare under one MenuButton
+            from .actions import TransformToCatalogAction, SourceCompareAction
+            xform_action = TransformToCatalogAction()
+            compare_action = SourceCompareAction()
+            actions.append(dict(
+                name="Add to Catalog",
+                button_type="success",
+                icon="arrows-collapse",
+                action_type="menu",
+                items=["Transform → Ref", "Source Compare"],
+                callbacks={
+                    "Transform → Ref": xform_action.callback,
+                    "Source Compare": compare_action.callback,
+                },
+            ))
+        elif self.show_transform_to_catalog:
             from .actions import TransformToCatalogAction
             xform_action = TransformToCatalogAction()
             actions.append(dict(

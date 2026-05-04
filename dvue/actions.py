@@ -515,6 +515,9 @@ class TransformToCatalogAction:
             # Record the transform tag as a dedicated "tag" attribute.
             # This is the clean, domain-agnostic discriminator used in ref_key().
             inherited_attrs["tag"] = tag
+            # Mark source as "transform" so the catalog table column is non-blank
+            # and transform refs are easy to distinguish and filter.
+            inherited_attrs["source"] = "transform"
 
             # Build search_map criteria for x using the identity key attributes
             # so the YAML is both readable and portable.  Fall back to the
@@ -562,3 +565,343 @@ class TransformToCatalogAction:
                     duration=6000,
                 )
             logger.info("TransformToCatalogAction: added refs: %s", added_names)
+
+
+# ---------------------------------------------------------------------------
+# Source-compare helpers (pure functions — no Panel dependency, fully testable)
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_METADATA_COLUMNS = frozenset({"ref_type", "expression", "tag", "name"})
+
+
+def _sanitize_value(v: str) -> str:
+    """Sanitise a string the same way ``DataReference.ref_key()`` does."""
+    return _re.sub(r"[^a-zA-Z0-9]+", "_", str(v).strip()).strip("_")
+
+
+def _detect_varying_columns(dfselected: "pd.DataFrame", identity_cols: list) -> list:
+    """Return columns that are NOT in *identity_cols* and have >1 unique non-NaN value.
+
+    Parameters
+    ----------
+    dfselected : pd.DataFrame
+        Subset of the catalog DataFrame for the selected rows.
+    identity_cols : list of str
+        Columns that form the "identity" of a reference (station, parameter, …).
+
+    Returns
+    -------
+    list of str
+        Column names that vary across the selection and are candidates for the
+        "vary by" dimension (typically the source / filename).
+    """
+    exclude = set(identity_cols) | _METADATA_COLUMNS
+    varying = []
+    for col in dfselected.columns:
+        if col in exclude:
+            continue
+        unique_vals = dfselected[col].dropna().unique()
+        if len(unique_vals) > 1:
+            varying.append(col)
+    return varying
+
+
+def _group_by_identity(
+    dfselected: "pd.DataFrame",
+    identity_cols: list,
+    vary_by_col: str,
+) -> dict:
+    """Group selected rows by identity key, keyed by a tuple of identity values.
+
+    Parameters
+    ----------
+    dfselected : pd.DataFrame
+        Selected catalog rows.
+    identity_cols : list of str
+        Columns that form the identity key.  When empty, all columns except
+        *vary_by_col* and known metadata columns are used as the grouping key.
+    vary_by_col : str
+        The column whose variation we want to compare (excluded from grouping).
+
+    Returns
+    -------
+    dict
+        ``{identity_tuple: group_df}`` where *identity_tuple* is a tuple of
+        the values for each identity column.
+    """
+    if identity_cols:
+        group_cols = [c for c in identity_cols if c in dfselected.columns]
+    else:
+        group_cols = [
+            c for c in dfselected.columns
+            if c != vary_by_col and c not in _METADATA_COLUMNS
+        ]
+    if not group_cols:
+        return {(): dfselected}
+    groups = {}
+    for key, grp in dfselected.groupby(group_cols, dropna=False):
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        groups[key_tuple] = grp
+    return groups
+
+
+def _build_compare_name(identity_key_str: str, source_value: str, operation: str) -> str:
+    """Build the catalog name for a source-compare MathDataReference.
+
+    Parameters
+    ----------
+    identity_key_str : str
+        The pre-computed identity key string (from ``_base_key`` or similar).
+    source_value : str
+        The raw value of the "vary by" column for the non-base reference.
+    operation : str
+        ``"Diff"`` or ``"Ratio"``.
+
+    Returns
+    -------
+    str
+        Sanitised catalog name, e.g. ``"sac_flow__diff_model"`` or
+        ``"sac_flow__ratio_run2"``.
+    """
+    op_tag = "diff" if operation.lower() == "diff" else "ratio"
+    sanitized_source = _sanitize_value(source_value)
+    return f"{identity_key_str}__{op_tag}_{sanitized_source}"
+
+
+def _create_compare_refs(
+    manager,
+    catalog,
+    dfselected: "pd.DataFrame",
+    vary_by_col: str,
+    base_value,
+    operation: str,
+) -> int:
+    """Create and add cross-source diff/ratio MathDataReferences to *catalog*.
+
+    For every identity group in the selection that contains the *base_value*
+    row, creates one ``MathDataReference`` per non-base row:
+
+    * diff  → ``expression = "x - base"``
+    * ratio → ``expression = "x / base"``
+
+    Groups with no matching base row are silently skipped.
+
+    Parameters
+    ----------
+    manager :
+        The ``DataUIManager`` / ``TimeSeriesDataUIManager`` instance.
+    catalog :
+        The live ``DataCatalog``.
+    dfselected : pd.DataFrame
+        Selected catalog rows (with ``"name"`` column after ``reset_index``).
+    vary_by_col : str
+        The column that identifies the source dimension.
+    base_value :
+        The value of *vary_by_col* that is the subtrahend / divisor.
+    operation : str
+        ``"Diff"`` or ``"Ratio"``.
+
+    Returns
+    -------
+    int
+        Number of new references added to the catalog.
+    """
+    from .math_reference import MathDataReference
+
+    identity_cols = list(getattr(manager, "identity_key_columns", []) or [])
+    groups = _group_by_identity(dfselected, identity_cols, vary_by_col)
+    expression = "x - base" if operation.lower() == "diff" else "x / base"
+
+    def _is_nan(v):
+        return isinstance(v, float) and v != v
+
+    added = 0
+    for _key, grp in groups.items():
+        # Find the base row in this group
+        base_mask = grp[vary_by_col] == base_value
+        if not base_mask.any():
+            continue  # no base in this group — skip silently
+        base_row = grp[base_mask].iloc[0]
+        try:
+            base_ref = manager.get_data_reference(base_row)
+        except Exception as e:
+            logger.warning("SourceCompareAction: could not resolve base ref: %s", e)
+            continue
+
+        non_base_rows = grp[~base_mask]
+        for _, row in non_base_rows.iterrows():
+            try:
+                orig_ref = manager.get_data_reference(row)
+            except Exception as e:
+                logger.warning("SourceCompareAction: could not resolve ref: %s", e)
+                continue
+
+            # Build identity key string from the original ref
+            ident_key_str = TransformToCatalogAction._base_key(orig_ref, identity_cols)
+            source_val = row.get(vary_by_col, "")
+            new_name = _build_compare_name(ident_key_str, str(source_val), operation)
+
+            # Inherit non-source, non-NaN attributes from the original ref
+            inherited_attrs = {
+                k: v
+                for k, v in orig_ref.attributes.items()
+                if k not in ("source",) and not _is_nan(v)
+            }
+            op_tag = "diff" if operation.lower() == "diff" else "ratio"
+            sanitized_source = _sanitize_value(str(source_val))
+            inherited_attrs["tag"] = f"{op_tag}_{sanitized_source}"
+            # source = operation type so the table column is non-blank and filterable
+            inherited_attrs["source"] = op_tag
+            # compare_op / compare_source allow build_station_name to produce
+            # human-readable labels without parsing the tag string
+            inherited_attrs["compare_op"] = op_tag
+            inherited_attrs["compare_source"] = str(source_val)
+
+            new_ref = MathDataReference(
+                expression=expression,
+                name=new_name,
+                variable_map={"x": orig_ref, "base": base_ref},
+                cache=False,
+                **inherited_attrs,
+            )
+            new_ref.set_key_attributes((identity_cols or []) + ["tag"])
+
+            # Idempotent add
+            try:
+                catalog.remove(new_name)
+            except Exception:
+                pass
+            catalog.add(new_ref)
+            added += 1
+
+    return added
+
+
+class SourceCompareAction:
+    """Open a config form in the display area to generate cross-source diff/ratio refs.
+
+    When triggered, opens a tab in the display panel containing:
+
+    * A **Vary by** Select widget (auto-populated with columns that differ
+      across the selection and are not identity columns).
+    * A **Base source** Select widget (populated from unique values of the
+      chosen vary-by column; updates reactively).
+    * A **Diff / Ratio** RadioButtonGroup.
+    * A **Create** button that builds ``MathDataReference`` entries for every
+      non-base/base pair sharing the same identity key and adds them to the
+      live catalog.
+
+    Groups without a matching base row are skipped silently.
+    """
+
+    def callback(self, event, dataui):
+        manager = dataui._dataui_manager
+        catalog = getattr(manager, "data_catalog", None)
+
+        if catalog is None:
+            if pn.state.notifications is not None:
+                pn.state.notifications.warning(
+                    "No catalog attached — cannot create compare refs.", duration=4000
+                )
+            return
+
+        if not dataui.display_table.selection:
+            if pn.state.notifications is not None:
+                pn.state.notifications.warning(
+                    "Please select at least one row from the table.", duration=3000
+                )
+            return
+
+        dfselected = dataui._dfcat.iloc[dataui.display_table.selection].copy()
+        if "name" not in dfselected.columns:
+            dfselected = dfselected.reset_index()
+
+        identity_cols = list(getattr(manager, "identity_key_columns", []) or [])
+        varying_cols = _detect_varying_columns(dfselected, identity_cols)
+
+        if not varying_cols:
+            if pn.state.notifications is not None:
+                pn.state.notifications.warning(
+                    "No varying columns detected in the selection — all selected rows "
+                    "appear to come from the same source.",
+                    duration=5000,
+                )
+            return
+
+        # --- Build widgets ---
+        def _unique_values(col):
+            return [v for v in dfselected[col].dropna().unique().tolist()]
+
+        vary_by_select = pn.widgets.Select(
+            name="Vary by column",
+            options=varying_cols,
+            value=varying_cols[0],
+            width=200,
+        )
+        base_select = pn.widgets.Select(
+            name="Base source",
+            options=_unique_values(varying_cols[0]),
+            width=250,
+        )
+        operation_radio = pn.widgets.RadioButtonGroup(
+            name="Operation",
+            options=["Diff", "Ratio"],
+            value="Diff",
+            button_type="default",
+        )
+        create_btn = pn.widgets.Button(
+            name="Create",
+            button_type="success",
+            icon="arrows-collapse",
+            width=120,
+        )
+        status_pane = pn.pane.Markdown("", width=400)
+
+        # Reactively refresh base_select options when vary_by changes
+        def _update_base_options(event):
+            base_select.options = _unique_values(event.new)
+            if base_select.options:
+                base_select.value = base_select.options[0]
+
+        vary_by_select.param.watch(_update_base_options, "value")
+
+        # Create button handler — closes over the live widgets
+        def _on_create(evt):
+            try:
+                n = _create_compare_refs(
+                    manager=manager,
+                    catalog=catalog,
+                    dfselected=dfselected,
+                    vary_by_col=vary_by_select.value,
+                    base_value=base_select.value,
+                    operation=operation_radio.value,
+                )
+                if n:
+                    TransformToCatalogAction._refresh_table(dataui, manager)
+                    status_pane.object = f"**Created {n} reference(s).**"
+                    logger.info("SourceCompareAction: added %d refs", n)
+                else:
+                    status_pane.object = (
+                        "_No pairs found — check that the base value appears "
+                        "in each identity group._"
+                    )
+            except Exception as e:
+                logger.error("SourceCompareAction: error creating refs: %s", e)
+                status_pane.object = f"**Error:** {e}"
+
+        create_btn.on_click(_on_create)
+
+        form = pn.Column(
+            pn.pane.Markdown(
+                "### Source Compare\n"
+                "Select the column that distinguishes sources, choose the base, "
+                "then click **Create** to add diff/ratio references to the catalog."
+            ),
+            pn.Row(vary_by_select, base_select, operation_radio),
+            pn.Row(create_btn, status_pane),
+            sizing_mode="stretch_width",
+        )
+
+        dataui.show_in_display_panel("Source Compare", form)

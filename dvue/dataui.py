@@ -910,6 +910,25 @@ class DataUI(param.Parameterized):
                     icon=action["icon"],
                     embed=False,
                 )
+            elif action["action_type"] == "menu":
+                # MenuButton: each item maps to a named callback.
+                # ``event.new`` contains the selected item label.
+                button = pn.widgets.MenuButton(
+                    name=action["name"],
+                    items=action["items"],
+                    button_type=action["button_type"],
+                    icon=action.get("icon", ""),
+                )
+
+                def create_menu_handler(current_action):
+                    def on_click(event):
+                        cb = current_action["callbacks"].get(event.new)
+                        if cb is not None:
+                            cb(event, self)
+
+                    return on_click
+
+                button.on_click(create_menu_handler(action))
             else:
                 button = pn.widgets.Button(
                     name=action["name"],

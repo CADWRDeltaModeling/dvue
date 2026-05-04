@@ -10,6 +10,8 @@ from .actions import (
     PermalinkAction,
     DownloadDataAction,
     DownloadDataCatalogAction,
+    TransformToCatalogAction,
+    SourceCompareAction,
 )
 from .math_ref_editor import MathRefEditorAction
 from .fullscreen import FullScreen
@@ -44,6 +46,8 @@ __all__ = [
     "PermalinkAction",
     "DownloadDataAction",
     "DownloadDataCatalogAction",
+    "TransformToCatalogAction",
+    "SourceCompareAction",
     "MathRefEditorAction",
     "FullScreen",
     # DataReferenceReader hierarchy
