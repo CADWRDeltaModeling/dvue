@@ -834,9 +834,17 @@ class DataUI(param.Parameterized):
         idcol = self._station_id_column
         table = self.display_table
 
+        # Guard against stale indices from Selection1D when the map has been redrawn
+        # with fewer features (e.g. after a filter change or catalog rebuild).
+        map_df = self._map_features.dframe()
+        n_map = len(map_df)
+        index = [i for i in index if 0 <= i < n_map]
+        if not index:
+            return
+
         if idcol and idcol in self._dfcat.columns:
             # get station ids from the _map_features being displayed
-            stations_map_selected = self._map_features.dframe().iloc[index][idcol].unique()
+            stations_map_selected = map_df.iloc[index][idcol].unique()
             # get the stations selected in table already
             stations_table_selected = table.selected_dataframe[idcol].unique()
             # get stations in stations_map_selected that are not in stations_selected
@@ -853,19 +861,18 @@ class DataUI(param.Parameterized):
             ].index
 
             # Then convert to integer positions (iloc indices)
-            keep_selected_from_map = list(map(int, self._dfcat.index.get_indexer(matching_indices)))
-            i_selected_indices = list(
-                map(int, self._dfcat.index.get_indexer(current_view_selected_indices))
-            )
+            keep_selected_from_map = [i for i in map(int, self._dfcat.index.get_indexer(matching_indices)) if i >= 0]
+            i_selected_indices = [i for i in map(int, self._dfcat.index.get_indexer(current_view_selected_indices)) if i >= 0]
             selected_indices = i_selected_indices + list(keep_selected_from_map)
         else:
-            dfs = self._map_features.dframe().iloc[index]
+            dfs = map_df.iloc[index]
             merged_indices = (
                 self._dfcat.reset_index().merge(dfs)["index"].to_list()
             )  # index matching
-            geo_selected_indices = self._dfcat.index.get_indexer(
-                merged_indices
-            ).tolist()  # positional indices on table
+            geo_selected_indices = [
+                i for i in self._dfcat.index.get_indexer(merged_indices).tolist()
+                if i >= 0
+            ]  # positional indices on table; get_indexer returns -1 for unresolved items
             # Preserve currently-selected rows that have no map representation
             # (e.g. math refs with NaN geometry excluded from _map_features).
             # Without this guard, every map click silently deselects them.
