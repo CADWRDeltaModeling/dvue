@@ -130,7 +130,7 @@ TideGaugeCsvReader = TideGaugeCsvBuilder  # backward-compat alias
 
 
 tide_catalog = (
-    DataCatalog()
+    DataCatalog(primary_key=["name"])
     .add_builder(TideGaugeCsvBuilder(source_type="tide_gauge", project="delta_calibration"))
     .add_source(str(TIDE_DIR))
 )
@@ -181,7 +181,7 @@ HydroPatternReader = HydroPatternBuilder  # backward-compat alias
 
 
 hydro_catalog = (
-    DataCatalog()
+    DataCatalog(primary_key=["name"])
     .add_builder(HydroPatternBuilder(network="delta"))
     .add_source(str(HYDRO_DIR))
 )
@@ -246,7 +246,7 @@ model_outputs = {
 }
 
 model_catalog = (
-    DataCatalog()
+    DataCatalog(primary_key=["name"])
     .add_builder(ModelOutputBuilder())
     .add_source(model_outputs)
 )
@@ -272,7 +272,7 @@ for ref in model_catalog.list():
 DataCatalog.register_builder(ModelOutputBuilder())
 
 # Now an empty catalog can load model outputs without an explicit add_builder():
-quick_catalog = DataCatalog().add_source(model_outputs)
+quick_catalog = DataCatalog(primary_key=["name"]).add_source(model_outputs)
 print("\n── Global registry demo ──")
 print(quick_catalog)  # DataCatalog(2 references) – reader was found globally
 
@@ -283,7 +283,7 @@ print(quick_catalog)  # DataCatalog(2 references) – reader was found globally
 #
 # Approach A — manual iteration (always correct, most explicit):
 #   Collect every DataReference from each sub-catalog and add them one by one.
-unified = DataCatalog()
+unified = DataCatalog(primary_key=["name"])
 for cat in (tide_catalog, hydro_catalog, model_catalog):
     for ref in cat.list():
         unified.add(ref)
@@ -308,7 +308,7 @@ for name in sorted(unified.list_names()):
 #   • TideGaugeCsvReader  — added separately (same source type as hydro reader)
 #
 unified_b = (
-    DataCatalog()
+    DataCatalog(primary_key=["name"])
     .add_builder(HydroPatternBuilder(network="delta"))   # handles str/Path dirs
     .add_builder(ModelOutputBuilder())                   # handles dicts
     .add_source(str(HYDRO_DIR))                          # → HydroPatternBuilder
@@ -514,7 +514,7 @@ print(f"Written to: {MATH_REFS_FILE}")
 print(MATH_REFS_FILE.read_text())
 
 # Round-trip: build a fresh catalog with raw refs only, then load math refs.
-fresh_catalog = DataCatalog()
+fresh_catalog = DataCatalog(primary_key=["name"])
 for ref in unified.list():
     if not isinstance(ref, MathDataReference):
         fresh_catalog.add(ref)

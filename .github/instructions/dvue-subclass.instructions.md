@@ -1,5 +1,5 @@
 ---
-description: "Use when creating a subclass of dvue's TimeSeriesDataUIManager, DataUIManager, or DataUI. Covers required method overrides, initialization order, primary_key catalog patterns, source_num source discrimination, and NaN-safety for mixed catalogs. Relevant for any new data UI manager in pydelmod, schismviz, or downstream apps."
+description: "Use when creating a subclass of dvue's TimeSeriesDataUIManager, DataUIManager, or DataUI. Covers required method overrides, initialization order, primary_key catalog patterns, source_num source discrimination, and NaN-safety for mixed catalogs. Relevant for any new data UI manager in schismviz, dms_datastore_ui, or downstream apps."
 ---
 # dvue Subclassing Guide
 
@@ -187,6 +187,22 @@ class MyManager(TimeSeriesDataUIManager):
 - [ ] No `display_url_num` or `_apply_url_num()` usage
 - [ ] Math ref YAML criteria use `source_num:` not `url_num:`
 - [ ] Return `(df, unit_str, ptype_or_None)` from `get_data_for_time_range`
+- [ ] Primary key values used as station identifiers start with a letter (e.g. `"STA1"` not `"1"`) — values starting with a digit get a `_` prefix in auto-derived names
+
+## Finding Old API Usage (grep patterns)
+
+When migrating an existing subclass, scan for these patterns:
+
+```bash
+grep -rn "DataCatalog()" .                    # missing primary_key
+grep -rn "url_column\|url_num_column" .        # old super().__init__() args
+grep -rn "identity_key_columns" .              # old manager class param
+grep -rn "display_url_num\|_apply_url_num" .   # replaced by source_num in df.columns
+grep -rn "set_key_attributes\|ref_key()\|get_key_attributes" .  # removed from DataReference
+grep -rn "url_num:" .                          # old YAML search_map criteria
+```
+
+Every hit must be addressed before the migration is complete.
 
 ## References
 
@@ -195,4 +211,4 @@ class MyManager(TimeSeriesDataUIManager):
 - [dvue/dataui.py](../../dvue/dataui.py) — `DataUIManager` base
 - [dvue/catalog.py](../../dvue/catalog.py) — `DataCatalog`, `DataReference`, `MathDataReference`
 - [dvue/actions.py](../../dvue/actions.py) — `TimeSeriesPlotAction` and `TransformToCatalogAction`
-- Real subclass examples: `pydelmod/dssui.py`, `schismviz/schismui.py`
+- Real subclass example (fully migrated, in workspace): `schismviz/schismviz/schismui.py`

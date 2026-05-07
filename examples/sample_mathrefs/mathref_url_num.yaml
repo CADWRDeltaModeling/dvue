@@ -1,16 +1,18 @@
-# mathref_url_num.yaml
+# mathref_url_num.yaml — DEPRECATED
 #
-# Demonstrates url_num-based source discrimination.
+# WARNING: url_num is removed. Use source_num instead.
+# See mathref_source_num.yaml for the current equivalent.
+#
+# This file is retained only as a migration reference. The migration shim in
+# MathDataCatalogReader will load it with a DeprecationWarning, renaming
+# url_num → source_num automatically. Do NOT use this as a template for new
+# math ref YAML files — use mathref_source_num.yaml instead.
 #
 # When two or more files are loaded into the same catalog (e.g. a baseline
-# and a scenario run), dvue assigns each source an integer url_num (0, 1, …)
-# that is stored as dynamic metadata on every DataReference from that source.
-# Math ref search_map criteria can filter by url_num to pin a variable to a
-# specific file without needing a different attribute in the data itself.
-#
-# This is the cleanest alternative to match_all when you want positional
-# indexing across exactly two known sources: you get two named Series instead
-# of one DataFrame with unnamed columns, and the expression reads naturally.
+# and a scenario run), dvue assigns each source an integer source_num (0, 1, …)
+# auto-computed from catalog._source_index[ref.source].
+# Math ref search_map criteria filter by source_num to pin a variable to a
+# specific source without needing a different attribute in the data itself.
 #
 # File 0 = baseline run, file 1 = scenario run (same station / variable).
 
