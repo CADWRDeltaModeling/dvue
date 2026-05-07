@@ -51,9 +51,9 @@ from dvue import MathDataCatalogReader
 
 # %% -- [2] Station metadata and synthetic data generator ---------------------
 STATIONS = [
-    dict(station_id="1", station_name="Station A", lat=34.05, lon=-118.25),
-    dict(station_id="2", station_name="Station B", lat=36.16, lon=-115.15),
-    dict(station_id="3", station_name="Station C", lat=37.77, lon=-122.42),
+    dict(station_id="STA1", station_name="Station A", lat=34.05, lon=-118.25),
+    dict(station_id="STA2", station_name="Station B", lat=36.16, lon=-115.15),
+    dict(station_id="STA3", station_name="Station C", lat=37.77, lon=-122.42),
 ]
 
 VARIABLES = [
@@ -80,31 +80,10 @@ def create_smooth_tsdf(interval: str = "hourly", noise_scale: float = 1.0) -> pd
 
 
 class StationDataReference(DataReference):
-    """DataReference subclass for meteorological station data.
-
-    Overrides :meth:`~DataReference.ref_key` to produce a compact,
-    human-readable identifier from the three most meaningful attributes:
-    ``station_name``, ``variable``, and ``interval``.  Spaces in
-    ``station_name`` are replaced with underscores so the result is a valid
-    Python identifier suitable for use in :class:`MathDataReference`
-    expression strings.
-
-    Example::
-
-        ref.ref_key()  # "Station_A__wind_speed__hourly"
-    """
-    OVERRIDE_DEFAULT_DEF=False
-    def ref_key(self) -> str:
-        if (self.OVERRIDE_DEFAULT_DEF):
-            name = self.get_attribute("station_name", "").replace(" ", "_")
-            variable = self.get_attribute("variable", "")
-            interval = self.get_attribute("interval", "")
-            return f"{name}__{variable}__{interval}"
-        else:
-            return super().ref_key()
+    """DataReference subclass for meteorological station data."""
 
 
-catalog = DataCatalog()
+catalog = DataCatalog(primary_key=["station_id", "variable", "interval", "unit"])
 
 # -- 3a. Raw DataReference objects --------------------------------------------
 #
@@ -128,8 +107,6 @@ for stn in STATIONS:
                 max_year="2021",
                 geometry=geom,
             )
-            ref.set_key_attributes(["station_id", "variable", "interval", "unit"])  # for ref_key()
-            ref.name = ref.ref_key()
             catalog.add(ref)
 
 
@@ -329,7 +306,7 @@ MATH_REFS_SEARCH_MAP_FILE = Path(__file__).parent / "data" / "math_refs_search_m
 
 # Catalog starts with raw refs only.  Math refs are loaded on demand via the
 # "Math Ref" editor action -- use "Load from YAML" to populate from either file.
-catalog_from_yaml = DataCatalog()
+catalog_from_yaml = DataCatalog(primary_key=["station_id", "variable", "interval", "unit"])
 for ref in catalog.list():
     catalog_from_yaml.add(ref)
 

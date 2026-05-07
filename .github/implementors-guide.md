@@ -14,14 +14,14 @@ When a `DataCatalog` contains both `DataReference` (raw) and `MathDataReference`
 - **Always guard against NaN** before building a catalog key or passing to path utilities:
   ```python
   def get_data_reference(self, row):
-      url = row.get("url", None)        # or "filename"
-      if pd.isna(url):
+      source = row.get("source", None)
+      if pd.isna(source):
           return catalog.get(row["name"])   # math ref → name lookup
-      return catalog.get(self.build_ref_key(row))
+      return catalog.get(row["name"])       # raw ref — name is always reliable
   ```
 - `get_unique_short_names()` raises `TypeError` on NaN paths. Filter first:
   ```python
-  valid = [f for f in df[manager.url_column].unique() if not pd.isna(f)]
+  valid = [s for s in df["source"].unique() if not pd.isna(s)]
   short_names = get_unique_short_names(valid)
   ```
 - When reading selected rows from the display table, use `dataui._dfcat.iloc[selection]`
@@ -30,30 +30,67 @@ When a `DataCatalog` contains both `DataReference` (raw) and `MathDataReference`
 
 ---
 
-## 2. url_column / url_num — Source Discrimination
+## 2. source_num / primary_key — Source Discrimination
 
-`TimeSeriesDataUIManager` uses `url_column` (default `"url"`) to identify which catalog
-column holds the source URL/filepath, and injects a `url_num` integer discriminator
-when multiple sources are loaded.
+`DataCatalog` tracks source identity via a `_source_index` dict: each unique non-empty
+`ref.source` value is assigned an integer (0, 1, 2 …) in order of first `add()`.
+`source_num` is **never stored on the ref** — it is computed by the catalog on demand.
 
-| Attribute | Purpose |
-|-----------|---------|
-| `url_column` | Name of the catalog column holding the source URL (subclass-controlled; e.g. `"filename"`, `"source"`) |
-| `url_num_column` | Name of the injected integer column (default `"url_num"`) |
-| `display_url_num` | Set to `True` when >1 unique URL is present |
+`to_dataframe()` injects a `source_num` column **only when** `len(_source_index) > 1`.
+Single-source catalogs have no `source_num` column and no `s{n}_` name prefix.
 
-`_apply_url_num(df, catalog=None)` is called on every `get_data_catalog()` rebuild.
-When `catalog` is provided it also calls `ref.set_dynamic_metadata("url", ...)` and
-`ref.set_dynamic_metadata("url_num", ...)` on each ref, making them available to
-`catalog.search()` and math ref `search_map`.
-
-**Subclass pattern** (pass the correct column name to `super().__init__`):
+Subclasses check multi-source state with:
 ```python
-super().__init__(url_column="filename", **kwargs)   # or "source", etc.
+if "source_num" in df.columns:   # True only for multi-source catalogs
+    ...
 ```
 
-**Never reset `display_url_num = False` after `super().__init__()`** — the base class
-sets it correctly inside `_apply_url_num`.
+There are **no** `url_column`, `url_num_column`, `display_url_num`, or `_apply_url_num()`
+concepts — these have been removed entirely.
+
+### Declaring the primary key
+
+`primary_key` is required at `DataCatalog()` construction:
+
+```python
+# Single-source catalog
+catalog = DataCatalog(primary_key=["station", "variable"])
+
+# Multi-source catalog — include "source_num" as first pk column
+catalog = DataCatalog(primary_key=["source_num", "station", "variable"])
+```
+
+`primary_key` controls:
+- **Uniqueness**: `ValueError` on duplicate pk-tuple
+- **Auto-naming**: refs with no explicit `name` get a name derived from their pk values
+  (e.g. `station="RSAC054", variable="FLOW"` → `"RSAC054_FLOW"`)
+- **`source_num` prefix**: included in derived names when catalog is multi-source
+- **Keyword lookup**: `catalog.get(station="A", variable="discharge")`
+
+### Auto-naming and sanitisation
+
+When a ref is added without an explicit `name`, the catalog derives one:
+
+```
+[s{source_num}_]{pk_value_1}_{pk_value_2}_…
+```
+
+Values are sanitised: non-alphanumeric runs collapsed to `_`; leading digit prefixed with `_`.
+Explicit `name=` always overrides auto-derivation.
+
+### Math ref search_map
+
+Use `source_num:` (integer) in YAML search criteria — not `url_num:`:
+
+```yaml
+search_map:
+  x:
+    variable: flow
+    source_num: 0   # only refs from the first loaded source
+```
+
+A migration shim in `MathDataCatalogReader` reads old `url_num` keys as `source_num`
+and emits a `DeprecationWarning`.
 
 ---
 
@@ -62,32 +99,34 @@ sets it correctly inside `_apply_url_num`.
 `matches(**criteria)` checks `_attributes` first, then falls back to `_dynamic_metadata`
 for any key not present in `_attributes`. Static attributes always win on conflict.
 
-This means math ref `search_map` criteria can include `url_num` to pin a variable to
-a specific source file — but only after `_apply_url_num` has been called:
+Math ref `search_map` criteria can include `source_num` to pin a variable to a specific
+source file. `source_num` is a special catalog-level key — `catalog.search(source_num=0)`
+resolves via `_source_index`, not dynamic metadata:
 
 ```yaml
 search_map:
   x:
     variable: flow
-    url_num: 0    # ← only refs from the first loaded file
+    source_num: 0    # only refs from the first loaded file
 ```
-
-Inject dynamic metadata via `ref.set_dynamic_metadata(key, value)`. Read it back with
-`ref.get_dynamic_metadata(key, default=None)`.
 
 ### Type coercion in matches()
 
 The math ref editor's search map text input always produces **string values** (e.g.
-`url_num=0` becomes the string `'0'`). `matches()` handles this automatically: when
+`source_num=0` becomes the string `'0'`). `matches()` handles this automatically: when
 `actual != expected` and their types differ, it attempts `type(actual)(expected)` before
 returning `False`.
 
-- `url_num=0` (int in dynamic metadata) matched with `'0'` (string from editor) → `int('0') == 0` ✓
+- `source_num=0` (int from `_source_index`) matched with `'0'` (string from editor) → `int('0') == 0` ✓
 - `geoid='437'` (string attribute) matched with `437` (int) → `str(437) == '437'` ✓
 
 **Do not coerce values in the parser** (`_parse_search_map`). Type coercion belongs
 exclusively in `matches()` so the logic is in one place and both typed (YAML-loaded)
 and untyped (editor text) criteria work without special handling.
+
+Note: `source_num` is handled as a special keyword in `catalog.search()` (not via
+`matches()` on individual refs) — the catalog resolves it via `_source_index` before
+the per-ref attribute check.
 
 ---
 
@@ -202,23 +241,25 @@ Use `TimeSeriesDataUIManager._has_mixed_ref_types(df)` to check.
 - Always add regression tests for any bug that surfaces at the UI level. The test should
   reproduce the exact failure path (e.g. `_resolve_variables()` raising `IndexError`) so
   it cannot silently regress.
-- `TestUrlNumSearchable.test_math_ref_search_map_filters_by_url_num` is the canonical
-  integration test for the full `url_num → dynamic metadata → search → resolve` pipeline.
+- `TestSourceNumSearchable.test_math_ref_search_map_filters_by_source_num` is the canonical
+  integration test for the full `source_num → catalog.search → resolve` pipeline.
 
 ---
 
-## 10. Downstream Subclass Checklist (e.g. dsm2ui)
+## 10. Downstream Subclass Checklist (e.g. schismviz, dms_datastore_ui)
 
-When updating a `TimeSeriesDataUIManager` subclass for a breaking dvue change:
+When updating a `TimeSeriesDataUIManager` subclass for the `primary_key` / `source_num` redesign:
 
 | Item | Check |
 |------|-------|
-| `super().__init__()` kwargs use current names (`url_column=`, not `filename_column=`) | |
-| `build_station_name()` uses `display_url_num` not `display_fileno` | |
+| `DataCatalog(primary_key=[...])` declared in `_build_catalog()` | |
+| `super().__init__()` has **no** `url_column` or `url_num_column` kwargs | |
+| `display_url_num` replaced with `"source_num" in df.columns` | |
 | Row lookups use `dataui._dfcat.iloc[selection]` | |
-| Math ref rows guarded with `pd.isna(url)` before key construction | |
-| No local `display_url_num = False` after `super().__init__()` | |
-| `get_data_reference()` handles NaN url (math refs) | |
+| Math ref NaN guard uses `pd.isna(row.get("source"))` (not `filename`/`url`) | |
+| No `_apply_url_num()` call anywhere in the subclass | |
+| `get_data_reference()` uses `row["name"]` (always safe) | |
+| Math ref YAML criteria use `source_num:` not `url_num:` | |
 
 ---
 

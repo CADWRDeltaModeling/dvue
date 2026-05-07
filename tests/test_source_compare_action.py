@@ -165,10 +165,12 @@ class TestBuildCompareName:
 class _FakeManager:
     """Minimal manager stub for _create_compare_refs tests."""
 
-    identity_key_columns = ["station", "variable"]
-
     def __init__(self, catalog):
         self._catalog = catalog
+
+    @property
+    def data_catalog(self):
+        return self._catalog
 
     def get_data_reference(self, row):
         return self._catalog.get(row["name"])
@@ -176,12 +178,11 @@ class _FakeManager:
 
 def _build_catalog_with_sources():
     """Two stations × two sources — 4 raw refs in total."""
-    catalog = DataCatalog()
+    catalog = DataCatalog(primary_key=["station", "variable", "source"])
     for station in ("A", "B"):
         for source in ("obs", "model"):
             name = f"{station}_flow_{source}"
             ref = _make_ref(name=name, station=station, variable="flow", source=source)
-            ref.set_key_attributes(["station", "variable"])
             catalog.add(ref)
     return catalog
 
@@ -271,7 +272,6 @@ class TestCreateCompareRefs:
         catalog = _build_catalog_with_sources()
         # Add a ref that has no pair
         lone = _make_ref(name="C_flow_obs", station="C", variable="flow", source="obs")
-        lone.set_key_attributes(["station", "variable"])
         catalog.add(lone)
 
         dfselected = _build_dfselected(catalog)
@@ -317,11 +317,9 @@ class TestCreateCompareRefs:
 
     def test_diff_data_values(self):
         """getData() on a diff ref should return model - obs element-wise."""
-        catalog = DataCatalog()
+        catalog = DataCatalog(primary_key=["station", "variable", "source"])
         ref_obs = _make_ref("A_flow_obs", station="A", variable="flow", source="obs", data_value=10.0)
-        ref_obs.set_key_attributes(["station", "variable"])
         ref_model = _make_ref("A_flow_model", station="A", variable="flow", source="model", data_value=15.0)
-        ref_model.set_key_attributes(["station", "variable"])
         catalog.add(ref_obs)
         catalog.add(ref_model)
 
@@ -342,11 +340,9 @@ class TestCreateCompareRefs:
 
     def test_ratio_data_values(self):
         """getData() on a ratio ref should return model / obs element-wise."""
-        catalog = DataCatalog()
+        catalog = DataCatalog(primary_key=["station", "variable", "source"])
         ref_obs = _make_ref("A_flow_obs", station="A", variable="flow", source="obs", data_value=4.0)
-        ref_obs.set_key_attributes(["station", "variable"])
         ref_model = _make_ref("A_flow_model", station="A", variable="flow", source="model", data_value=12.0)
-        ref_model.set_key_attributes(["station", "variable"])
         catalog.add(ref_obs)
         catalog.add(ref_model)
 

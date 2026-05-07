@@ -360,37 +360,28 @@ class TransformToCatalogAction:
         return expr, tag
 
     @staticmethod
-    def _identity_key_columns(orig_ref, manager) -> list:
-        """Return the identity attribute names to use for naming.
+    def _build_ref_name(orig_ref, tag: str, manager) -> str:
+        """Build a clean, short catalog key for the derived MathDataReference.
 
-        Fallback chain (first non-empty wins):
+        Format: ``[s{source_num}_]{pk_values}__{tag}``
 
-        1. ``orig_ref._key_attributes`` — explicitly set on the ref by its
-           catalog builder (the preferred, per-ref approach).
-        2. ``manager.identity_key_columns`` — manager-level bridge for managers
-           that haven’t yet adopted per-ref ``set_key_attributes()``.
-        3. Empty list — caller falls back to full ``ref_key()`` (all attrs).
-        """
-        if orig_ref._key_attributes is not None:
-            return list(orig_ref._key_attributes)
-        cols = getattr(manager, "identity_key_columns", [])
-        if cols:
-            return list(cols)
-        return []
-
-    @staticmethod
-    def _base_key(orig_ref, identity_cols: list) -> str:
-        """Return a short sanitised identity key for *orig_ref*.
-
-        If *identity_cols* is non-empty, compute ``ref_key()`` using only
-        those columns — without mutating the original ref’s own
-        ``_key_attributes``.
+        The ``s{n}_`` prefix is added only when the catalog has multiple
+        sources (``len(catalog._source_index) > 1``).  ``pk_values`` are
+        the primary_key column values (excluding ``source_num`` and ``name``)
+        joined with ``_``.
         """
         import re
-        if identity_cols:
-            # Compute ref_key using only the chosen columns, non-destructively.
-            parts = []
-            for col in identity_cols:
+        catalog = getattr(manager, "data_catalog", None)
+        parts = []
+        if catalog is not None:
+            pk = catalog.primary_key
+            if "source_num" in pk and len(catalog._source_index) > 1:
+                snum = catalog._source_index.get(orig_ref.source)
+                if snum is not None:
+                    parts.append(f"s{snum}")
+            for col in pk:
+                if col in ("source_num", "name"):
+                    continue
                 val = orig_ref.get_attribute(col)
                 if val is None:
                     val = orig_ref.get_dynamic_metadata(col)
@@ -401,33 +392,13 @@ class TransformToCatalogAction:
                 sanitized = re.sub(r"[^a-zA-Z0-9]+", "_", str(val).strip()).strip("_")
                 if sanitized:
                     parts.append(sanitized)
-            return "_".join(parts)
-        # Full ref_key() — may be verbose if set_key_attributes was not called
-        return orig_ref.ref_key()
-
-    @staticmethod
-    def _build_ref_name(orig_ref, tag: str, manager) -> str:
-        """Build a clean, short catalog key for the derived MathDataReference.
-
-        Format: ``[f{url_num}_]{identity_key}__{tag}``
-
-        The file prefix ``f{n}_`` is added only when the catalog contains
-        multiple source files (``manager.display_url_num`` is ``True``),
-        using the ``url_num`` dynamic metadata on the original ref.
-        """
-        import re
-        identity_cols = TransformToCatalogAction._identity_key_columns(orig_ref, manager)
-        base = TransformToCatalogAction._base_key(orig_ref, identity_cols)
-
-        # File prefix — only when multiple source files exist
-        prefix = ""
-        if getattr(manager, "display_url_num", False):
-            url_num = orig_ref.get_dynamic_metadata("url_num")
-            if url_num is not None:
-                prefix = f"f{url_num}_"
-
-        raw = f"{prefix}{base}__{tag}" if tag else f"{prefix}{base}"
-        # Keep alphanumeric, underscores, and dots; collapse everything else to _
+        else:
+            parts.append(orig_ref.name)
+        # Fallback: if no pk values were found, use the ref's own name.
+        if not parts:
+            parts.append(orig_ref.name)
+        base = "_".join(parts)
+        raw = f"{base}__{tag}" if tag else base
         return re.sub(r"[^a-zA-Z0-9_.]", "_", raw)
 
     # ------------------------------------------------------------------
@@ -519,13 +490,12 @@ class TransformToCatalogAction:
             # and transform refs are easy to distinguish and filter.
             inherited_attrs["source"] = "transform"
 
-            # Build search_map criteria for x using the identity key attributes
-            # so the YAML is both readable and portable.  Fall back to the
-            # catalog name only when no identity columns are known.
-            identity_cols = self._identity_key_columns(orig_ref, manager)
-            if identity_cols:
+            # Build search_map criteria for x using the catalog's primary_key columns.
+            # Fall back to the catalog name only when no primary_key is set.
+            pk_cols = [c for c in catalog.primary_key if c not in ("source_num", "name")]
+            if pk_cols:
                 x_criteria = {}
-                for col in identity_cols:
+                for col in pk_cols:
                     val = orig_ref.get_attribute(col)
                     if val is None:
                         val = orig_ref.get_dynamic_metadata(col)
@@ -533,6 +503,10 @@ class TransformToCatalogAction:
                         x_criteria[col] = val
             else:
                 x_criteria = {"name": orig_ref.name}
+            if len(catalog._source_index) > 1:
+                snum = catalog._source_index.get(orig_ref.source)
+                if snum is not None:
+                    x_criteria["source_num"] = snum
 
             new_ref = MathDataReference(
                 expression=expr,
@@ -542,11 +516,6 @@ class TransformToCatalogAction:
                 **inherited_attrs,
             )
             new_ref.set_catalog(catalog)
-
-            # Set key attributes: identity cols + "tag" so ref_key() on the
-            # new math ref is clean and includes the transform signature.
-            # Always set even when identity_cols is empty so "tag" is in the key.
-            new_ref.set_key_attributes((identity_cols or []) + ["tag"])
 
             # Remove any existing entry with same name so update is idempotent
             try:
@@ -710,7 +679,9 @@ def _create_compare_refs(
     """
     from .math_reference import MathDataReference
 
-    identity_cols = list(getattr(manager, "identity_key_columns", []) or [])
+    catalog = getattr(manager, "data_catalog", None)
+    identity_cols = [c for c in (catalog.primary_key if catalog is not None else [])
+                     if c not in ("source_num", "name", vary_by_col)]
     groups = _group_by_identity(dfselected, identity_cols, vary_by_col)
     expression = "x - base" if operation.lower() == "diff" else "x / base"
 
@@ -738,8 +709,21 @@ def _create_compare_refs(
                 logger.warning("SourceCompareAction: could not resolve ref: %s", e)
                 continue
 
-            # Build identity key string from the original ref
-            ident_key_str = TransformToCatalogAction._base_key(orig_ref, identity_cols)
+            # Build identity key string from the primary_key columns
+            import re as _re2
+            _pk_parts = []
+            for _col in identity_cols:
+                _val = orig_ref.get_attribute(_col)
+                if _val is None:
+                    _val = orig_ref.get_dynamic_metadata(_col)
+                if not isinstance(_val, (str, int, float, bool)):
+                    continue
+                if isinstance(_val, float) and _val != _val:
+                    continue
+                _s = _re2.sub(r"[^a-zA-Z0-9]+", "_", str(_val).strip()).strip("_")
+                if _s:
+                    _pk_parts.append(_s)
+            ident_key_str = "_".join(_pk_parts) if _pk_parts else orig_ref.name
             source_val = row.get(vary_by_col, "")
             new_name = _build_compare_name(ident_key_str, str(source_val), operation)
 
@@ -766,8 +750,6 @@ def _create_compare_refs(
                 cache=False,
                 **inherited_attrs,
             )
-            new_ref.set_key_attributes((identity_cols or []) + ["tag"])
-
             # Idempotent add
             try:
                 catalog.remove(new_name)
@@ -818,7 +800,9 @@ class SourceCompareAction:
         if "name" not in dfselected.columns:
             dfselected = dfselected.reset_index()
 
-        identity_cols = list(getattr(manager, "identity_key_columns", []) or [])
+        catalog = getattr(manager, "data_catalog", None)
+        identity_cols = [c for c in (catalog.primary_key if catalog is not None else [])
+                         if c not in ("source_num", "name")]
         varying_cols = _detect_varying_columns(dfselected, identity_cols)
 
         if not varying_cols:

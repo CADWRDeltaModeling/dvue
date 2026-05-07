@@ -739,6 +739,16 @@ class MathDataCatalogReader(CatalogBuilder):
                     criteria = dict(criteria)
                     match_all = criteria.pop("match_all", False)
                     search_require_single[var] = not bool(match_all)
+                    # Migration shim: url_num was renamed to source_num.
+                    if "url_num" in criteria:
+                        import warnings
+                        warnings.warn(
+                            "url_num in search_map criteria is deprecated; "
+                            "use source_num instead.",
+                            DeprecationWarning,
+                            stacklevel=4,
+                        )
+                        criteria["source_num"] = criteria.pop("url_num")
                     cleaned[var] = criteria
                 search_map_raw = cleaned
 

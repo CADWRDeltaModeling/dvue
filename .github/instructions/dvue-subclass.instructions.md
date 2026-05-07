@@ -1,5 +1,5 @@
 ---
-description: "Use when creating a subclass of dvue's TimeSeriesDataUIManager, DataUIManager, or DataUI. Covers required method overrides, initialization order, catalog patterns, identity_key_columns, and NaN-safety for mixed catalogs. Relevant for any new data UI manager in pydelmod, schismviz, or downstream apps."
+description: "Use when creating a subclass of dvue's TimeSeriesDataUIManager, DataUIManager, or DataUI. Covers required method overrides, initialization order, primary_key catalog patterns, source_num source discrimination, and NaN-safety for mixed catalogs. Relevant for any new data UI manager in pydelmod, schismviz, or downstream apps."
 ---
 # dvue Subclassing Guide
 
@@ -17,17 +17,24 @@ Always follow this order — violations cause param errors or empty UI:
 
 ```python
 class MyManager(TimeSeriesDataUIManager):
-    identity_key_columns = param.List(default=["station", "variable"])
 
     def __init__(self, *data_files, **kwargs):
         self._data_files = data_files
-        self._build_catalog()                     # 1. Build internal state
-        super().__init__(url_column="filename",   # 2. Call super (triggers get_data_catalog,
-                         url_num_column="url_num",  #    get_time_range, populates params)
-                         **kwargs)
-        self.color_cycle_column = "variable"      # 3. Set param defaults AFTER super()
+        self._build_catalog()          # 1. Build catalog with primary_key declared
+        super().__init__(**kwargs)     # 2. Call super — NO url_column/url_num_column args
+        self.color_cycle_column = "variable"     # 3. Set param defaults AFTER super()
         self.dashed_line_cycle_column = "source"
         self.marker_cycle_column = "station"
+
+    def _build_catalog(self):
+        # Declare primary_key at construction — required
+        self._dvue_catalog = DataCatalog(primary_key=["station", "variable"])
+        # For multi-source (multiple files/URLs):
+        # self._dvue_catalog = DataCatalog(primary_key=["source_num", "station", "variable"])
+        for ...
+            self._dvue_catalog.add(
+                DataReference(source=path, reader=MyReader, station=s, variable=v)
+            )  # name auto-derived from pk values; source_num auto-computed
 ```
 
 ## Required Method Overrides
@@ -63,22 +70,22 @@ def get_name_to_marker(self) -> dict: ...
 
 ```python
 def _build_catalog(self):
-    self._dvue_catalog = DataCatalog()
-    for ...:
-        self._dvue_catalog.add(DataReference(reader=MyReader(...), name=ref_name, **attrs))
+    self._dvue_catalog = DataCatalog(primary_key=["station", "variable"])
+    for ...
+        self._dvue_catalog.add(
+            DataReference(source=path, reader=MyReader, station=s, variable=v)
+        )  # name auto-derived, e.g. "StationA_discharge"
 
 @property
 def data_catalog(self) -> DataCatalog:
     return self._dvue_catalog
 
 def get_data_catalog(self) -> pd.DataFrame:
-    return super().get_data_catalog()  # Delegates to DataCatalog.to_dataframe()
+    return super().get_data_catalog()  # delegates to DataCatalog.to_dataframe()
 
 def get_data_reference(self, row: pd.Series) -> DataReference:
-    # Guard against NaN for mixed catalogs — see NaN Safety below
-    if "name" in row.index and not pd.isna(row.get("name")):
-        return self._dvue_catalog.get(row["name"])
-    return self._dvue_catalog.get(f"{row['filename']}::{row['station']}")
+    # name is always set; works for both raw and math refs
+    return self._dvue_catalog.get(row["name"])
 ```
 
 ### Pattern B — plain DataFrame (simpler, legacy)
@@ -93,43 +100,50 @@ def get_data_for_time_range(self, row, time_range):
     return df, row["unit"], None  # (DataFrame, unit_str, ptype or None)
 ```
 
-## Identity Key Columns (for Transform → Catalog names)
+## Primary Key (replaces identity_key_columns and set_key_attributes)
 
-Set `identity_key_columns` so `TransformToCatalogAction` generates readable short names:
-
-```python
-class MyManager(TimeSeriesDataUIManager):
-    identity_key_columns = param.List(default=["station", "variable"])
-```
-
-Or per-reference (takes precedence over manager-level param):
+Declare `primary_key` at `DataCatalog()` construction — not on the manager class:
 
 ```python
-ref.set_key_attributes(["station", "variable"])
+def _build_catalog(self):
+    # Single-source catalog
+    self._dvue_catalog = DataCatalog(primary_key=["station", "variable"])
+    # Multi-source catalog (source_num auto-computed from ref.source)
+    self._dvue_catalog = DataCatalog(primary_key=["source_num", "station", "variable"])
 ```
 
-Without this, the full `ref_key()` is used as the name — always valid but verbose.
+`primary_key` is required at `DataCatalog()` construction. It controls:
+- Uniqueness enforcement (`ValueError` on duplicate pk-tuple)
+- Auto-naming of refs when `name=""` is not provided (e.g. `"StationA_discharge"` or `"s0_StationA_discharge"`)
+- `source_num` prefix in `TransformToCatalogAction` derived names
+- `catalog.get(station="A", variable="discharge")` keyword lookup
+
+`source_num` (0, 1, 2…) is auto-computed by the catalog from `ref.source` values;
+it is **not** a stored attribute on the ref and does not need to be set manually.
 
 ## NaN Safety for Mixed Catalogs
 
-When the catalog contains both raw `DataReference` and `MathDataReference` rows, file/source columns are `NaN` for math rows. Two required guards:
+When the catalog contains both raw `DataReference` and `MathDataReference` rows,
+the `source` column is `NaN` for math ref rows. One required guard:
 
 **In `get_data_reference`:**
 ```python
 def get_data_reference(self, row):
-    filename = row.get("filename", None)
-    if pd.isna(filename):
-        return self._dvue_catalog.get(row["name"])
-    return self._dvue_catalog.get(self._build_ref_key(row))
+    # row["name"] is always set (auto-derived or explicit) for both raw and math refs
+    return self._dvue_catalog.get(row["name"])
 ```
 
-**In any code using `get_unique_short_names` (file indexing):**
+If you need source-based logic elsewhere (e.g. plot labels), check `pd.isna(row.get("source"))`
+before using the source value.
+
+**In any code using `get_unique_short_names` (file labelling in plots):**
 ```python
-valid_files = [f for f in df["filename"].unique() if not pd.isna(f)]
-short_names = get_unique_short_names(valid_files)
+if "source_num" in df.columns:
+    valid_sources = [s for s in df["source"].unique() if not pd.isna(s)]
+    short_names = get_unique_short_names(valid_sources)
 ```
 
-Skipping either guard raises `KeyError: "No DataReference named 'nan::...'"` or `TypeError` from `os.path.normpath(NaN)`.
+Skipping the NaN filter raises `TypeError` from `os.path.normpath(NaN)`.
 
 ## Key Visual Styling Params
 
@@ -141,7 +155,6 @@ Set after `super().__init__()`:
 | `dashed_line_cycle_column` | Dash patterns |
 | `marker_cycle_column` | Marker shapes |
 | `plot_group_by_column` | Plot grouping (None = group by unit) |
-| `identity_key_columns` | TransformToCatalogAction naming |
 
 ## Custom Plot Action
 
@@ -164,11 +177,15 @@ class MyManager(TimeSeriesDataUIManager):
 
 - [ ] Subclass `TimeSeriesDataUIManager` (not `DataUIManager` for time-series)
 - [ ] Build catalog **before** `super().__init__()`
+- [ ] `_build_catalog()` constructs `DataCatalog(primary_key=[...])`
+- [ ] `super().__init__()` has **no** `url_column` or `url_num_column` arguments
 - [ ] Set `color_cycle_column` etc. **after** `super().__init__()`
 - [ ] Implement all abstract methods
 - [ ] Choose Pattern A (DataCatalog) or Pattern B (plain DataFrame) — not both
-- [ ] Set `identity_key_columns` for readable TransformToCatalog names
-- [ ] Add NaN guards in `get_data_reference` if supporting math references
+- [ ] `get_data_reference()` uses `row["name"]` (always reliable)
+- [ ] NaN source guard uses `row.get("source")` not `row.get("filename")`
+- [ ] No `display_url_num` or `_apply_url_num()` usage
+- [ ] Math ref YAML criteria use `source_num:` not `url_num:`
 - [ ] Return `(df, unit_str, ptype_or_None)` from `get_data_for_time_range`
 
 ## References

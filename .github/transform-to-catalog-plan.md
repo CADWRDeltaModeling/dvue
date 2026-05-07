@@ -59,38 +59,39 @@ Multiple active transforms are joined with `_`:
 
 ---
 
-## Name Format
+> ⚠️ **SUPERSEDED**: The naming logic in Phase 5 (`identity_key_columns`,
+> `set_key_attributes()`, `url_num`) has been replaced by the `primary_key` +
+> `source_num` redesign. The transform tag table and `__` separator remain unchanged;
+> the source of the identity key and the file prefix have changed. See the updated
+> Name Format below and `AGENTS.md` for the full migration guide.
+
+## Name Format (current)
+
+```
+[s{source_num}_]{pk_values}__{tag}
+```
+
+| Part | When present | Source |
+|---|---|---|
+| `s{source_num}_` | Multi-source catalog (`len(catalog._source_index) > 1`) | `catalog._source_index[orig_ref.source]` |
+| `{pk_values}` | Always | Values of `catalog.primary_key` cols (excluding `source_num`), joined `_`, sanitised |
+| `__{tag}` | At least one active transform | From `_build_expression_and_tag()` |
+
+Examples:
+- Single-source catalog, `primary_key=["station","variable"]`, station=`RSAC054`, variable=`FLOW` → `RSAC054_FLOW__1D_mean`
+- Multi-source catalog, `primary_key=["source_num","station","variable"]`, source_num=1 → `s1_RSAC054_FLOW__1D_mean`
+
+## Name Format (superseded — Phase 5 original)
 
 ```
 [f{url_num}_]{identity_key}__{tag}
 ```
 
-| Part | When present | Source |
+| Part | When present | Source (old) |
 |---|---|---|
 | `f{url_num}_` | Multi-file catalog (`display_url_num=True`) | `orig_ref.get_dynamic_metadata("url_num")` |
-| `{identity_key}` | Always | See priority chain below |
+| `{identity_key}` | Always | `orig_ref._key_attributes` or `manager.identity_key_columns` or `ref_key()` |
 | `__{tag}` | At least one active transform | From `_build_expression_and_tag()` |
-
-### Identity key priority chain
-
-1. **`orig_ref._key_attributes` is not None** (set via `orig_ref.set_key_attributes([...])`)
-   — the ref itself advertises which attributes form its identity. Use those.
-2. **`manager.identity_key_columns` non-empty** (set on the manager instance)
-   — the manager knows what columns are the identity for this catalog's ref type.
-   Use those columns to read values from the original ref.
-3. **Fallback** — neither source available. Use `orig_ref.ref_key()` (verbose but safe).
-
-Examples:
-- DSS ref with `B="RSAC054"`, `C="FLOW"`, `identity_key_columns=["B","C"]` → `RSAC054_FLOW`
-- Ref with `set_key_attributes(["station","variable"])` → `{station}_{variable}`
-- No identity info → full `ref_key()` (all non-source attrs joined with `_`)
-
-### Key attributes on the new MathDataReference
-
-After building the name, the callback also calls
-`new_ref.set_key_attributes(identity_cols + ["F"])` (or `["transform"]` when no `F`)
-so that the math ref's own `ref_key()` returns the same clean short form, and
-`expression` does not leak into its key.
 
 ---
 
@@ -126,20 +127,19 @@ so that the math ref's own `ref_key()` returns the same clean short form, and
    the cosine-Lanczos filter on already-daily data, the `>= 1D` guard would silently skip
    the filter. Always apply the filter on the original sub-daily series.
 
-3. **`__` in sanitised keys** — `DataReference.ref_key()` sanitiser uses
+3. **`__` in sanitised keys** — Primary key value sanitisation uses
    `re.sub(r"[^a-zA-Z0-9]+", "_", ...)`. A run of two or more non-alphanumeric chars
    produces a single `_`, not `__`. So `__` inside the identity part is structurally
    impossible — the separator is unambiguous.
 
-4. **`expression` in key attributes** — `MathDataReference` stores `expression` in
-   `_attributes`. Without `set_key_attributes()`, `expression` would be included in
-   `ref_key()` and produce an enormous key. Always call `set_key_attributes()` on the
-   new math ref, excluding `"expression"`.
+4. **`expression` in name** — `MathDataReference` stores `expression` in `_attributes`.
+   The auto-derived `name` is based on `primary_key` values only — `expression` is
+   never included in the name. No `set_key_attributes()` call needed.
 
-5. **Catalog key collision** — two selections with the same identity and tag produce
+5. **Catalog key collision** — two selections with the same pk values and tag produce
    the same name. The callback calls `catalog.remove(name)` before `catalog.add(ref)`
    to replace silently. Callers adding the same transform twice always get the freshest ref.
 
-6. **`display_url_num` guard** — `url_num` dynamic metadata is injected only when
-   `get_data_catalog()` is called with `display_url_num=True` (multi-file catalogs).
-   Single-file catalogs have no `url_num` → no prefix, keeping names clean.
+6. **`source_num` prefix** — `source_num` is auto-computed by the catalog from
+   `_source_index[ref.source]`. Single-source catalogs have no `source_num` column
+   and no `s{n}_` prefix, keeping names clean.

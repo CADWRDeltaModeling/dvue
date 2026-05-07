@@ -414,7 +414,6 @@ class DataReference:
         self._dynamic_metadata: Dict[str, Any] = {}
         # source is always the first attribute so it appears first in to_dataframe()
         self._attributes: Dict[str, Any] = {"source": source, **attributes}
-        self._key_attributes: Optional[List[str]] = None  # None → all attributes
 
     # ------------------------------------------------------------------
     # Reader access
@@ -480,55 +479,6 @@ class DataReference:
         """Return ``True`` if metadata attribute *name* exists."""
         return name in self._attributes
 
-    # ------------------------------------------------------------------
-    # Key attributes
-    # ------------------------------------------------------------------
-
-    def set_key_attributes(self, names: List[str]) -> "DataReference":
-        """Set the attribute names used by :meth:`ref_key` (chainable).
-
-        Only the named attributes (in the given order) contribute to the
-        unique key produced by :meth:`ref_key`.  Passing an empty list
-        causes :meth:`ref_key` to return ``""``.
-
-        Parameters
-        ----------
-        names : list of str
-            Ordered list of attribute names.  Each name must already exist
-            as a metadata attribute on this reference when :meth:`ref_key`
-            is called (unknown names are silently skipped).
-
-        Returns
-        -------
-        DataReference
-            *self*, for chaining.
-
-        Examples
-        --------
-        >>> ref = DataReference(reader, name="r", station="A", variable="wind", interval="h")
-        >>> ref.set_key_attributes(["station", "variable"])
-        >>> ref.ref_key()  # "A_wind"
-        """
-        self._key_attributes = list(names)
-        return self
-
-    def get_key_attributes(self) -> List[str]:
-        """Return the attribute names used by :meth:`ref_key`.
-
-        When key attributes have not been set explicitly (the default),
-        **all** current attribute names are returned in insertion order,
-        which matches the previous behaviour of :meth:`ref_key`.
-
-        Returns
-        -------
-        list of str
-        """
-        if self._key_attributes is None:
-            # "source" is location metadata, not a domain identifier — exclude it
-            # from the default key so ref_key() stays a clean Python identifier.
-            return [k for k in self._attributes if k != "source"]
-        return list(self._key_attributes)
-
     def _make_cache_key(self, time_range: Any) -> Any:
         """Return a hashable cache key for *time_range*.
 
@@ -562,52 +512,6 @@ class DataReference:
             elif not _criterion_matches(actual, expected):
                 return False
         return True
-
-    def ref_key(self) -> str:
-        """Return a string key derived from this reference's *key* attributes.
-
-        Uses the attribute names returned by :meth:`get_key_attributes` —
-        either the explicitly-set subset (via :meth:`set_key_attributes`) or
-        all attributes when none have been designated as keys.
-
-        Each attribute value is sanitised (spaces and non-identifier characters
-        become underscores) and the results are joined with ``"_"``.
-        Non-scalar values (lists, dicts, geometry objects, …) are silently
-        skipped so they do not pollute the key.
-
-        The result is intended to be a valid Python identifier so it can be
-        used as a variable name inside :class:`MathDataReference` expression
-        strings.
-
-        Override in subclasses to produce a more readable, domain-specific key
-        from a chosen subset of attributes.
-
-        Examples
-        --------
-        >>> ref = DataReference(reader, name="r", station="A", variable="wind", interval="hourly")
-        >>> ref.ref_key()
-        'A_wind_hourly'
-        >>> ref.set_key_attributes(["station", "variable"])
-        >>> ref.ref_key()
-        'A_wind'
-        """
-        parts = []
-        for key in self.get_key_attributes():
-            value = self._attributes.get(key)
-            if not isinstance(value, (str, int, float, bool)):
-                continue
-            if isinstance(value, float) and value != value:  # skip NaN
-                continue
-            sanitized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip())
-            sanitized = sanitized.strip("_")
-            if sanitized:
-                parts.append(sanitized)
-        result = "_".join(parts)
-        # Guarantee a valid Python identifier: names starting with a digit
-        # cannot be used as variables in MathDataReference expressions.
-        if result and result[0].isdigit():
-            result = "_" + result
-        return result
 
     # ------------------------------------------------------------------
     # Data loading
@@ -865,14 +769,21 @@ class DataCatalog:
 
     Features
     --------
-    * Add / remove / retrieve references by name.
+    * Add / remove / retrieve references by name or by primary-key keyword args.
     * Search by metadata attributes with optional schema-map normalisation.
     * Load references in bulk from external sources via registered
       :class:`CatalogBuilder` objects.
     * Map heterogeneous raw attribute names to a canonical schema vocabulary.
+    * Auto-compute ``source_num`` (integer per unique ``source``) and inject it
+      as a column in :meth:`to_dataframe` when multiple sources are present.
 
     Parameters
     ----------
+    primary_key : list of str
+        Required.  The attribute names whose values together uniquely identify a
+        reference in this catalog, e.g. ``["station", "variable"]``.  Include
+        ``"source_num"`` as the first element for multi-source catalogs; it is
+        auto-computed from ``ref.source`` and does not need to be stored on the ref.
     schema_map : dict, optional
         Maps *raw* attribute names (as stored in DataReferences) to
         *canonical* names exposed in :meth:`search` and :meth:`to_dataframe`.
@@ -891,14 +802,22 @@ class DataCatalog:
 
     Examples
     --------
-    >>> catalog = DataCatalog(schema_map={"stn_id": "id"})
+    >>> catalog = DataCatalog(primary_key=["station", "variable"])
     >>> reader = InMemoryDataReferenceReader(df)
-    >>> catalog.add(DataReference(reader, name="temp", variable="temperature", stn_id="S01"))
+    >>> catalog.add(DataReference(reader, station="S01", variable="temperature"))
     >>> catalog.search(variable="temperature")
-    [DataReference(name='temp', ...)]
-    >>> catalog.search(id="S01")            # canonical name works too
-    [DataReference(name='temp', ...)]
+    [DataReference(name='S01_temperature', ...)]
+    >>> catalog.get(station="S01", variable="temperature")
+    DataReference(name='S01_temperature', ...)
     >>> catalog.to_dataframe()              # summary DataFrame
+
+    Multi-source catalog::
+
+        catalog = DataCatalog(primary_key=["source_num", "station", "variable"])
+        for path in files:
+            catalog.add(DataReference(source=path, reader=..., station="A", variable="flow"))
+        # source_num=0 for the first file, source_num=1 for the second, etc.
+        # to_dataframe() includes a source_num column automatically.
 
     Bulk loading::
 
@@ -934,10 +853,20 @@ class DataCatalog:
 
     def __init__(
         self,
+        primary_key: List[str],
         schema_map: Optional[Dict[str, str]] = None,
         crs: Optional[str] = None,
     ) -> None:
+        if not primary_key:
+            raise ValueError(
+                "DataCatalog requires a non-empty primary_key list, e.g. "
+                "primary_key=['station', 'variable']."
+            )
+        self._primary_key: List[str] = list(primary_key)
         self._references: Dict[str, DataReference] = {}
+        # Maps each unique non-empty ref.source → integer index (order of first appearance).
+        # source_num is never stored on the ref itself — it is derived from this mapping.
+        self._source_index: Dict[str, int] = {}
         self._schema_map: Dict[str, str] = schema_map or {}
         self._crs: Optional[str] = crs
         # Start with a snapshot of the global registry; instance-local additions
@@ -961,10 +890,70 @@ class DataCatalog:
                 return builder
         return None
 
-    # Keep old name for any code that calls it directly
     def _find_reader(self, source: Any) -> Optional[CatalogBuilder]:  # type: ignore[override]
         """Backward-compatible alias for :meth:`_find_builder`."""
         return self._find_builder(source)
+
+    # ------------------------------------------------------------------
+    # Primary-key helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def primary_key(self) -> List[str]:
+        """The attribute names that together uniquely identify a reference."""
+        return list(self._primary_key)
+
+    def _source_num_for(self, ref: "DataReference") -> Optional[int]:
+        """Return the source_num for *ref*, or None if source is empty."""
+        if not ref.source:
+            return None
+        return self._source_index.get(ref.source)
+
+    @staticmethod
+    def _sanitize_pk_value(value: Any) -> str:
+        """Sanitize a single primary-key value to a valid identifier fragment."""
+        s = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip()).strip("_")
+        if s and s[0].isdigit():
+            s = "_" + s
+        return s
+
+    def _derive_name(self, ref: "DataReference") -> str:
+        """Derive an auto-name from primary_key values on *ref*.
+
+        For multi-source catalogs (``"source_num"`` in primary_key) the name
+        is prefixed with ``s{n}_``.
+        """
+        parts = []
+        if "source_num" in self._primary_key and ref.source:
+            snum = self._source_index.get(ref.source)
+            if snum is not None:
+                parts.append(f"s{snum}")
+        for col in self._primary_key:
+            if col in ("source_num", "name"):
+                continue
+            value = ref.get_attribute(col)
+            if value is None:
+                continue
+            sanitized = self._sanitize_pk_value(value)
+            if sanitized:
+                parts.append(sanitized)
+        return "_".join(parts)
+
+    def _pk_tuple(self, ref: "DataReference") -> tuple:
+        """Return a tuple of primary-key values for *ref* (for uniqueness checks).
+
+        Handles special columns: ``"name"`` reads from ``ref.name``;
+        ``"source_num"`` reads from ``_source_index[ref.source]``.
+        """
+        values = []
+        for col in self._primary_key:
+            if col == "source_num":
+                values.append(self._source_index.get(ref.source))
+            elif col == "name":
+                values.append(ref.name)
+            else:
+                values.append(ref.get_attribute(col))
+        return tuple(values)
 
     # ------------------------------------------------------------------
     # CRUD operations
@@ -973,31 +962,54 @@ class DataCatalog:
     def add(self, ref: DataReference) -> "DataCatalog":
         """Add a :class:`DataReference` to the catalog (chainable).
 
-        If a reference with the same name already exists its source and every
-        metadata attribute are compared against the incoming reference.  An
-        identical duplicate (same name **and** same source **and** identical
-        attributes) raises a :class:`ValueError`.  A same-named reference that
-        differs in source or metadata is **replaced** silently.
+        Auto-derives ``ref.name`` from the primary-key values when the name is
+        empty.  Raises :class:`ValueError` when the primary-key tuple already
+        exists in the catalog (duplicate detection) or when the name is still
+        empty after auto-derivation.
+
+        Maintains the :attr:`_source_index` mapping so that ``source_num`` can
+        be auto-computed without storing it on the ref itself.
 
         Parameters
         ----------
         ref : DataReference
-            Must have a non-empty :attr:`~DataReference.name`.
 
         Raises
         ------
         ValueError
-            If *ref* is an exact duplicate of an existing entry.
+            * Name is empty and cannot be derived from primary_key values.
+            * A different reference with the same primary-key tuple already exists.
+            * An identical duplicate is re-added.
         """
+        # 1. Maintain _source_index before deriving the name (needed for source_num prefix).
+        if ref.source and ref.source not in self._source_index:
+            self._source_index[ref.source] = len(self._source_index)
+
+        # 2. Auto-derive name from primary_key when the ref has no name set.
         if not ref.name:
-            raise ValueError("DataReference must have a non-empty name to be added to a catalog.")
+            ref.name = self._derive_name(ref)
+        if not ref.name:
+            raise ValueError(
+                "DataReference has no name and could not derive one from primary_key "
+                f"{self._primary_key!r}.  Set the name explicitly or ensure the reference "
+                "has non-empty values for all primary_key attributes."
+            )
+
+        # 3. Check for primary-key collision (different name, same pk values).
+        pk = self._pk_tuple(ref)
+        for existing_name, existing_ref in self._references.items():
+            if existing_name == ref.name:
+                continue  # same-name replacement handled below
+            if self._pk_tuple(existing_ref) == pk:
+                raise ValueError(
+                    f"A DataReference with primary-key {dict(zip(self._primary_key, pk))!r} "
+                    f"already exists in the catalog under the name {existing_name!r}.  "
+                    "Remove it first or use different primary-key values."
+                )
+
+        # 4. Same-name exact-duplicate guard.
         existing = self._references.get(ref.name)
         if existing is not None:
-            # Determine whether the source/reader is "the same".
-            # • Both have a pre-built instance → identity check (distinguishes
-            #   two InMemoryDataReferenceReader instances carrying different data).
-            # • Both are FQCN-only → equality on (fqcn, source).
-            # • Mixed (one instance, one FQCN) → never treated as a duplicate.
             same_source: bool = False
             if existing._reader_instance is not None and ref._reader_instance is not None:
                 same_source = existing._reader_instance is ref._reader_instance
@@ -1012,6 +1024,7 @@ class DataCatalog:
                     "identical metadata attributes already exists in the catalog. "
                     "Remove it first, or update its attributes before re-adding."
                 )
+
         self._references[ref.name] = ref
         return self
 
@@ -1057,17 +1070,46 @@ class DataCatalog:
         del self._references[name]
         return self
 
-    def get(self, name: str) -> DataReference:
-        """Retrieve the :class:`DataReference` named *name*.
+    def get(self, name: Optional[str] = None, **pk_kwargs: Any) -> DataReference:
+        """Retrieve a :class:`DataReference` by name or by primary-key keyword arguments.
+
+        Call as ``catalog.get("my_ref")`` to look up by name, or as
+        ``catalog.get(station="A", variable="flow")`` to look up by primary-key
+        values.  Both forms raise :class:`KeyError` when not found.
 
         Raises
         ------
         KeyError
+        TypeError
+            If called with neither a name nor keyword arguments, or with both.
         """
-        try:
-            return self._references[name]
-        except KeyError:
-            raise KeyError(f"No DataReference named {name!r} in catalog.") from None
+        if name is not None and pk_kwargs:
+            raise TypeError("get() accepts either a positional name or keyword pk arguments, not both.")
+        if name is None and not pk_kwargs:
+            raise TypeError("get() requires either a positional name or keyword pk arguments.")
+        if name is not None:
+            try:
+                return self._references[name]
+            except KeyError:
+                raise KeyError(f"No DataReference named {name!r} in catalog.") from None
+        # Keyword pk lookup — find by matching pk columns.
+        for ref in self._references.values():
+            match = True
+            for col, expected in pk_kwargs.items():
+                if col == "source_num":
+                    actual = self._source_index.get(ref.source)
+                elif col == "name":
+                    actual = ref.name
+                else:
+                    actual = ref.get_attribute(col)
+                if actual != expected:
+                    match = False
+                    break
+            if match:
+                return ref
+        raise KeyError(
+            f"No DataReference with primary-key {pk_kwargs!r} in catalog."
+        ) from None
 
     # ------------------------------------------------------------------
     # Dict-like interface
@@ -1099,6 +1141,11 @@ class DataCatalog:
         :attr:`~DataReference.name` attribute (not stored in ``_attributes``)
         so that ``catalog.search(name="my_ref")`` works as expected.
 
+        The special key ``source_num`` is matched against the catalog's
+        auto-computed source index, not against a stored attribute.  Use it
+        to filter references to a particular source file, e.g.
+        ``catalog.search(source_num=0)``.
+
         Each criterion value may be:
 
         * a **scalar** – exact equality check.
@@ -1115,9 +1162,11 @@ class DataCatalog:
         >>> catalog.search(variable="~EC.*")            # regex on attribute
         >>> catalog.search(year=lambda y: int(y) >= 2020)
         >>> catalog.search(variable="temperature", unit="degC")
+        >>> catalog.search(source_num=0)                # first source only
         """
-        # Pop ``name`` before schema translation – it lives on ref.name, not _attributes.
+        # Pop special keys that are not stored as regular attributes.
         name_criterion = criteria.pop("name", _UNSET)
+        source_num_criterion = criteria.pop("source_num", _UNSET)
         raw_criteria = self._to_raw_criteria(criteria)
 
         results = []
@@ -1127,6 +1176,13 @@ class DataCatalog:
                     if not name_criterion(r.name):
                         continue
                 elif not _criterion_matches(r.name, name_criterion):
+                    continue
+            if source_num_criterion is not _UNSET:
+                actual_snum = self._source_index.get(r.source)
+                if callable(source_num_criterion):
+                    if not source_num_criterion(actual_snum):
+                        continue
+                elif not _criterion_matches(actual_snum, source_num_criterion):
                     continue
             if r.matches(**raw_criteria):
                 results.append(r)
@@ -1228,6 +1284,12 @@ class DataCatalog:
 
         df = pd.DataFrame(rows).set_index("name")
 
+        # Inject source_num column when multiple distinct sources are present.
+        if len(self._source_index) > 1:
+            source_col = df.get("source")
+            if source_col is not None:
+                df.insert(0, "source_num", source_col.map(self._source_index))
+
         if "geometry" in df.columns:
             try:
                 import geopandas as gpd  # noqa: PLC0415
@@ -1277,7 +1339,7 @@ class DataCatalog:
         DataCatalog
         """
         df = pd.read_csv(path)
-        catalog = cls()
+        catalog = cls(primary_key=["name"])
         for _, row in df.iterrows():
             d: Dict[str, Any] = {k: v for k, v in row.items() if pd.notna(v)}
             name = str(d.pop("name", ""))
@@ -1344,7 +1406,7 @@ class CatalogView(DataCatalog):
 
     Examples
     --------
-    >>> cat = DataCatalog()
+    >>> cat = DataCatalog(primary_key=["name"])
     >>> cat.add(DataReference(df_a, name="flow",  source="USGS", stationid="STA001"))
     >>> cat.add(DataReference(df_b, name="stage", source="CDEC", stationid="STA002"))
     >>> cat.add(DataReference(df_c, name="temp",  source="USGS", stationid="STA001"))
@@ -1368,8 +1430,8 @@ class CatalogView(DataCatalog):
         selection: Optional[Union[Dict[str, Any], Callable]] = None,
         name: str = "",
     ) -> None:
-        # Inherit the source catalog's schema_map so canonical lookups work.
-        super().__init__(schema_map=dict(catalog._schema_map))
+        # Inherit the source catalog's schema_map and primary_key so canonical lookups work.
+        super().__init__(primary_key=list(catalog._primary_key), schema_map=dict(catalog._schema_map))
         self._source_catalog = catalog
         self._selection = selection
         self.name = name
@@ -1549,9 +1611,9 @@ def build_catalog_from_dataframe(
     dfcat: "pd.DataFrame",
     reader: DataReferenceReader,
     ref_name_fn,
+    primary_key: "Optional[List[str]]" = None,
     crs: "Optional[str]" = None,
     ref_class: type = DataReference,
-    key_attributes: "Optional[List[str]]" = None,
 ) -> DataCatalog:
     """Build a :class:`DataCatalog` from a metadata DataFrame.
 
@@ -1571,26 +1633,23 @@ def build_catalog_from_dataframe(
         each row.  Must be reconstructable from the columns shown in the
         table so that :meth:`~dvue.dataui.DataUIManager.get_data_reference`
         can look up the correct entry.
+    primary_key : list of str, optional
+        The attribute names that together uniquely identify a reference in
+        the catalog (e.g. ``["station", "variable"]``).  Defaults to
+        ``["name"]`` when not provided.
     crs : str, optional
         CRS string forwarded to :class:`DataCatalog`.
     ref_class : type, optional
         :class:`DataReference` subclass to instantiate for each row.
         Defaults to :class:`DataReference`.  Pass a custom subclass to
         attach a domain-specific ``ref_type`` (e.g. ``ref_type = "dsm2_dss"``).
-    key_attributes : list of str, optional
-        Attribute names that form the *identity key* of each reference —
-        the minimal set that uniquely identifies a series within this catalog
-        (e.g. ``["station_name", "variable"]``).  When provided,
-        :meth:`DataReference.set_key_attributes` is called on every created
-        reference so that :meth:`DataReference.ref_key` and
-        ``TransformToCatalogAction`` produce short, readable names instead of
-        joining all attributes (including NaN-valued ones).
 
     Returns
     -------
     DataCatalog
     """
-    catalog = DataCatalog(crs=crs)
+    pk = primary_key if primary_key is not None else ["name"]
+    catalog = DataCatalog(primary_key=pk, crs=crs)
     for _, row in dfcat.iterrows():
         attrs = {k: v for k, v in row.items() if k != "geometry"}
         if "geometry" in row.index and row["geometry"] is not None:
@@ -1601,7 +1660,5 @@ def build_catalog_from_dataframe(
             cache=True,
             **attrs,
         )
-        if key_attributes is not None:
-            ref.set_key_attributes(key_attributes)
         catalog.add(ref)
     return catalog

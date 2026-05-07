@@ -105,10 +105,10 @@ Chaining works because all entries are loaded into the catalog before any
 
 ---
 
-### `mathref_url_num.yaml` — two-file comparison via `url_num`
+### `mathref_source_num.yaml` — two-file comparison via `source_num`
 
 When two files are loaded (e.g. baseline and scenario), dvue assigns each source
-an integer `url_num` (0, 1, …) stored as dynamic metadata. Use it in
+an integer `source_num` (0, 1, …) stored as dynamic metadata. Use it in
 `search_map` to pin a variable to a specific file.
 
 ```yaml
@@ -118,11 +118,11 @@ an integer `url_num` (0, 1, …) stored as dynamic metadata. Use it in
     flow_0:
       id: CHAN_437_UP
       variable: flow
-      url_num: 0        # baseline file
+      source_num: 0        # baseline file
     flow_1:
       id: CHAN_437_UP
       variable: flow
-      url_num: 1        # scenario file
+      source_num: 1        # scenario file
 ```
 
 Both variables resolve to `pd.Series` (one entry each), so the expression is
@@ -136,7 +136,7 @@ get a two-column DataFrame and need `.iloc[:,0]` / `.iloc[:,1]`.
 | `flow_cumsum_diff` | `np.cumsum((flow_1 - flow_0).resample('1h').mean())` | cumulative drift |
 | `flow_pct_change` | `(flow_1 - flow_0) / flow_0.abs() * 100` | relative change (%) |
 
-> **Note:** `url_num` is only available after the data files are loaded and
+> **Note:** `source_num` is only available after the data files are loaded and
 > `get_data_catalog()` has been called at least once. If you get "0 results",
 > reload the catalog (Actions → Clear Cache) and try again.
 
@@ -173,12 +173,12 @@ get a two-column DataFrame and need `.iloc[:,0]` / `.iloc[:,1]`.
 `ws` is a DataFrame. `ws - baseline` (Series) will broadcast unexpectedly.
 Use `ws.mean(axis=1) - baseline` instead.
 
-**`url_num` not matching** — criteria values from the editor are always strings,
-but `url_num` is stored as an integer. `matches()` coerces automatically, so
-`url_num: 0` in YAML (int) and `url_num=0` typed in the editor (string `'0'`)
+**`source_num` not matching** — criteria values from the editor are always strings,
+but `source_num` is stored as an integer. `matches()` coerces automatically, so
+`source_num: 0` in YAML (int) and `source_num=0` typed in the editor (string `'0'`)
 both work.
 
-**`url_num` returns 0 results on first load** — dynamic metadata is injected
+**`source_num` returns 0 results on first load** — dynamic metadata is injected
 when the catalog DataFrame is built. If the math ref is evaluated before any
-`get_data_catalog()` call has run, the `url_num` metadata is absent. Trigger
+`get_data_catalog()` call has run, the `source_num` metadata is absent. Trigger
 a catalog refresh and retry.

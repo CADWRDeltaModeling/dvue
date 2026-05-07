@@ -1,4 +1,4 @@
-"""Tests for TimeSeriesDataUIManager url_num column logic."""
+"""Tests for TimeSeriesDataUIManager source_num column logic."""
 
 import pandas as pd
 import pytest
@@ -20,9 +20,10 @@ def _build_catalog(filenames):
     """Build a DataCatalog with one DataReference per filename entry.
 
     Each reference carries DSS-style attributes (A–F) plus *filename*.
+    Uses primary_key=["name"] so explicit names are used as pk.
     """
     reader = _make_reader()
-    cat = DataCatalog()
+    cat = DataCatalog(primary_key=["name"])
     for i, fn in enumerate(filenames):
         cat.add(
             DataReference(
@@ -35,6 +36,7 @@ def _build_catalog(filenames):
                 E="1HOUR",
                 F="VER1",
                 filename=fn,
+                source=fn,
             )
         )
     return cat
@@ -43,9 +45,9 @@ def _build_catalog(filenames):
 class _StubManager(TimeSeriesDataUIManager):
     """Minimal concrete subclass for unit-testing."""
 
-    def __init__(self, catalog, url_column="filename", **kwargs):
+    def __init__(self, catalog, **kwargs):
         self._test_catalog = catalog
-        super().__init__(url_column=url_column, **kwargs)
+        super().__init__(**kwargs)
 
     @property
     def data_catalog(self):
@@ -84,85 +86,54 @@ class _StubManager(TimeSeriesDataUIManager):
 
 
 # ---------------------------------------------------------------------------
-# Tests — single file (no url_num)
+# Tests — single source (no source_num)
 # ---------------------------------------------------------------------------
 
 
-class TestSingleFile:
-    def test_display_url_num_is_false(self):
-        cat = _build_catalog(["file_a.dss"])
-        mgr = _StubManager(cat)
-        assert mgr.display_url_num is False
-
-    def test_url_num_not_in_table_columns(self):
-        cat = _build_catalog(["file_a.dss"])
-        mgr = _StubManager(cat)
-        assert "url_num" not in mgr.get_table_columns()
-
-    def test_url_num_not_in_catalog_df(self):
+class TestSingleSource:
+    def test_source_num_not_in_catalog_df(self):
+        """Single-source catalog: source_num column NOT injected."""
         cat = _build_catalog(["file_a.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
-        assert "url_num" not in df.columns
+        assert "source_num" not in df.columns
+
+    def test_table_columns_subset_of_catalog_single(self):
+        cat = _build_catalog(["file_a.dss"])
+        mgr = _StubManager(cat)
+        df = mgr.get_data_catalog()
+        missing = set(mgr.get_table_columns()) - set(df.columns)
+        assert missing == set(), f"Columns {missing} not in catalog DataFrame"
 
 
 # ---------------------------------------------------------------------------
-# Tests — multiple files (url_num must exist)
+# Tests — multiple sources (source_num injected automatically)
 # ---------------------------------------------------------------------------
 
 
-class TestMultipleFiles:
-    def test_display_url_num_is_true(self):
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        assert mgr.display_url_num is True
-
-    def test_url_num_in_table_columns(self):
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        assert "url_num" in mgr.get_table_columns()
-
-    def test_url_num_in_catalog_df(self):
+class TestMultipleSources:
+    def test_source_num_in_catalog_df(self):
+        """Multi-source catalog: source_num column injected automatically."""
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
-        assert "url_num" in df.columns
+        assert "source_num" in df.columns
 
-    def test_url_num_values_correct(self):
+    def test_source_num_values_correct(self):
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
-        # First file → 0, second file → 1
-        assert list(df["url_num"]) == [0, 1]
+        assert list(df["source_num"]) == [0, 1]
 
     def test_get_data_catalog_consistent_across_calls(self):
-        """Regression: second call must also include url_num."""
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df1 = mgr.get_data_catalog()
         df2 = mgr.get_data_catalog()
-        assert "url_num" in df1.columns
-        assert "url_num" in df2.columns
-        assert list(df1["url_num"]) == list(df2["url_num"])
+        assert "source_num" in df1.columns
+        assert list(df1["source_num"]) == list(df2["source_num"])
 
-
-# ---------------------------------------------------------------------------
-# Tests — table columns are a subset of catalog columns (regression guard)
-# ---------------------------------------------------------------------------
-
-
-class TestTableColumnsSubsetOfCatalog:
-    """The KeyError that triggered this fix: get_table_columns() returned
-    a column name that did not exist in the DataFrame from get_data_catalog()."""
-
-    def test_single_file(self):
-        cat = _build_catalog(["file_a.dss"])
-        mgr = _StubManager(cat)
-        df = mgr.get_data_catalog()
-        missing = set(mgr.get_table_columns()) - set(df.columns)
-        assert missing == set(), f"Columns {missing} not in catalog DataFrame"
-
-    def test_multiple_files(self):
+    def test_table_columns_subset_of_catalog_multi(self):
         cat = _build_catalog(["file_a.dss", "file_b.dss"])
         mgr = _StubManager(cat)
         df = mgr.get_data_catalog()
@@ -171,24 +142,22 @@ class TestTableColumnsSubsetOfCatalog:
 
 
 # ---------------------------------------------------------------------------
-# Tests — no filename column at all
+# Tests — catalog search by source_num
 # ---------------------------------------------------------------------------
 
 
-class TestNoFilenameColumn:
-    def test_display_url_num_false_when_no_column(self):
-        reader = _make_reader()
-        cat = DataCatalog()
-        cat.add(DataReference(reader=reader, name="r0", X="val"))
-        mgr = _StubManager(cat, url_column="nonexistent")
-        assert mgr.display_url_num is False
+class TestSourceNumSearchable:
+    def test_catalog_search_by_source_num_0(self):
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        results = cat.search(source_num=0)
+        assert len(results) == 1
+        assert results[0].name == "ref_0"
 
-    def test_url_num_column_is_none(self):
-        reader = _make_reader()
-        cat = DataCatalog()
-        cat.add(DataReference(reader=reader, name="r0", X="val"))
-        mgr = _StubManager(cat, url_column="nonexistent")
-        assert mgr.url_num_column is None
+    def test_catalog_search_by_source_num_1(self):
+        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        results = cat.search(source_num=1)
+        assert len(results) == 1
+        assert results[0].name == "ref_1"
 
 
 # ---------------------------------------------------------------------------
@@ -245,76 +214,6 @@ class TestClearCacheActionRegistered:
             ClearCacheAction().callback(None, fake_dataui)
 
         assert all(not ref._cached_data for ref in cat.list())
-
-
-# ---------------------------------------------------------------------------
-# Tests — url_num dynamic metadata searchable in catalog
-# ---------------------------------------------------------------------------
-
-
-class TestUrlNumSearchable:
-    """After _apply_url_num with a catalog, refs get url/url_num dynamic metadata
-    so that catalog.search(url_num=0) correctly filters by source file."""
-
-    def test_single_file_no_dynamic_metadata_injected(self):
-        """Single-file catalog: no url_num dynamic metadata needed."""
-        cat = _build_catalog(["file_a.dss"])
-        mgr = _StubManager(cat)
-        mgr.get_data_catalog()  # triggers _apply_url_num
-        ref = cat.get("ref_0")
-        # No url_num should be set (only 1 file, display_url_num=False)
-        assert ref.get_dynamic_metadata("url_num") is None
-
-    def test_url_num_dynamic_metadata_injected_on_multi_file(self):
-        """Multi-file catalog: refs must carry url_num as dynamic metadata."""
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        mgr.get_data_catalog()
-        assert cat.get("ref_0").get_dynamic_metadata("url_num") == 0
-        assert cat.get("ref_1").get_dynamic_metadata("url_num") == 1
-
-    def test_url_dynamic_metadata_injected(self):
-        """url dynamic metadata must also be set to the actual filename value."""
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        mgr.get_data_catalog()
-        assert cat.get("ref_0").get_dynamic_metadata("url") == "file_a.dss"
-        assert cat.get("ref_1").get_dynamic_metadata("url") == "file_b.dss"
-
-    def test_catalog_search_by_url_num(self):
-        """catalog.search(url_num=0) must return only refs from the first file."""
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        mgr.get_data_catalog()  # inject dynamic metadata
-        results = cat.search(url_num=0)
-        assert len(results) == 1
-        assert results[0].name == "ref_0"
-
-    def test_catalog_search_by_url_num_1(self):
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        mgr.get_data_catalog()
-        results = cat.search(url_num=1)
-        assert len(results) == 1
-        assert results[0].name == "ref_1"
-
-    def test_math_ref_search_map_filters_by_url_num(self):
-        """A MathDataReference with search_map url_num: 0 must resolve to file-0 refs."""
-        from dvue.math_reference import MathDataReference
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _StubManager(cat)
-        mgr.get_data_catalog()  # inject dynamic metadata
-        ref = MathDataReference(
-            expression="x * 2",
-            search_map={"x": {"C": "EC", "url_num": 0}},
-        )
-        ref.set_catalog(cat)
-        variables = ref._resolve_variables()
-        assert "x" in variables
-        # Only the file_a.dss ref should be matched (url_num=0)
-        matched_ref = cat.search(C="EC", url_num=0)
-        assert len(matched_ref) == 1
-        assert matched_ref[0].name == "ref_0"
 
 
 # ---------------------------------------------------------------------------
@@ -634,12 +533,10 @@ class TestTransformToCatalogActionExpressionBuilder:
         """_build_ref_name must produce a name with only safe chars."""
         from dvue.actions import TransformToCatalogAction
         reader = _make_reader()
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["B", "C"])
         cat.add(DataReference(reader=reader, name="ref_0", B="STA 001", C="EC"))
         mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C"]
-        orig_ref = cat.get("ref_0")
-        mgr.get_data_catalog()  # inject dynamic metadata
+        orig_ref = cat.get(B="STA 001", C="EC")
         name = TransformToCatalogAction._build_ref_name(orig_ref, "1D_mean", mgr)
         assert " " not in name
 
@@ -666,7 +563,7 @@ class TestTransformToCatalogAttributeInheritance:
         from unittest.mock import MagicMock, patch
 
         reader = _make_reader()
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         attrs = dict(A="AREA", B="STA001", C="FLOW", D="2020", E="1HOUR",
                      F="STUDY_V1", filename="file_a.dss")
         if extra_attrs:
@@ -724,7 +621,7 @@ class TestTransformToCatalogAttributeInheritance:
         from unittest.mock import MagicMock, patch
 
         reader = _make_reader()
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(reader=reader, name="ref_0", B="STA001", C="FLOW"))
 
         mgr = _TransformManager(cat)
@@ -758,173 +655,108 @@ class TestTransformToCatalogAttributeInheritance:
 
 class TestTransformToCatalogNaming:
     """Verify the clean short-name scheme:
-        [f{url_num}_]{identity_key}__{transform_tag}
+        [s{source_num}_]{pk_values}__{transform_tag}
     """
 
-    def _make_ref(self, cat, name="ref_0", **attrs):
+    def _make_ref(self, cat, name="ref_0", source="a.dss", **attrs):
         reader = _make_reader()
-        ref = DataReference(reader=reader, name=name, **attrs)
+        ref = DataReference(reader=reader, name=name, source=source, **attrs)
         cat.add(ref)
         return ref
 
-    # -- Single-file: no url_num prefix ------------------------------------
+    # -- Single-source: no s{n}_ prefix (primary_key with pk cols) --------
 
-    def test_single_file_no_prefix_with_identity_cols(self):
+    def test_single_source_no_prefix(self):
         from dvue.actions import TransformToCatalogAction
-        cat = DataCatalog()
-        self._make_ref(cat, B="RSAC054", C="FLOW", F="V1", filename="a.dss")
+        cat = DataCatalog(primary_key=["B", "C"])
+        self._make_ref(cat, name="ref_0", B="RSAC054", C="FLOW", F="V1", source="a.dss")
         mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C"]
-        mgr.get_data_catalog()  # inject display_url_num / url_num metadata
-        orig_ref = cat.get("ref_0")
+        orig_ref = cat.get(B="RSAC054", C="FLOW")
         name = TransformToCatalogAction._build_ref_name(orig_ref, "1D_mean", mgr)
         assert name == "RSAC054_FLOW__1D_mean"
 
-    def test_single_file_no_f_prefix(self):
-        """Single-file catalog: no f0_ prefix."""
+    def test_single_source_no_s_prefix(self):
+        """Single-source catalog: no s0_ prefix."""
         from dvue.actions import TransformToCatalogAction
-        cat = DataCatalog()
-        self._make_ref(cat, B="RSAC054", C="FLOW", filename="a.dss")
+        cat = DataCatalog(primary_key=["B", "C"])
+        self._make_ref(cat, name="ref_0", B="RSAC054", C="FLOW", source="a.dss")
         mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C"]
-        mgr.get_data_catalog()
-        orig_ref = cat.get("ref_0")
+        orig_ref = cat.get(B="RSAC054", C="FLOW")
         name = TransformToCatalogAction._build_ref_name(orig_ref, "tf", mgr)
-        assert not name.startswith("f")
+        assert not name.startswith("s")
         assert name == "RSAC054_FLOW__tf"
 
-    # -- Multi-file: url_num prefix ----------------------------------------
+    # -- Multi-source: s{n}_ prefix (primary_key includes source_num) -----
 
-    def test_multi_file_adds_prefix(self):
-        """Multi-file catalog: f0_ prefix for file 0, f1_ for file 1."""
+    def test_multi_source_adds_prefix(self):
+        """Multi-source catalog: s0_ prefix for source 0, s1_ for source 1."""
         from dvue.actions import TransformToCatalogAction
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
+        cat = DataCatalog(primary_key=["source_num", "B", "C"])
+        reader = _make_reader()
+        ref0 = DataReference(reader=reader, name="ref_0", B="STA000", C="EC", source="file_a.dss")
+        ref1 = DataReference(reader=reader, name="ref_1", B="STA000", C="EC", source="file_b.dss")
+        cat.add(ref0)
+        cat.add(ref1)
         mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C"]
-        mgr.get_data_catalog()  # injects url_num dynamic metadata
-        ref0 = cat.get("ref_0")
-        ref1 = cat.get("ref_1")
         name0 = TransformToCatalogAction._build_ref_name(ref0, "1D_mean", mgr)
         name1 = TransformToCatalogAction._build_ref_name(ref1, "1D_mean", mgr)
-        assert name0.startswith("f0_")
-        assert name1.startswith("f1_")
+        assert name0.startswith("s0_")
+        assert name1.startswith("s1_")
 
-    def test_multi_file_full_name_shape(self):
+    def test_multi_source_full_name_shape(self):
         from dvue.actions import TransformToCatalogAction
-        cat = _build_catalog(["file_a.dss", "file_b.dss"])
-        mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C"]
-        mgr.get_data_catalog()
-        ref0 = cat.get("ref_0")
-        name = TransformToCatalogAction._build_ref_name(ref0, "1D_mean", mgr)
-        # ref_0 has B=STA000, C=EC
-        assert name == "f0_STA000_EC__1D_mean"
-
-    # -- Explicit set_key_attributes on ref wins over manager param --------
-
-    def test_ref_key_attributes_takes_precedence(self):
-        from dvue.actions import TransformToCatalogAction
-        cat = DataCatalog()
-        self._make_ref(cat, B="RSAC054", C="FLOW", E="1HOUR", filename="a.dss")
-        mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C", "E"]  # would give RSAC054_FLOW_1HOUR
-        orig_ref = cat.get("ref_0")
-        orig_ref.set_key_attributes(["B", "C"])     # ref wins → RSAC054_FLOW
-        mgr.get_data_catalog()
-        name = TransformToCatalogAction._build_ref_name(orig_ref, "1D_mean", mgr)
-        assert name == "RSAC054_FLOW__1D_mean"
-        assert "1HOUR" not in name
-
-    # -- No identity_key_columns and no set_key_attributes: verbose fallback
-
-    def test_no_identity_cols_falls_back_to_full_ref_key(self):
-        from dvue.actions import TransformToCatalogAction
-        cat = DataCatalog()
-        self._make_ref(cat, B="RSAC054", C="FLOW", filename="a.dss")
-        mgr = _TransformManager(cat)
-        # identity_key_columns is empty by default; no set_key_attributes on ref
-        mgr.get_data_catalog()
-        orig_ref = cat.get("ref_0")
-        name = TransformToCatalogAction._build_ref_name(orig_ref, "1D_mean", mgr)
-        # Falls back to full ref_key() — includes B, C, filename... still has __tag
-        assert "__1D_mean" in name
-        assert "RSAC054" in name
-
-    # -- New math ref gets key attributes set ------------------------------
-
-    def test_new_ref_has_key_attributes_set(self):
-        """After Transform → Ref, the new MathDataReference must have
-        key_attributes set so its own ref_key() is clean."""
-        from dvue.actions import TransformToCatalogAction
-        from unittest.mock import MagicMock, patch
-
+        cat = DataCatalog(primary_key=["source_num", "B", "C"])
         reader = _make_reader()
-        cat = DataCatalog()
-        cat.add(DataReference(reader=reader, name="ref_0",
-                              B="RSAC054", C="FLOW", F="V1", filename="a.dss"))
+        ref0 = DataReference(reader=reader, name="ref_0", B="STA000", C="EC", source="file_a.dss")
+        ref1 = DataReference(reader=reader, name="ref_1", B="STA000", C="EC", source="file_b.dss")
+        cat.add(ref0)
+        cat.add(ref1)
         mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["B", "C"]
-        mgr.resample_period = "1D"
-        mgr.resample_agg = "mean"
-        dfcat = mgr.get_data_catalog()
+        name = TransformToCatalogAction._build_ref_name(ref0, "1D_mean", mgr)
+        assert name == "s0_STA000_EC__1D_mean"
 
-        fake_dataui = MagicMock()
-        fake_dataui._dataui_manager = mgr
-        fake_dataui.display_table.selection = [0]
-        fake_dataui._dfcat = dfcat
-
-        with patch("panel.state") as mock_state:
-            mock_state.notifications = None
-            TransformToCatalogAction().callback(None, fake_dataui)
-
-        math_refs = [r for r in cat.list() if getattr(r, "ref_type", "raw") != "raw"]
-        assert len(math_refs) == 1
-        new_ref = math_refs[0]
-        # Key attributes must include identity cols + "tag", not "expression"
-        key_attrs = new_ref.get_key_attributes()
-        assert key_attrs is not None
-        assert "expression" not in key_attrs
-        assert "B" in key_attrs
-        assert "C" in key_attrs
-        assert "tag" in key_attrs
-        # ref_key() should incorporate the tag value
-        assert "1D_mean" in new_ref.ref_key()
+    def test_no_pk_cols_falls_back_to_ref_name(self):
+        from dvue.actions import TransformToCatalogAction
+        # primary_key=["name"] means no pk-value columns; falls back to ref.name
+        cat = DataCatalog(primary_key=["name"])
+        reader = _make_reader()
+        ref = DataReference(reader=reader, name="ref_0", B="RSAC054", C="FLOW", source="a.dss")
+        cat.add(ref)
+        mgr = _TransformManager(cat)
+        name = TransformToCatalogAction._build_ref_name(ref, "1D_mean", mgr)
+        assert "__1D_mean" in name
+        assert "ref_0" in name
 
 
 # ---------------------------------------------------------------------------
-# Tests — NaN suppression in ref_key() and build_catalog_from_dataframe
+# Tests — NaN suppression in _build_ref_name
 # ---------------------------------------------------------------------------
+
 
 class TestRefKeyNaNSuppression:
-    """NaN-valued float attributes must not appear as 'nan' tokens in ref_key()."""
+    """NaN-valued float attributes must not appear in _build_ref_name output."""
 
-    def test_nan_attrs_excluded_from_ref_key(self):
-        """Ref with several NaN attributes should produce a clean key."""
+    def test_nan_attrs_excluded_from_name(self):
+        """Ref with NaN attributes should produce a clean name."""
+        from dvue.actions import TransformToCatalogAction
         reader = _make_reader()
+        cat = DataCatalog(primary_key=["station", "variable"])
         ref = DataReference(
             reader=reader,
             name="r",
             station="RSAC054",
             variable="flow",
             area=float("nan"),
-            bot_elev=float("nan"),
-            res_name=float("nan"),
         )
-        key = ref.ref_key()
-        assert "nan" not in key
-        assert "RSAC054" in key
-        assert "flow" in key
+        cat.add(ref)
+        mgr = _TransformManager(cat)
+        name = TransformToCatalogAction._build_ref_name(ref, "tf", mgr)
+        assert "nan" not in name
+        assert "RSAC054" in name
+        assert "flow" in name
 
-    def test_nan_with_set_key_attributes_excluded(self):
-        reader = _make_reader()
-        ref = DataReference(
-            reader=reader, name="r", station="STA001", variable="EC", area=float("nan")
-        )
-        ref.set_key_attributes(["station", "variable"])
-        assert ref.ref_key() == "STA001_EC"
-
-    def test_build_catalog_from_dataframe_key_attributes(self):
-        """build_catalog_from_dataframe key_attributes param sets key_attributes on every ref."""
+    def test_build_catalog_from_dataframe(self):
+        """build_catalog_from_dataframe with primary_key works."""
         import pandas as pd
         from dvue.catalog import build_catalog_from_dataframe
 
@@ -936,28 +768,9 @@ class TestRefKeyNaNSuppression:
         cat = build_catalog_from_dataframe(
             df, reader,
             ref_name_fn=lambda row: f'{row["station"]}_{row["variable"]}',
-            key_attributes=["station", "variable"],
+            primary_key=["station", "variable"],
         )
         refs = cat.list()
         assert len(refs) == 2
         for ref in refs:
-            assert ref.get_key_attributes() == ["station", "variable"]
-            assert "nan" not in ref.ref_key()
-
-    def test_base_key_nan_attrs_excluded(self):
-        """_base_key must skip NaN values in identity_cols."""
-        from dvue.actions import TransformToCatalogAction
-        reader = _make_reader()
-        cat = DataCatalog()
-        ref = DataReference(
-            reader=reader, name="r",
-            station="RSAC054", variable="flow",
-            area=float("nan"), bot_elev=float("nan"),
-        )
-        cat.add(ref)
-        mgr = _TransformManager(cat)
-        mgr.identity_key_columns = ["station", "variable", "area"]  # area is NaN
-        mgr.get_data_catalog()
-        key = TransformToCatalogAction._base_key(ref, ["station", "variable", "area"])
-        assert "nan" not in key
-        assert key == "RSAC054_flow"
+            assert ref.name in ("A_flow", "B_EC")

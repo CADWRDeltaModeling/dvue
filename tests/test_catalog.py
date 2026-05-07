@@ -81,35 +81,18 @@ class TestDataReference:
         assert "source" in ref.attributes
 
     def test_source_searchable_via_catalog(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="s1.csv", reader=InMemoryDataReferenceReader(simple_df), name="a"))
         cat.add(DataReference(source="s2.csv", reader=InMemoryDataReferenceReader(simple_df.copy()), name="b"))
         assert cat.search(source="s1.csv") == [cat["a"]]
         assert cat.search(source="s2.csv") == [cat["b"]]
 
     def test_source_in_to_dataframe(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="/x.csv", reader=InMemoryDataReferenceReader(simple_df), name="r"))
         df = cat.to_dataframe()
         assert "source" in df.columns
         assert df.loc["r", "source"] == "/x.csv"
-
-    def test_source_not_in_default_ref_key(self, simple_df):
-        """source should not appear in ref_key() by default."""
-        ref = DataReference(source="/data/flow.csv", reader=InMemoryDataReferenceReader(simple_df),
-                            name="r", station="A", variable="T")
-        assert ref.ref_key() == "A_T"  # source excluded
-
-    def test_source_not_in_default_key_attributes(self, simple_df):
-        ref = DataReference(source="s.csv", reader=InMemoryDataReferenceReader(simple_df),
-                            name="r", station="A")
-        assert "source" not in ref.get_key_attributes()
-
-    def test_source_included_when_set_as_key_attribute(self, simple_df):
-        ref = DataReference(source="s.csv", reader=InMemoryDataReferenceReader(simple_df),
-                            name="r", station="A")
-        ref.set_key_attributes(["source", "station"])
-        assert "source_csv" in ref.ref_key() or "s_csv" in ref.ref_key()
 
     def test_from_dataframe(self, simple_df):
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="climate")
@@ -223,110 +206,6 @@ class TestDataReference:
         assert not ref.has_attribute("nope")
 
     # ------------------------------------------------------------------
-    # ref_key
-    # ------------------------------------------------------------------
-
-    def test_ref_key_default_joins_attribute_values(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
-        assert ref.ref_key() == "A_wind_hourly"
-
-    def test_ref_key_sanitizes_spaces(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station_name="Station A")
-        assert ref.ref_key() == "Station_A"
-
-    def test_ref_key_sanitizes_special_chars(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="m/s")
-        assert ref.ref_key() == "m_s"
-
-    def test_ref_key_includes_numeric_attributes(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", year=2020)
-        assert ref.ref_key() == "_2020"  # prefixed with _ to form a valid Python identifier
-
-    def test_ref_key_never_starts_with_digit(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station_id="1", variable="flow")
-        key = ref.ref_key()
-        assert key[0].isalpha() or key[0] == "_", f"ref_key {key!r} starts with a digit"
-
-    def test_ref_key_skips_complex_types(self, simple_df):
-        class _Blob:
-            pass
-
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", blob=_Blob())
-        assert ref.ref_key() == "A"
-
-    def test_ref_key_empty_when_no_attributes(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r")
-        assert ref.ref_key() == ""
-
-    def test_ref_key_override_in_subclass(self, simple_df):
-        class CustomRef(DataReference):
-            def ref_key(self) -> str:
-                return self.get_attribute("station", "") + "_custom"
-
-        ref = CustomRef(simple_df, name="r", station="A")
-        assert ref.ref_key() == "A_custom"
-
-    # ------------------------------------------------------------------
-    # Key attributes
-    # ------------------------------------------------------------------
-
-    def test_get_key_attributes_default_returns_all_attr_names(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
-        assert ref.get_key_attributes() == ["station", "variable"]
-
-    def test_get_key_attributes_returns_set_names(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
-        ref.set_key_attributes(["station", "variable"])
-        assert ref.get_key_attributes() == ["station", "variable"]
-
-    def test_set_key_attributes_is_chainable(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A")
-        result = ref.set_key_attributes(["station"])
-        assert result is ref
-
-    def test_ref_key_respects_key_attributes_subset(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
-        ref.set_key_attributes(["station", "variable"])
-        assert ref.ref_key() == "A_wind"
-
-    def test_ref_key_respects_key_attributes_order(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
-        ref.set_key_attributes(["variable", "station"])
-        assert ref.ref_key() == "wind_A"
-
-    def test_ref_key_single_key_attribute(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
-        ref.set_key_attributes(["variable"])
-        assert ref.ref_key() == "wind"
-
-    def test_ref_key_empty_key_attributes_returns_empty(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
-        ref.set_key_attributes([])
-        assert ref.ref_key() == ""
-
-    def test_ref_key_unknown_key_attribute_skipped(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A")
-        ref.set_key_attributes(["station", "nonexistent"])
-        assert ref.ref_key() == "A"
-
-    def test_ref_key_without_key_attributes_uses_all(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind", interval="hourly")
-        assert ref.ref_key() == "A_wind_hourly"
-
-    def test_get_key_attributes_returns_copy(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A")
-        ref.set_key_attributes(["station"])
-        keys = ref.get_key_attributes()
-        keys.append("mutated")
-        assert ref.get_key_attributes() == ["station"]
-
-    def test_set_key_attributes_can_be_updated(self, simple_df):
-        ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", station="A", variable="wind")
-        ref.set_key_attributes(["station"])
-        assert ref.ref_key() == "A"
-        ref.set_key_attributes(["variable"])
-        assert ref.ref_key() == "wind"
-
     def test_set_attribute_chainable(self, simple_df):
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r")
         result = ref.set_attribute("a", 1).set_attribute("b", 2)
@@ -550,7 +429,7 @@ def hydro_catalog():
     Note: 'source' is a reserved DataReference constructor param, so we use
     set_attribute() to store it as metadata.
     """
-    cat = DataCatalog()
+    cat = DataCatalog(primary_key=["name"])
     cat.add(
         DataReference(
             source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"value": [1.0, 2.0]})), name="flow", stationid="STA001", variable="flow"
@@ -712,7 +591,7 @@ class TestCatalogView:
     # ------------------------------------------------------------------
 
     def test_schema_map_inherited_from_source(self):
-        cat = DataCatalog(schema_map={"stationid": "station"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"stationid": "station"})
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1]})), name="r", stationid="S01"))
         view = CatalogView(cat, selection={"stationid": "S01"})
         assert len(view) == 1
@@ -720,7 +599,7 @@ class TestCatalogView:
         assert view.search(station="S01") == [view["r"]]
 
     def test_to_dataframe_applies_schema_map(self):
-        cat = DataCatalog(schema_map={"stationid": "station"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"stationid": "station"})
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1]})), name="r", stationid="S01"))
         view = CatalogView(cat)
         df = view.to_dataframe()
@@ -855,7 +734,7 @@ class TestMathDataReference:
     def test_variables_resolved_from_catalog(self):
         df_x = pd.DataFrame({"v": [1.0, 2.0]})
         df_y = pd.DataFrame({"v": [3.0, 4.0]})
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(df_x), name="X"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(df_y), name="Y"))
         m = MathDataReference("X + Y", catalog=cat)
@@ -864,7 +743,7 @@ class TestMathDataReference:
     def test_variable_map_takes_priority_over_catalog(self):
         df_local = pd.DataFrame({"v": [100.0]})
         df_cat = pd.DataFrame({"v": [1.0]})
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(df_cat), name="X"))
         m = MathDataReference(
             "X",
@@ -889,7 +768,7 @@ class TestMathDataReference:
 
     def test_set_catalog_chainable(self, ab_refs):
         a, _ = ab_refs
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(a)
         m = MathDataReference("A * 2")
         result = m.set_catalog(cat)
@@ -971,7 +850,7 @@ class TestMathDataReference:
     def test_circular_self_reference_raises(self, ab_refs):
         """A MathDataReference whose search_map matches its own attributes raises ValueError."""
         a, _ = ab_refs
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(a)
         # The math ref has variable="ec" and searches for variable="ec" — finds itself.
         m = MathDataReference(
@@ -1080,65 +959,65 @@ class TestSetProgress:
 
 class TestDataCatalog:
     def test_add_and_get(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1")
         cat.add(ref)
         assert cat.get("r1") is ref
 
     def test_getitem(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r")
         cat.add(ref)
         assert cat["r"] is ref
 
     def test_add_requires_name(self, simple_df):
-        cat = DataCatalog()
-        with pytest.raises(ValueError, match="non-empty name"):
+        cat = DataCatalog(primary_key=["name"])
+        with pytest.raises(ValueError):
             cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df)))
 
     def test_contains(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r"))
         assert "r" in cat
         assert "other" not in cat
 
     def test_len(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r2"))
         assert len(cat) == 2
 
     def test_iter(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="a"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="b"))
         names = [r.name for r in cat]
         assert set(names) == {"a", "b"}
 
     def test_remove(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r"))
         cat.remove("r")
         assert "r" not in cat
 
     def test_remove_nonexistent_raises(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         with pytest.raises(KeyError):
             cat.remove("nope")
 
     def test_get_nonexistent_raises(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         with pytest.raises(KeyError):
             cat.get("nope")
 
     def test_list_names(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="a"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="b"))
         assert cat.list_names() == ["a", "b"]
 
     def test_list(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r")
         cat.add(r)
         assert r in cat.list()
@@ -1148,34 +1027,34 @@ class TestDataCatalog:
     # ------------------------------------------------------------------
 
     def test_exact_duplicate_same_object_raises(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="K")
         cat.add(r)
         with pytest.raises(ValueError, match="same reader, source, and"):
             cat.add(r)
 
     def test_exact_duplicate_same_reader_instance_raises(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         reader = InMemoryDataReferenceReader(simple_df)
         cat.add(DataReference(source="", reader=reader, name="r", unit="K"))
         with pytest.raises(ValueError, match="same reader, source, and"):
             cat.add(DataReference(source="", reader=reader, name="r", unit="K"))
 
     def test_different_reader_instances_same_name_replaces(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="K"))
         r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r", unit="K")
         cat.add(r2)  # different reader instance — should replace, not raise
         assert cat["r"] is r2
 
     def test_same_name_different_attrs_replaces(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="K"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="degC"))
         assert cat["r"].get_attribute("unit") == "degC"
 
     def test_same_name_different_source_data_replaces(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="K")
         cat.add(r1)
         df2 = pd.DataFrame({"temperature": [0.0], "season": ["winter"]})
@@ -1184,7 +1063,7 @@ class TestDataCatalog:
         assert cat["r"] is r2
 
     def test_add_is_chainable(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         result = cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r"))
         assert result is cat
 
@@ -1193,7 +1072,7 @@ class TestDataCatalog:
     # ------------------------------------------------------------------
 
     def test_search_scalar(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="T", unit="K")
         r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r2", variable="P", unit="Pa")
         cat.add(r1)
@@ -1202,7 +1081,7 @@ class TestDataCatalog:
         assert cat.search(variable="P") == [r2]
 
     def test_search_multiple_criteria(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="T", unit="K"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r2", variable="T", unit="Pa"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r3", variable="P", unit="K"))
@@ -1211,7 +1090,7 @@ class TestDataCatalog:
         assert result[0].name == "r1"
 
     def test_search_callable_predicate(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", year=2020))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r2", year=2018))
         result = cat.search(year=lambda y: y >= 2019)
@@ -1219,12 +1098,12 @@ class TestDataCatalog:
         assert result[0].name == "r1"
 
     def test_search_no_match_returns_empty(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="T"))
         assert cat.search(variable="X") == []
 
     def test_search_regex_attribute(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="EC_daily")
         r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r2", variable="EC_hourly")
         r3 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r3", variable="flow")
@@ -1234,7 +1113,7 @@ class TestDataCatalog:
         assert set(r.name for r in results) == {"r1", "r2"}
 
     def test_search_regex_name(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="station_a")
         r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="station_b")
         r3 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="other")
@@ -1243,14 +1122,14 @@ class TestDataCatalog:
         assert set(r.name for r in results) == {"station_a", "station_b"}
 
     def test_search_regex_case_insensitive(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="EC_daily")
         cat.add(r1)
         assert cat.search(variable="~ec.*") == [r1]
         assert cat.search(variable="~EC_DAILY") == [r1]
 
     def test_search_regex_combined_with_exact(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         r1 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="EC_daily", interval="hourly")
         r2 = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r2", variable="EC_daily", interval="daily")
         cat.add(r1); cat.add(r2)
@@ -1263,7 +1142,7 @@ class TestDataCatalog:
     # ------------------------------------------------------------------
 
     def test_search_with_canonical_name(self, simple_df):
-        cat = DataCatalog(schema_map={"variable": "param", "unit": "units"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"variable": "param", "unit": "units"})
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="temperature", unit="degC")
         cat.add(ref)
         # Search using canonical name
@@ -1271,7 +1150,7 @@ class TestDataCatalog:
         assert cat.search(units="degC") == [ref]
 
     def test_search_raw_name_still_works(self, simple_df):
-        cat = DataCatalog(schema_map={"variable": "param"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"variable": "param"})
         ref = DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="temperature")
         cat.add(ref)
         # Raw name works too (it's not in the canonical→raw reverse map,
@@ -1279,12 +1158,12 @@ class TestDataCatalog:
         assert cat.search(variable="temperature") == [ref]
 
     def test_get_canonical_attribute(self, simple_df):
-        cat = DataCatalog(schema_map={"variable": "param"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"variable": "param"})
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="T"))
         assert cat.get_canonical_attribute("r", "param") == "T"
 
     def test_set_schema_map_chainable(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         result = cat.set_schema_map({"variable": "param"})
         assert result is cat
 
@@ -1293,7 +1172,7 @@ class TestDataCatalog:
     # ------------------------------------------------------------------
 
     def test_to_dataframe_structure(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r1", variable="T", unit="K"))
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="r2", variable="P", unit="Pa"))
         df = cat.to_dataframe()
@@ -1302,14 +1181,14 @@ class TestDataCatalog:
         assert "unit" in df.columns
 
     def test_to_dataframe_applies_schema_map(self, simple_df):
-        cat = DataCatalog(schema_map={"variable": "param"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"variable": "param"})
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", variable="T"))
         df = cat.to_dataframe()
         assert "param" in df.columns
         assert "variable" not in df.columns
 
     def test_to_dataframe_empty_catalog(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         df = cat.to_dataframe()
         assert isinstance(df, pd.DataFrame)
         assert df.empty
@@ -1320,13 +1199,13 @@ class TestDataCatalog:
 
     def test_add_reader_and_add_source(self, csv_dir):
         reader = PatternCSVDirectoryReader("{name}__{stationid}__{source}")
-        cat = DataCatalog().add_reader(reader)
+        cat = DataCatalog(primary_key=["name"]).add_reader(reader)
         cat.add_source(str(csv_dir))
         # 3 matched, 1 unmatched (skipped)
         assert len(cat) == 3
 
     def test_add_source_no_reader_raises(self, tmp_path):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         with pytest.raises(ValueError, match="No registered DataCatalogReader"):
             cat.add_source(str(tmp_path))
 
@@ -1337,7 +1216,7 @@ class TestDataCatalog:
         original = DataCatalog._global_builders[:]
         try:
             DataCatalog.register_reader(reader)
-            cat = DataCatalog()
+            cat = DataCatalog(primary_key=["name"])
             cat.add_source(str(csv_dir))
             assert len(cat) == 3
         finally:
@@ -1346,8 +1225,8 @@ class TestDataCatalog:
     def test_add_reader_is_instance_local(self, csv_dir):
         """Instance readers do not bleed into sibling catalogs."""
         reader = PatternCSVDirectoryReader("{name}__{stationid}__{source}")
-        cat1 = DataCatalog().add_reader(reader)
-        cat2 = DataCatalog()  # no reader added
+        cat1 = DataCatalog(primary_key=["name"]).add_reader(reader)
+        cat2 = DataCatalog(primary_key=["name"])  # no reader added
         cat1.add_source(str(csv_dir))
         assert len(cat1) == 3
         with pytest.raises(ValueError):
@@ -1355,7 +1234,7 @@ class TestDataCatalog:
 
     def test_add_reader_chainable(self):
         reader = CSVDirectoryReader()
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         result = cat.add_reader(reader)
         assert result is cat
 
@@ -1364,7 +1243,7 @@ class TestDataCatalog:
     # ------------------------------------------------------------------
 
     def test_repr(self, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r"))
         assert "DataCatalog" in repr(cat)
         assert "1" in repr(cat)
@@ -1613,27 +1492,27 @@ class TestPatternCSVDirectoryReader:
     # ------------------------------------------------------------------
 
     def test_catalog_search_by_stationid(self, csv_dir):
-        cat = DataCatalog().add_reader(PatternCSVDirectoryReader(self.PATTERN))
+        cat = DataCatalog(primary_key=["name"]).add_reader(PatternCSVDirectoryReader(self.PATTERN))
         cat.add_source(str(csv_dir))
         results = cat.search(stationid="STA001")
         assert len(results) == 2
         assert {r.name for r in results} == {"flow", "temperature"}
 
     def test_catalog_search_by_source(self, csv_dir):
-        cat = DataCatalog().add_reader(PatternCSVDirectoryReader(self.PATTERN))
+        cat = DataCatalog(primary_key=["name"]).add_reader(PatternCSVDirectoryReader(self.PATTERN))
         cat.add_source(str(csv_dir))
         assert len(cat.search(source="CDEC")) == 2
         assert len(cat.search(source="USGS")) == 1
 
     def test_catalog_search_combined_criteria(self, csv_dir):
-        cat = DataCatalog().add_reader(PatternCSVDirectoryReader(self.PATTERN))
+        cat = DataCatalog(primary_key=["name"]).add_reader(PatternCSVDirectoryReader(self.PATTERN))
         cat.add_source(str(csv_dir))
         results = cat.search(stationid="STA001", source="CDEC")
         assert len(results) == 1
         assert results[0].name == "temperature"
 
     def test_catalog_search_with_schema_map(self, csv_dir):
-        cat = DataCatalog(schema_map={"stationid": "station", "source": "provider"})
+        cat = DataCatalog(primary_key=["name"], schema_map={"stationid": "station", "source": "provider"})
         cat.add_reader(PatternCSVDirectoryReader(self.PATTERN))
         cat.add_source(str(csv_dir))
         results = cat.search(station="STA001")
@@ -1642,7 +1521,7 @@ class TestPatternCSVDirectoryReader:
         assert len(results2) == 1
 
     def test_catalog_to_dataframe(self, csv_dir):
-        cat = DataCatalog().add_reader(PatternCSVDirectoryReader(self.PATTERN))
+        cat = DataCatalog(primary_key=["name"]).add_reader(PatternCSVDirectoryReader(self.PATTERN))
         cat.add_source(str(csv_dir))
         df = cat.to_dataframe()
         assert set(df.index) == {"flow", "stage", "temperature"}
@@ -1694,7 +1573,7 @@ class TestMathDataCatalogReader:
 
     @pytest.fixture()
     def base_catalog(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         df_a = pd.DataFrame({"v": [1.0, 2.0, 3.0]})
         df_b = pd.DataFrame({"v": [10.0, 20.0, 30.0]})
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(df_a), name="ref_a", variable="temp", unit="K"))
@@ -1934,7 +1813,7 @@ class TestMathDataCatalogReaderBuildFromData:
         assert refs[0]._search_require_single.get("x") is True
 
     def test_parent_catalog_wired(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         data = [self._simple_entry()]
         refs = MathDataCatalogReader().build_from_data(data, parent_catalog=cat)
         assert refs[0]._catalog is cat
@@ -1976,7 +1855,7 @@ def _make_two_col_catalog():
     idx = pd.date_range("2020-01-01", periods=3, freq="D")
     df_up = pd.DataFrame({"flow": [1.0, 2.0, 3.0]}, index=idx)
     df_dn = pd.DataFrame({"flow": [4.0, 5.0, 6.0]}, index=idx)
-    cat = DataCatalog()
+    cat = DataCatalog(primary_key=["name"])
     cat.add(DataReference(
         source="", reader=InMemoryDataReferenceReader(df_up),
         name="chan_437_up", geoid="437", subloc="UP",
@@ -2107,7 +1986,7 @@ class TestMatchesDynamicMetadata:
 
     def test_catalog_search_uses_dynamic_metadata(self):
         """DataCatalog.search() must find refs via dynamic metadata."""
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]}))
         r0 = DataReference(source="", reader=reader, name="r0", variable="flow")
         r1 = DataReference(source="", reader=reader, name="r1", variable="flow")
@@ -2188,14 +2067,14 @@ class TestDataReferenceSerialization:
 
 class TestDataCatalogCSV:
     def test_to_csv_creates_file(self, tmp_path, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="K"))
         p = tmp_path / "catalog.csv"
         cat.to_csv(p)
         assert p.exists()
 
     def test_to_csv_columns(self, tmp_path, simple_df):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="r", unit="K"))
         p = tmp_path / "catalog.csv"
         cat.to_csv(p)
@@ -2208,7 +2087,7 @@ class TestDataCatalogCSV:
     def test_to_csv_round_trips_name_source_reader(self, tmp_path, simple_df):
         p_data = tmp_path / "data.csv"
         simple_df.to_csv(p_data, index=False)
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(
             source=str(p_data),
             reader="dvue.catalog.FileDataReferenceReader",
@@ -2228,7 +2107,7 @@ class TestDataCatalogCSV:
     def test_from_csv_lazy_reader_loads_data(self, tmp_path, simple_df):
         p_data = tmp_path / "data.csv"
         simple_df.to_csv(p_data, index=False)
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(
             source=str(p_data),
             reader="dvue.catalog.FileDataReferenceReader",
@@ -2243,7 +2122,7 @@ class TestDataCatalogCSV:
         assert len(result) == 4
 
     def test_to_csv_empty_catalog(self, tmp_path):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         p = tmp_path / "empty.csv"
         cat.to_csv(p)
         assert p.exists()
@@ -2254,7 +2133,7 @@ class TestDataCatalogCSV:
     def test_from_csv_multiple_refs(self, tmp_path, simple_df):
         for name in ("a", "b", "c"):
             simple_df.to_csv(tmp_path / f"{name}.csv", index=False)
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         for name in ("a", "b", "c"):
             cat.add(DataReference(
                 source=str(tmp_path / f"{name}.csv"),
@@ -2276,7 +2155,7 @@ class TestInvalidateAllCaches:
     def _make_cached_catalog(self):
         """Two refs, each with a warm cache entry."""
         reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0, 2.0]}))
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         for name in ("ref_a", "ref_b"):
             ref = DataReference(reader=reader, name=name, cache=True)
             ref.getData()          # populate cache
@@ -2301,7 +2180,7 @@ class TestInvalidateAllCaches:
     def test_data_reloaded_after_invalidation(self):
         reader = InMemoryDataReferenceReader(pd.DataFrame({"v": [42.0]}))
         ref = DataReference(reader=reader, name="r", cache=True)
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(ref)
         df1 = ref.getData()
         cat.invalidate_all_caches()
@@ -2409,7 +2288,7 @@ class TestRefType:
         assert ref.ref_type == "raw"
 
     def test_to_dataframe_includes_ref_type_column(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(
             source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})),
             name="raw_ref", variable="flow"
@@ -2422,7 +2301,7 @@ class TestRefType:
         assert df.loc["math_ref", "ref_type"] == "math"
 
     def test_to_dataframe_all_raw_shows_raw_type(self):
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         cat.add(DataReference(
             source="", reader=InMemoryDataReferenceReader(pd.DataFrame({"v": [1.0]})),
             name="r1"
@@ -2448,7 +2327,7 @@ class TestSaveMathRefsRoundTrip:
     """save_math_refs → MathDataCatalogReader.build() must round-trip losslessly."""
 
     def _make_catalog(self) -> DataCatalog:
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
         df = pd.DataFrame({"v": [1.0, 2.0]})
         cat.add(DataReference(
             source="", reader=InMemoryDataReferenceReader(df),

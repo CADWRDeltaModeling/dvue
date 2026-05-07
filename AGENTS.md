@@ -45,72 +45,130 @@ Use this file when working in the `dvue/` workspace root.
 `MathDataReference` and adds it to the live catalog. The name format is:
 
 ```
-[f{url_num}_]{identity_key}__{tag}
+[s{source_num}_]{pk_values}__{tag}
 ```
 
-- `__` (double underscore) is the separator between identity and tag. It is unambiguous
-  because `DataReference.ref_key()` sanitises all non-alphanumeric runs to a single `_`,
-  so `__` can never appear inside the identity part.
-- The identity key is resolved via this priority chain:
-  1. `orig_ref._key_attributes` (set via `orig_ref.set_key_attributes([...])`)
-  2. `manager.identity_key_columns` param (catalog-level default)
-  3. Fallback: full `orig_ref.ref_key()` (verbose but always valid)
-- After creation, `set_key_attributes()` is called on the new math ref so that
-  `expression` is excluded from its own `ref_key()`.
+- `__` (double underscore) is the separator between pk_values and tag. It is unambiguous
+  because pk-value sanitisation collapses all non-alphanumeric runs to a single `_`,
+  so `__` can never appear inside the pk_values part.
+- `s{n}_` prefix: added only when `len(catalog._source_index) > 1` (multi-source catalog).
+  `n` = `catalog._source_index[orig_ref.source]`.
+- `{pk_values}`: values of `catalog.primary_key` columns (excluding `source_num`) read
+  from the original ref's attributes, joined with `_`, sanitised to a valid Python identifier.
 - Short tags: `tf`, `1D_mean`, `r24H_mean`, `diff`, `diffN`, `cumsum`, `x{factor}`.
   See `.github/transform-to-catalog-plan.md` for the full tag table.
+- The derived ref's `name` also serves as an expression token in `MathDataReference`
+  (variable resolution priority #3 — direct name lookup in attached catalog).
 
-When subclassing `TimeSeriesDataUIManager`, set `identity_key_columns` to the attribute
-names that form the "identity" of a reference in your catalog (e.g. `["B", "C"]` for DSS
-station + variable). This ensures **Transform → Ref** generates short, readable names.
+When subclassing `TimeSeriesDataUIManager`, declare `primary_key` when constructing
+the `DataCatalog` — not on the manager class:
 
 ```python
-class MyManager(TimeSeriesDataUIManager):
-    identity_key_columns = param.List(default=["station", "variable"])
+def _build_catalog(self):
+    # Single-source catalog
+    self._dvue_catalog = DataCatalog(primary_key=["station", "variable"])
+    # Multi-source catalog (source_num auto-computed from ref.source)
+    self._dvue_catalog = DataCatalog(primary_key=["source_num", "station", "variable"])
 ```
 
-Alternatively, call `ref.set_key_attributes(["station", "variable"])` on individual refs
-when you know their identity at construction time — this takes precedence over the manager param.
+`primary_key` is required at `DataCatalog()` construction. It controls:
+- Uniqueness enforcement (`ValueError` on duplicate pk-tuple)
+- Auto-naming of refs when `name=""` is not provided
+- `source_num` prefix in `TransformToCatalogAction` derived names
+- `catalog.get(station="A", variable="discharge")` keyword lookup
 
 ## Implementation Gotchas For Subclasses
 
 ### Mixed catalogs: math references alongside raw references
 
-When a `DataCatalog` contains both raw `DataReference` entries and `MathDataReference` entries (mixed catalog), rows produced by `to_dataframe().reset_index()` will have `NaN` in file/source columns for math references, because those columns do not apply to derived references.
+When a `DataCatalog` contains both raw `DataReference` entries and `MathDataReference` entries (mixed catalog), rows produced by `to_dataframe().reset_index()` will have `NaN` in the `source` column for math references, because derived references have no file source.
 
-**`get_data_reference` must guard against NaN filename**
+**`get_data_reference` must guard against NaN source**
 
-Raw entries are keyed by a composite like `{filename}::{path}`. Math entries are keyed by their `name` alone. The safe pattern is to check the `"name"` column first:
-
-```python
-def get_data_reference(self, row):
-    if "name" in row.index:
-        return self._dvue_catalog.get(row["name"])
-    return self._dvue_catalog.get(self._ref_name(row))
-```
-
-If your manager always builds the key from a file/source column (as `DSSDataUIManager` does with `build_ref_key`), you must explicitly handle NaN before building the key:
+Raw entries are keyed by their auto-derived name (from `primary_key` values). Math entries are keyed by their `name` alone. The safe pattern:
 
 ```python
 def get_data_reference(self, row):
-    filename = row.get("filename", None)
-    if pd.isna(filename):
-        return self._dvue_catalog.get(row["name"])
-    return self._dvue_catalog.get(self.build_ref_key(row))
+    source = row.get("source", None)
+    if pd.isna(source):
+        return self._dvue_catalog.get(row["name"])  # math ref
+    return self._dvue_catalog.get(row["name"])       # raw ref — name is always reliable
 ```
 
-Failing to do this produces a `KeyError: "No DataReference named 'nan::...' in catalog."`.
+Failing to guard against NaN produces a `KeyError: "No DataReference named 'nan::...' in catalog."`.
 
 **`get_unique_short_names` must not receive NaN paths**
 
-`TimeSeriesPlotAction.render` calls `get_unique_short_names(df[filename_column].unique())` when `display_fileno` is `True`. If math-reference rows are in the selection, the unique values include `NaN` (a float), which causes `os.path.normpath(NaN)` to raise `TypeError`. Filter NaN before passing to `get_unique_short_names`:
+`TimeSeriesPlotAction.render` calls `get_unique_short_names(df["source"].unique())` when
+`source_num` is a column in the catalog DataFrame. If math-reference rows are in the
+selection, the unique values include `NaN`, which causes `os.path.normpath(NaN)` to raise
+`TypeError`. Filter NaN before passing:
 
 ```python
-valid_files = [f for f in df[filename_column].unique() if not pd.isna(f)]
-short_names = get_unique_short_names(valid_files)
+valid_sources = [s for s in df["source"].unique() if not pd.isna(s)]
+short_names = get_unique_short_names(valid_sources)
 ```
 
-`file_index_map.get(NaN_key, "")` returns `""` automatically, so math-ref rows get no file-index label without extra code.
+## Subclass Migration Guide — primary_key / source_num Redesign
+
+This is a **breaking** redesign. The following concepts have been removed:
+- `DataReference.ref_key()`, `set_key_attributes()`, `get_key_attributes()`, `_key_attributes`
+- `TimeSeriesDataUIManager.identity_key_columns`, `url_column`, `url_num_column`,
+  `display_url_num`, `_apply_url_num()`
+- `url_num` dynamic metadata on refs
+
+### DataReference subclasses
+
+Remove any calls to `set_key_attributes()` and any overrides of `ref_key()` — both removed.
+No other changes required.
+
+### CatalogBuilder / DataCatalog construction
+
+Old:
+```python
+catalog = DataCatalog()
+ref.set_key_attributes(["station", "variable"])
+catalog.add(ref)
+```
+
+New:
+```python
+catalog = DataCatalog(primary_key=["station", "variable"])
+catalog.add(ref)  # name auto-derived from pk values; no per-ref key attributes
+```
+
+### TimeSeriesDataUIManager subclasses
+
+1. Remove `url_column` and `url_num_column` from `super().__init__()` call.
+2. Remove `identity_key_columns` param from the subclass.
+3. Remove `display_url_num` usage — replace with `"source_num" in df.columns`.
+4. Remove `_apply_url_num()` calls — `source_num` is auto-computed by the catalog.
+5. Add `primary_key=[...]` when constructing `DataCatalog` in `_build_catalog()`.
+6. NaN guard in `get_data_reference(row)`: use `row.get("source")` not `row.get("filename")`.
+7. In plot actions: replace `manager.url_column` → `"source"` and
+   `manager.display_url_num` → `"source_num" in dfcat.columns`.
+
+### Math ref YAML files
+
+Replace `url_num:` with `source_num:` in all `search_map` criteria blocks:
+
+```yaml
+# Old
+search_map:
+  x:
+    variable: flow
+    url_num: 0
+
+# New
+search_map:
+  x:
+    variable: flow
+    source_num: 0
+```
+
+A migration shim in `MathDataCatalogReader` reads old `url_num` keys as `source_num`
+and emits a deprecation warning, so existing YAML files load with a warning rather
+than silently failing.
 
 ## Downstream Integration Notes
 

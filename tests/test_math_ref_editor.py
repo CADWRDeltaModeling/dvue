@@ -28,7 +28,7 @@ from dvue.math_reference import save_math_refs
 # ---------------------------------------------------------------------------
 
 def _make_raw_catalog() -> DataCatalog:
-    cat = DataCatalog()
+    cat = DataCatalog(primary_key=["name"])
     df = pd.DataFrame({"v": [1.0, 2.0]})
     cat.add(DataReference(
         source="", reader=InMemoryDataReferenceReader(df),
