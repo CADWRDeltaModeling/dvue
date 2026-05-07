@@ -1092,6 +1092,10 @@ class TimeSeriesPlotAction(PlotAction):
 
                 data = manager._process_curve_data(data, row, time_range)
 
+                if data is None or len(data) == 0:
+                    logger.warning("Skipping empty data for row: %s", row.get("station_id", row.get("name", "")))
+                    continue
+
                 file_index = (
                     file_index_map.get(row.get("source", ""), "")
                     if "source_num" in df.columns
