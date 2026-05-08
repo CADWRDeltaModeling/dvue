@@ -615,6 +615,13 @@ class TimeSeriesDataUIManager(DataUIManager):
         cat = getattr(self, "data_catalog", None)
         if cat is not None and self._has_math_refs():
             df = cat.to_dataframe()
+            # Show the catalog key ('name') as a visible column so users can
+            # see what their transform/math refs are called.  Skip it when the
+            # subclass already provides a 'label' column as a cleaner display
+            # substitute (e.g. DSSDataUIManager injects label="" for raw refs
+            # and label=name for derived refs so the ugly raw DSS path is hidden).
+            if "name" not in column_width_map and "label" not in column_width_map:
+                column_width_map["name"] = "15%"
             for col in df.columns:
                 if col not in column_width_map and col not in ("geometry", "source"):
                     column_width_map[col] = "10%"

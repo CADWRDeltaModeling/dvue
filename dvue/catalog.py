@@ -1070,6 +1070,45 @@ class DataCatalog:
         del self._references[name]
         return self
 
+    def rename(self, old_name: str, new_name: str) -> "DataCatalog":
+        """Rename a reference in the catalog (chainable).
+
+        Updates both the internal dictionary key and the reference's own
+        ``name`` attribute atomically.  Does not affect ``_source_index`` —
+        the source (file path) is unchanged by a rename.
+
+        Use this instead of mutating ``ref.name`` directly — direct mutation
+        leaves the dictionary key stale and causes ``catalog.get(ref.name)``
+        to raise ``KeyError``.
+
+        Parameters
+        ----------
+        old_name : str
+            Current name of the reference.
+        new_name : str
+            New name for the reference.
+
+        Raises
+        ------
+        KeyError
+            If no reference with ``old_name`` exists in the catalog.
+        ValueError
+            If ``new_name`` is already taken by a different reference.
+        """
+        if old_name not in self._references:
+            raise KeyError(f"No DataReference named {old_name!r} in catalog.")
+        if new_name != old_name and new_name in self._references:
+            raise ValueError(
+                f"Cannot rename {old_name!r} to {new_name!r}: a reference "
+                f"named {new_name!r} already exists in the catalog."
+            )
+        if old_name == new_name:
+            return self
+        ref = self._references.pop(old_name)
+        ref.name = new_name
+        self._references[new_name] = ref
+        return self
+
     def get(self, name: Optional[str] = None, **pk_kwargs: Any) -> DataReference:
         """Retrieve a :class:`DataReference` by name or by primary-key keyword arguments.
 

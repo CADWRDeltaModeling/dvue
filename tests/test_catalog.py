@@ -1005,6 +1005,69 @@ class TestDataCatalog:
         with pytest.raises(KeyError):
             cat.remove("nope")
 
+    # ------------------------------------------------------------------
+    # rename()
+    # ------------------------------------------------------------------
+
+    def test_rename_updates_key(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="old"))
+        cat.rename("old", "new")
+        assert "new" in cat
+        assert "old" not in cat
+
+    def test_rename_updates_ref_name_attribute(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="old"))
+        cat.rename("old", "new")
+        assert cat.get("new").name == "new"
+
+    def test_rename_is_chainable(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="old"))
+        result = cat.rename("old", "new")
+        assert result is cat
+
+    def test_rename_nonexistent_raises_key_error(self):
+        cat = DataCatalog(primary_key=["name"])
+        with pytest.raises(KeyError, match="nope"):
+            cat.rename("nope", "something")
+
+    def test_rename_to_existing_name_raises_value_error(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="a"))
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df.copy()), name="b"))
+        with pytest.raises(ValueError, match="already exists"):
+            cat.rename("a", "b")
+
+    def test_rename_to_same_name_is_noop(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="a"))
+        cat.rename("a", "a")  # no error, no change
+        assert cat.get("a").name == "a"
+
+    def test_rename_preserves_source_index(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="f1.csv", reader=InMemoryDataReferenceReader(simple_df), name="a"))
+        cat.add(DataReference(source="f2.csv", reader=InMemoryDataReferenceReader(simple_df.copy()), name="b"))
+        cat.rename("a", "a_new")
+        df = cat.to_dataframe()
+        assert "source_num" in df.columns  # two distinct sources still tracked
+
+    def test_rename_data_still_loadable(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="old"))
+        cat.rename("old", "new")
+        result = cat.get("new").getData()
+        assert isinstance(result, pd.DataFrame)
+
+    def test_rename_then_get_old_raises(self, simple_df):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(source="", reader=InMemoryDataReferenceReader(simple_df), name="old"))
+        cat.rename("old", "new")
+        with pytest.raises(KeyError):
+            cat.get("old")
+
     def test_get_nonexistent_raises(self):
         cat = DataCatalog(primary_key=["name"])
         with pytest.raises(KeyError):
