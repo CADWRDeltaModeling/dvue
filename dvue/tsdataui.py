@@ -385,17 +385,23 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.color_cycle = hv.Cycle(color_list)
 
     def get_widgets(self):
+        _M = (1, 3, 1, 0)
+        time_range_w = pn.widgets.DatetimeRangeInput.from_param(
+            self.param.time_range,
+            name="Time range",
+            format="%Y-%m-%d %H:%M",
+            sizing_mode="stretch_width",
+            margin=_M,
+        )
         control_widgets = pn.Column(
-            pn.pane.HTML("Change time range of data to display:"),
-            pn.Param(
-                self.param.time_range,
-                widgets={
-                    "time_range": {
-                        "widget_type": pn.widgets.DatetimeRangeInput,
-                        "format": "%Y-%m-%d %H:%M",
-                    }
-                },
+            pn.pane.HTML(
+                "<div style='font-size:11px;color:#666;margin:4px 0 2px 4px'>"
+                "Select the time range of data to display:</div>",
+                margin=(0, 0, 0, 0),
             ),
+            time_range_w,
+            sizing_mode="stretch_width",
+            margin=(4, 8, 4, 4),
         )
         plot_widgets = pn.Column(
             pn.WidgetBox(
@@ -512,26 +518,24 @@ class TimeSeriesDataUIManager(DataUIManager):
             sizing_mode="stretch_width",
             margin=(4, 8, 4, 4),
         )
-        widget_tabs = pn.Tabs(
-            ("Time", control_widgets),
-            ("Plot", plot_widgets),
-            ("Transform", transform_widgets),
-        )
+        widget_tabs = {
+            "Time": control_widgets,
+            "Transform": transform_widgets,
+            "Plot": plot_widgets,
+        }
         return widget_tabs
 
     def get_mobile_widgets(self):
         """Return a compact widget set for mobile: time range + key plot options."""
+        time_range_w = pn.widgets.DatetimeRangeInput.from_param(
+            self.param.time_range,
+            name="Time range",
+            format="%Y-%m-%d %H:%M",
+            sizing_mode="stretch_width",
+        )
         time_widget = pn.Column(
             pn.pane.HTML("Time range:"),
-            pn.Param(
-                self.param.time_range,
-                widgets={
-                    "time_range": {
-                        "widget_type": pn.widgets.DatetimeRangeInput,
-                        "format": "%Y-%m-%d %H:%M",
-                    }
-                },
-            ),
+            time_range_w,
         )
         plot_opts = pn.Column(
             self.param.show_legend,

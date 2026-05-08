@@ -360,11 +360,17 @@ class DataUIManager(DataProvider):
             if getattr(method, "__isabstractmethod__", False):
                 print(f"- {name}: {method.__doc__}")
 
-    def get_widgets(self) -> pn.pane.Markdown:
+    def get_widgets(self) -> dict:
         """
-        Return Panel widgets for additional controls. Override to provide custom widgets.
+        Return a dict mapping tab label → Panel content Column for the sidebar.
+
+        Override to provide custom widgets.  Return a ``dict`` with string keys
+        (tab labels) and Panel layout values (one per sidebar tab).  The base
+        implementation returns an empty dict; ``create_view()`` falls back to a
+        plain "Options" tab when a non-dict value is returned (backward-compat
+        for subclasses that have not yet been migrated).
         """
-        return pn.pane.Markdown("No widgets available")
+        return {}
 
     # ------------------------------------------------------------------
     # Table / view configuration
@@ -1010,6 +1016,15 @@ class DataUI(param.Parameterized):
 
         if actions:
             action_buttons = self.create_data_actions(actions)
+            # Insert a thin vertical separator between the primary Plot button
+            # and the secondary actions (Download, Math Ref, etc.).
+            if len(action_buttons) > 1:
+                _vsep = pn.pane.HTML(
+                    "<div style='width:1px;background:#d8d8d8;margin:6px 4px;"
+                    "align-self:stretch'></div>",
+                    margin=(0, 0, 0, 0),
+                )
+                action_buttons = [action_buttons[0], _vsep] + action_buttons[1:]
             self._action_panel.extend(action_buttons)
         self._action_panel.append(pn.layout.HSpacer())
         self._display_panel.append(
@@ -1221,15 +1236,17 @@ class DataUI(param.Parameterized):
             )
 
     def create_view_navigation(self):
-        """Create navigation buttons for switching between views"""
-        nav_buttons = pn.Row(
-            pn.widgets.Button(name="Combined", button_type="success"),
-            pn.widgets.Button(name="Table", button_type="success"),
-            pn.widgets.Button(name="Display", button_type="success"),
+        """Create a segmented-control radio group for switching between views."""
+        nav = pn.widgets.RadioButtonGroup(
+            name="View",
+            options=["Combined", "Table", "Display"],
+            value="Combined",
+            button_type="default",
+            margin=(4, 0, 4, 0),
         )
 
-        def set_view(event):
-            view_name = event.obj.name.lower()
+        def _on_nav_change(event):
+            view_name = event.new.lower()
             # Directly update the layout — don't rely on the hash→watch
             # round-trip, which may not fire when location.hash is set from
             # Python (timing depends on session context availability).
@@ -1238,10 +1255,9 @@ class DataUI(param.Parameterized):
             if pn.state.location:
                 pn.state.location.hash = f"#{view_name}"
 
-        for btn in nav_buttons:
-            btn.on_click(set_view)
-
-        return nav_buttons
+        nav.param.watch(_on_nav_change, "value")
+        self._nav_radio = nav
+        return nav
 
     def _apply_view_type(self, view_name):
         """Switch the main content area to *view_name* ('combined', 'table', or 'display').
@@ -1267,10 +1283,14 @@ class DataUI(param.Parameterized):
             return
         hash_value = pn.state.location.hash.lstrip("#")
         self._apply_view_type(hash_value)
+        # Keep the nav radio in sync when navigating via browser back/forward.
+        if hasattr(self, "_nav_radio"):
+            cap = hash_value.capitalize() if hash_value in ("combined", "table", "display") else "Combined"
+            if self._nav_radio.value != cap:
+                self._nav_radio.value = cap
 
     def create_view(self, title="Data User Interface"):
         main_panel = self.create_data_table(self._dfcat)
-        control_widgets = self._dataui_manager.get_widgets()
 
         # Create progress bar
         self.progress_bar = pn.indicators.Progress(
@@ -1289,9 +1309,10 @@ class DataUI(param.Parameterized):
             visible=False,
         )
 
-        table_options = pn.WidgetBox(
-            "Table Options",
+        table_options = pn.Column(
             self.param.use_regex_filter,
+            sizing_mode="stretch_width",
+            margin=(4, 8, 4, 4),
         )
         # Column visibility picker — MultiChoice showing all table columns.
         # Checked = visible; unchecked = hidden (but still filterable).
@@ -1310,10 +1331,10 @@ class DataUI(param.Parameterized):
 
         self._column_picker.param.watch(_on_column_picker_change, "value")
         table_options.append(self._column_picker)
+        # Build map options as a collapsible Card (used inside the Map sidebar tab)
         if hasattr(self, "_map_features"):
             _extra_map_widgets = self._dataui_manager.get_map_option_widgets()
             _map_option_items = [
-                "Map Options",
                 self.param.show_map_colors,
                 self.param.map_color_category,
                 self.param.show_map_markers,
@@ -1325,7 +1346,14 @@ class DataUI(param.Parameterized):
             ]
             if _extra_map_widgets is not None:
                 _map_option_items.append(_extra_map_widgets)
-            map_options = pn.WidgetBox(*_map_option_items)
+            # Build a collapsible accordion for map options inside the Map tab
+            map_options_card = pn.Card(
+                *_map_option_items,
+                title="Map Options",
+                collapsed=True,
+                sizing_mode="stretch_width",
+                margin=(8, 4, 4, 4),
+            )
             # Use HoloViews streams.Params instead of pn.bind so that ALL param
             # changes (including color/marker category) are routed through
             # HoloViews' own rendering pipeline.  pn.bind only triggers a Panel
@@ -1393,27 +1421,37 @@ class DataUI(param.Parameterized):
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
                 self._tmap * self._map_function,
+                map_options_card,
                 min_width=300,
                 min_height=300,
                 sizing_mode="stretch_both",
             )
 
+            # Build a flat tab list: Time / Transform / Plot / Map / Table
+            _ctrl = self._dataui_manager.get_widgets()
+            if isinstance(_ctrl, dict) and _ctrl:
+                _ctrl_tabs = list(_ctrl.items())
+            elif _ctrl:
+                _ctrl_tabs = [("Options", _ctrl)]
+            else:
+                _ctrl_tabs = []
+            _ctrl_tabs.append(("Map", map_view))
+            _ctrl_tabs.append(("Table", table_options))
             sidebar_view = pn.Column(
-                pn.Tabs(
-                    ("Map", map_view),
-                    ("Options", control_widgets),
-                    ("Table Options", table_options),
-                    ("Map Options", map_options),
-                ),
-                self.progress_bar,
-                self._status_label,
+                pn.Tabs(*_ctrl_tabs, active=0),
                 sizing_mode="stretch_both",
             )
         else:
+            _ctrl = self._dataui_manager.get_widgets()
+            if isinstance(_ctrl, dict) and _ctrl:
+                _ctrl_tabs = list(_ctrl.items())
+            elif _ctrl:
+                _ctrl_tabs = [("Options", _ctrl)]
+            else:
+                _ctrl_tabs = []
+            _ctrl_tabs.append(("Table", table_options))
             sidebar_view = pn.Column(
-                pn.Tabs(("Options", control_widgets), ("Table Options", table_options)),
-                self.progress_bar,
-                self._status_label,
+                pn.Tabs(*_ctrl_tabs, active=0),
                 sizing_mode="stretch_both",
             )
         # Create view navigation buttons.
@@ -1426,8 +1464,16 @@ class DataUI(param.Parameterized):
 
         # _main_content is swapped by update_view_from_location on view-type
         # changes; nav_bar stays pinned at the top of _main_view.
+        # Progress bar is placed here (not in sidebar) so it is visible during
+        # long plot operations without requiring a tab switch.
         self._main_content = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
-        self._main_view = pn.Column(nav_bar, self._main_content, sizing_mode="stretch_both")
+        self._main_view = pn.Column(
+            nav_bar,
+            self.progress_bar,
+            self._status_label,
+            self._main_content,
+            sizing_mode="stretch_both",
+        )
 
         template = pn.template.FastListTemplate(
             title=title,
