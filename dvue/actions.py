@@ -399,7 +399,10 @@ class TransformToCatalogAction:
             parts.append(orig_ref.name)
         base = "_".join(parts)
         raw = f"{base}__{tag}" if tag else base
-        return re.sub(r"[^a-zA-Z0-9_.]", "_", raw)
+        # Dots are NOT valid Python identifier characters; strip them so the
+        # generated name can be used directly as a token in further math
+        # expressions (e.g. "STA1_flow__tf * 0.5").
+        return re.sub(r"[^a-zA-Z0-9_]", "_", raw)
 
     # ------------------------------------------------------------------
     # UI refresh helper (mirrors MathRefEditorAction._on_save)

@@ -541,11 +541,31 @@ class TestTransformToCatalogActionExpressionBuilder:
         assert " " not in name
 
     def test_transform_to_catalog_action_registered(self):
-        """Action bar must include 'Transform → Ref' when show_transform_to_catalog=True."""
+        """'Transform → Ref' widget must appear in the Transform tab (not the action bar)."""
         cat = _build_catalog(["file_a.dss"])
         mgr = _TransformManager(cat)
-        names = [a["name"] for a in mgr.get_data_actions()]
-        assert "Transform → Ref" in names
+        # Action bar should NOT contain 'Transform → Ref' — it was moved to the Transform tab.
+        action_names = [a["name"] for a in mgr.get_data_actions()]
+        assert "Transform → Ref" not in action_names
+        # The Transform tab widgets must contain the button.
+        widgets = mgr.get_widgets()
+        transform_col = widgets.get("Transform")
+        assert transform_col is not None, "Transform tab missing from get_widgets()"
+        # Collect all button names recursively in the Transform Column
+        def _collect_button_names(obj, found=None):
+            if found is None:
+                found = []
+            import panel as pn
+            if isinstance(obj, (pn.widgets.Button, pn.widgets.MenuButton)):
+                found.append(obj.name)
+            if hasattr(obj, "objects"):
+                for child in obj.objects:
+                    _collect_button_names(child, found)
+            return found
+        btn_names = _collect_button_names(transform_col)
+        assert any("Transform" in n or "Catalog" in n for n in btn_names), (
+            f"No Transform→Ref button found in Transform tab. Buttons found: {btn_names}"
+        )
 
 
 # ---------------------------------------------------------------------------

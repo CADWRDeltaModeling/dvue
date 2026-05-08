@@ -944,6 +944,14 @@ class DataCatalog:
 
         Handles special columns: ``"name"`` reads from ``ref.name``;
         ``"source_num"`` reads from ``_source_index[ref.source]``.
+
+        A ``"tag"`` attribute is always appended as the final discriminator,
+        even when ``"tag"`` is not declared in *primary_key*.  This ensures
+        that a :class:`~dvue.math_reference.MathDataReference` produced by
+        ``TransformToCatalogAction`` (which carries a non-empty ``tag`` such
+        as ``"tf"`` or ``"1D_mean"``) never collides with its raw source ref
+        (whose ``tag`` attribute is absent / ``None``).  No subclass or app
+        needs to add ``"tag"`` to its ``primary_key`` list.
         """
         values = []
         for col in self._primary_key:
@@ -953,6 +961,9 @@ class DataCatalog:
                 values.append(ref.name)
             else:
                 values.append(ref.get_attribute(col))
+        # Append tag as implicit trailing discriminator (None for raw refs).
+        if "tag" not in self._primary_key:
+            values.append(ref.get_attribute("tag"))
         return tuple(values)
 
     # ------------------------------------------------------------------
