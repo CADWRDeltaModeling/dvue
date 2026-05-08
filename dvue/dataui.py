@@ -487,13 +487,16 @@ class DataUIManager(DataProvider):
             action_type="display",
             callback=plot_action.callback,
         )
-        download_button = dict(
+        # Combine Download Data + Download Catalog into a single MenuButton.
+        download_menu_button = dict(
             name="Download",
-            button_type="primary",
-            icon="file-download",
-            action_type="download",
-            filename="data.csv",
-            callback=download_action.callback,
+            button_type="success",
+            icon="download",
+            action_type="download_menu",
+            items=[
+                dict(label="Download Data",    filename="data.csv",    callback=download_action.callback),
+                dict(label="Download Catalog", filename="catalog.csv", callback=download_catalog.callback),
+            ],
         )
         permalink_button = dict(
             name="Permalink",
@@ -502,18 +505,9 @@ class DataUIManager(DataProvider):
             action_type="link",
             callback=permalink_action.callback,
         )
-        download_catalog_button = dict(
-            name="Download Catalog",
-            button_type="primary",
-            icon="file-download",
-            action_type="download",
-            filename="catalog.csv",
-            callback=download_catalog.callback,
-        )
-        actions = [plot_button, download_button]
+        actions = [plot_button, download_menu_button]
         if self.show_permalink:
             actions.append(permalink_button)
-        actions.append(download_catalog_button)
         return actions
 
     def get_mobile_table_columns(self) -> list:
@@ -896,7 +890,56 @@ class DataUI(param.Parameterized):
     def create_data_actions(self, actions):
         action_buttons = []
         for action in actions:
-            if action["action_type"] == "download":
+            if action["action_type"] == "download_menu":
+                # MenuButton dropdown — each item triggers the matching download
+                # callback via a hidden FileDownload widget.  The FileDownload
+                # is included in the Row so it is part of the Bokeh document;
+                # incrementing _clicks from Python syncs to the browser and
+                # triggers the server-side file endpoint.
+                items_cfg = action["items"]
+                _item_map = {it["label"]: it for it in items_cfg}
+                _selected = [items_cfg[0]]  # mutable selection container
+
+                def _dynamic_dl_callback():
+                    import asyncio
+                    sio = _selected[0]["callback"](None, self)
+                    pn.state.curdoc.add_next_tick_callback(
+                        lambda: asyncio.create_task(self._hide_progress_after_delay())
+                    )
+                    return sio
+
+                _trigger_dl = pn.widgets.FileDownload(
+                    label="",
+                    callback=_dynamic_dl_callback,
+                    filename=items_cfg[0]["filename"],
+                    embed=False,
+                    auto=False,
+                    visible=False,
+                    width=0,
+                    height=0,
+                    margin=(0, 0, 0, 0),
+                )
+
+                menu_btn = pn.widgets.MenuButton(
+                    name=action["name"],
+                    items=[it["label"] for it in items_cfg],
+                    button_type=action.get("button_type", "success"),
+                    icon=action.get("icon", "download"),
+                    height=32,
+                    margin=(0, 4, 0, 0),
+                )
+
+                def _on_dl_menu(event):
+                    cfg = _item_map.get(event.new)
+                    if cfg is None:
+                        return
+                    _selected[0] = cfg
+                    _trigger_dl.filename = cfg["filename"]
+                    _trigger_dl._clicks += 1
+
+                menu_btn.on_click(_on_dl_menu)
+                button = pn.Row(menu_btn, _trigger_dl, align="center", margin=(0, 2, 0, 0))
+            elif action["action_type"] == "download":
                 # Create a closure that captures the current action
                 def create_download_callback(current_action):
                     def _download_callback():
@@ -1236,22 +1279,18 @@ class DataUI(param.Parameterized):
             )
 
     def create_view_navigation(self):
-        """Create a segmented-control radio group for switching between views."""
-        nav = pn.widgets.RadioButtonGroup(
-            name="View",
+        """Create a compact Select dropdown for switching between views."""
+        nav = pn.widgets.Select(
+            name="",
             options=["Combined", "Table", "Display"],
             value="Combined",
-            button_type="default",
-            margin=(4, 0, 4, 0),
+            width=120,
+            margin=(2, 4, 2, 0),
         )
 
         def _on_nav_change(event):
             view_name = event.new.lower()
-            # Directly update the layout — don't rely on the hash→watch
-            # round-trip, which may not fire when location.hash is set from
-            # Python (timing depends on session context availability).
             self._apply_view_type(view_name)
-            # Also update the URL hash for browser history / bookmarking.
             if pn.state.location:
                 pn.state.location.hash = f"#{view_name}"
 
@@ -1283,7 +1322,7 @@ class DataUI(param.Parameterized):
             return
         hash_value = pn.state.location.hash.lstrip("#")
         self._apply_view_type(hash_value)
-        # Keep the nav radio in sync when navigating via browser back/forward.
+        # Keep the nav Select in sync when navigating via browser back/forward.
         if hasattr(self, "_nav_radio"):
             cap = hash_value.capitalize() if hash_value in ("combined", "table", "display") else "Combined"
             if self._nav_radio.value != cap:
@@ -1420,11 +1459,21 @@ class DataUI(param.Parameterized):
 
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
-                self._tmap * self._map_function,
+                # Wrap map in inner Column with flex-shrink:0 so it never
+                # loses height when Map Options card expands below.
+                pn.Column(
+                    self._tmap * self._map_function,
+                    sizing_mode="stretch_both",
+                    min_height=250,
+                    styles={"flex-shrink": "0"},
+                ),
                 map_options_card,
                 min_width=300,
                 min_height=300,
                 sizing_mode="stretch_both",
+                # overflow-y:auto lets options expand downward (sidebar scrolls)
+                # rather than squeezing the map pane above.
+                styles={"overflow-y": "auto"},
             )
 
             # Build a flat tab list: Time / Transform / Plot / Map / Table
@@ -1437,8 +1486,9 @@ class DataUI(param.Parameterized):
                 _ctrl_tabs = []
             _ctrl_tabs.append(("Map", map_view))
             _ctrl_tabs.append(("Table", table_options))
+            self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
             sidebar_view = pn.Column(
-                pn.Tabs(*_ctrl_tabs, active=0),
+                self._sidebar_tabs,
                 sizing_mode="stretch_both",
             )
         else:
@@ -1450,8 +1500,9 @@ class DataUI(param.Parameterized):
             else:
                 _ctrl_tabs = []
             _ctrl_tabs.append(("Table", table_options))
+            self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
             sidebar_view = pn.Column(
-                pn.Tabs(*_ctrl_tabs, active=0),
+                self._sidebar_tabs,
                 sizing_mode="stretch_both",
             )
         # Create view navigation buttons.

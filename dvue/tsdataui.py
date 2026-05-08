@@ -277,32 +277,6 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="display",
                 callback=math_action.callback,
             ))
-        if self.show_source_compare:
-            # Combine Transform→Ref and Source Compare under one MenuButton
-            from .actions import TransformToCatalogAction, SourceCompareAction
-            xform_action = TransformToCatalogAction()
-            compare_action = SourceCompareAction()
-            actions.append(dict(
-                name="Add to Catalog",
-                button_type="success",
-                icon="arrows-collapse",
-                action_type="menu",
-                items=["Transform → Ref", "Source Compare"],
-                callbacks={
-                    "Transform → Ref": xform_action.callback,
-                    "Source Compare": compare_action.callback,
-                },
-            ))
-        elif self.show_transform_to_catalog:
-            from .actions import TransformToCatalogAction
-            xform_action = TransformToCatalogAction()
-            actions.append(dict(
-                name="Transform → Ref",
-                button_type="success",
-                icon="transform",
-                action_type="inline",
-                callback=xform_action.callback,
-            ))
         if self.show_clear_cache:
             from .actions import ClearCacheAction
             actions.append(dict(
@@ -513,6 +487,8 @@ class TimeSeriesDataUIManager(DataUIManager):
             _section("Display"),
             pn.Row(sensible_w, pct_range_w,
                    align="center", sizing_mode="stretch_width"),
+            # ── Transform → Ref ───────────────────────────────────
+            *self._make_transform_ref_widgets(),
             # ── Actions ───────────────────────────────────────────
             *([] if not self.show_clear_cache else [pn.layout.Divider(margin=(8, 0, 4, 0)), clear_cache_btn]),
             sizing_mode="stretch_width",
@@ -524,6 +500,65 @@ class TimeSeriesDataUIManager(DataUIManager):
             "Plot": plot_widgets,
         }
         return widget_tabs
+
+    def _make_transform_ref_widgets(self):
+        """Return a list of Panel objects to append at the bottom of the Transform tab.
+
+        When ``show_transform_to_catalog`` or ``show_source_compare`` is True a
+        "Transform → Ref" button (and optionally "Source Compare") is rendered
+        here so the action lives next to the transform settings it applies to.
+        """
+        items = []
+        if not (self.show_transform_to_catalog or self.show_source_compare):
+            return items
+        items.append(pn.layout.Divider(margin=(8, 0, 4, 0)))
+        items.append(pn.pane.HTML(
+            "<div style='border-left:3px solid #4a90d9;padding:1px 7px;"
+            "font-size:11px;font-weight:700;color:#333;letter-spacing:.3px;"
+            "margin:8px 0 2px 0'>Save Transform</div>",
+            sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+        ))
+        if self.show_source_compare:
+            from .actions import TransformToCatalogAction, SourceCompareAction
+            xform_action = TransformToCatalogAction()
+            compare_action = SourceCompareAction()
+            menu_btn = pn.widgets.MenuButton(
+                name="Add to Catalog",
+                items=["Transform → Ref", "Source Compare"],
+                button_type="success",
+                icon="arrows-collapse",
+                sizing_mode="stretch_width",
+            )
+            def _make_menu_handler(_xa, _ca):
+                def _on_click(event):
+                    _dataui = getattr(self, "_dataui", None)
+                    if _dataui is None:
+                        return
+                    if event.new == "Transform → Ref":
+                        _xa.callback(event, _dataui)
+                    elif event.new == "Source Compare":
+                        _ca.callback(event, _dataui)
+                return _on_click
+            menu_btn.on_click(_make_menu_handler(xform_action, compare_action))
+            items.append(menu_btn)
+        else:
+            from .actions import TransformToCatalogAction
+            xform_action = TransformToCatalogAction()
+            xform_btn = pn.widgets.Button(
+                name="Transform → Ref",
+                button_type="success",
+                icon="transform",
+                sizing_mode="stretch_width",
+            )
+            def _make_xform_handler(_xa):
+                def _on_click(event):
+                    _dataui = getattr(self, "_dataui", None)
+                    if _dataui is not None:
+                        _xa.callback(event, _dataui)
+                return _on_click
+            xform_btn.on_click(_make_xform_handler(xform_action))
+            items.append(xform_btn)
+        return items
 
     def get_mobile_widgets(self):
         """Return a compact widget set for mobile: time range + key plot options."""

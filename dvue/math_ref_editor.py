@@ -179,6 +179,141 @@ class MathRefEditorAction:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # YAML sidebar tab
+    # ------------------------------------------------------------------
+
+    def _inject_yaml_sidebar_tab(self, catalog: Any, manager: Any, dataui: Any) -> None:
+        """Inject a 'Math YAML' tab into the sidebar the first time the editor opens.
+
+        Idempotent — subsequent calls do nothing so clicking Math Ref multiple
+        times does not add duplicate tabs.
+        """
+        if getattr(dataui, "_math_yaml_sidebar_added", False):
+            return
+        if not hasattr(dataui, "_sidebar_tabs"):
+            return
+
+        yaml_status = pn.pane.Markdown("", sizing_mode="stretch_width", margin=(4, 0, 0, 0))
+
+        def _section(title: str):
+            return pn.pane.HTML(
+                f"<div style='border-left:3px solid #4a90d9;padding:1px 7px;"
+                f"font-size:11px;font-weight:700;color:#333;letter-spacing:.3px;"
+                f"margin:8px 0 2px 0'>{title}</div>",
+                sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+            )
+
+        # ── Upload ────────────────────────────────────────────────────────────
+        upload_widget = pn.widgets.FileInput(
+            accept=".yaml,.yml",
+            name="Choose YAML file",
+            sizing_mode="stretch_width",
+            margin=(2, 0, 4, 0),
+        )
+        upload_btn = pn.widgets.Button(
+            name="Load YAML",
+            button_type="primary",
+            icon="file-import",
+            sizing_mode="stretch_width",
+            height=30,
+            margin=(0, 0, 4, 0),
+        )
+
+        def _on_upload(event: Any) -> None:
+            if upload_widget.value is None:
+                yaml_status.object = "⚠️ No file selected."
+                return
+            try:
+                import yaml as _yaml
+                from .math_reference import MathDataCatalogReader
+
+                raw = upload_widget.value
+                data = _yaml.safe_load(raw)
+                refs = MathDataCatalogReader().build_from_data(data, parent_catalog=catalog)
+                added = 0
+                for r in refs:
+                    try:
+                        catalog.remove(r.name)
+                    except KeyError:
+                        pass
+                    catalog.add(r)
+                    added += 1
+                if hasattr(dataui, "_dfcat"):
+                    try:
+                        dataui._dfcat = manager.get_data_catalog()
+                        new_cols = manager.get_table_columns()
+                        dataui.display_table.value = dataui._dfcat[new_cols]
+                        dataui.display_table.widths = manager.get_table_column_width_map()
+                        dataui.display_table.header_filters = manager.get_table_filters()
+                    except Exception as _te:
+                        logger.warning("Could not refresh table after YAML upload: %s", _te)
+                fname = getattr(upload_widget, "filename", "file")
+                yaml_status.object = f"✅ Loaded **{added}** ref(s) from `{fname}`."
+            except Exception as exc:
+                logger.exception("YAML sidebar upload error")
+                yaml_status.object = f"❌ Upload error: {exc}"
+
+        upload_btn.on_click(_on_upload)
+
+        # ── Download ──────────────────────────────────────────────────────────
+        def _yaml_download_callback():
+            from io import BytesIO
+            import tempfile, os
+            from .math_reference import save_math_refs
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+            ) as tmp:
+                tmp_path = tmp.name
+            try:
+                save_math_refs(catalog, tmp_path)
+                with open(tmp_path, "rb") as fh:
+                    data = fh.read()
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            return BytesIO(data)
+
+        import os  # needed in the closure above; also available at module scope
+        download_btn = pn.widgets.FileDownload(
+            label="Save YAML",
+            callback=_yaml_download_callback,
+            filename=self._default_yaml_filename,
+            button_type="success",
+            icon="file-export",
+            embed=False,
+            sizing_mode="stretch_width",
+            height=30,
+            margin=(0, 0, 4, 0),
+        )
+
+        yaml_tab = pn.Column(
+            _section("Upload"),
+            pn.pane.HTML(
+                "<span style='font-size:10px;color:#999'>Merge math refs from a YAML file "
+                "into the live catalog.</span>",
+                margin=(0, 0, 4, 0),
+            ),
+            upload_widget,
+            upload_btn,
+            _section("Download"),
+            pn.pane.HTML(
+                "<span style='font-size:10px;color:#999'>Save all current math refs "
+                "to a YAML file.</span>",
+                margin=(0, 0, 4, 0),
+            ),
+            download_btn,
+            yaml_status,
+            sizing_mode="stretch_width",
+            margin=(4, 8, 4, 4),
+        )
+
+        dataui._sidebar_tabs.append(("Math YAML", yaml_tab))
+        dataui._math_yaml_sidebar_added = True
+
+    # ------------------------------------------------------------------
     # Main callback
     # ------------------------------------------------------------------
 
@@ -244,41 +379,86 @@ class MathRefEditorAction:
                     if k != "expression" and isinstance(v, (str, int, float, bool, type(None)))
                 }
                 pre_attrs = "\n".join(f"{k}: {v}" for k, v in extra.items())
+
+        # ── Inject (or reuse) the YAML sidebar tab ────────────────────────────
+        self._inject_yaml_sidebar_tab(catalog, manager, dataui)
+
+        # ── Section header helper (compact blue accent bar) ───────────────────
+        def _section(title: str):
+            return pn.pane.HTML(
+                f"<div style='border-left:3px solid #4a90d9;padding:1px 7px;"
+                f"font-size:11px;font-weight:700;color:#333;letter-spacing:.3px;"
+                f"margin:8px 0 2px 0'>{title}</div>",
+                sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+            )
+
         # ── Build the editor form ─────────────────────────────────────────────
-        _title_text = (
-            f"### Math Reference Editor \u2014 Editing: `{pre_name}`"
-            if is_edit[0]
-            else "### Math Reference Editor"
-        )
-        title_md = pn.pane.Markdown(_title_text, sizing_mode="stretch_width")
-        help_md = pn.pane.Markdown(
-            "**Expression** — use NumPy functions (`cumsum`, `sqrt`, `abs`, `where`, …) "
-            "plus variable aliases defined in the Search Map.\n\n"
-            "**Attributes** — one `key: value` pair per line (e.g. `variable: flow`).",
-            sizing_mode="stretch_width",
+        _edit_label = f" — Editing: <code>{pre_name}</code>" if is_edit[0] else ""
+        title_html = pn.pane.HTML(
+            f"<div style='font-size:13px;font-weight:700;align-self:center'>"
+            f"Math Reference Editor{_edit_label}</div>",
+            margin=(0, 6, 0, 0),
         )
         name_input = pn.widgets.TextInput(
             name="Name (catalog key)",
             value=pre_name,
             placeholder="e.g. bias_RIO001",
+            sizing_mode="stretch_width",
         )
+
+        # ── Expression token picker (autocomplete via Select insert) ──────────
+        try:
+            _all_names = sorted(catalog.list_names())
+        except Exception:
+            _all_names = []
+
+        token_picker = pn.widgets.AutocompleteInput(
+            name="",
+            options=_all_names,
+            placeholder="Type to search catalog names…",
+            case_sensitive=False,
+            min_characters=1,
+            restrict=False,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 2, 0),
+            height=34,
+        )
+        token_hint = pn.pane.HTML(
+            "<span style='font-size:10px;color:#999'>Type a catalog name to insert it into the expression</span>",
+            margin=(0, 0, 4, 0),
+        )
+
         expr_input = pn.widgets.TextAreaInput(
             name="Expression",
             value=pre_expr,
             placeholder="e.g. water_level_usgs - model_RIO001",
-            height=90,
+            height=60,
+            sizing_mode="stretch_width",
         )
+
+        def _on_token_pick(event: Any) -> None:
+            token = (event.new or "").strip()
+            if not token or token not in _all_names:
+                return
+            current = expr_input.value.rstrip()
+            expr_input.value = f"{current} {token}".lstrip()
+            # Clear picker after insertion
+            token_picker.value = ""
+
+        token_picker.param.watch(_on_token_pick, "value")
 
         # ── Alias hint buttons (below expression) ─────────────────────────────
         alias_hint_row = pn.Row(
-            pn.pane.Markdown("**Aliases:**", margin=(6, 4, 0, 4)),
+            pn.pane.HTML("<span style='font-size:10px;color:#666;margin-right:4px'>Aliases:</span>",
+                         align=("start", "center"), margin=(0, 4, 0, 0)),
             sizing_mode="stretch_width",
             margin=(0, 0, 4, 0),
         )
 
         def _refresh_alias_hints() -> None:
             """Rebuild alias hint buttons from current sm_rows variable aliases."""
-            btns = [pn.pane.Markdown("**Aliases:**", margin=(6, 4, 0, 4))]
+            btns = [pn.pane.HTML("<span style='font-size:10px;color:#666;margin-right:4px'>Aliases:</span>",
+                                  align=("start", "center"), margin=(0, 4, 0, 0))]
             for _vi, _mc, _ci, _rc in sm_rows:
                 alias = _vi.value.strip()
                 if not alias:
@@ -287,7 +467,7 @@ class MathRefEditorAction:
                     name=alias,
                     button_type="light",
                     width=max(50, len(alias) * 9),
-                    height=28,
+                    height=24,
                     margin=(2, 4, 2, 0),
                 )
 
@@ -301,21 +481,47 @@ class MathRefEditorAction:
                 btns.append(_btn)
             alias_hint_row.objects = btns
 
+        # ── Copy Attributes button ────────────────────────────────────────────
+        copy_attrs_btn = pn.widgets.Button(
+            name="Copy from selection",
+            button_type="light",
+            icon="clipboard-copy",
+            height=28,
+            margin=(0, 4, 0, 0),
+        )
+
+        def _on_copy_attrs(event: Any) -> None:
+            """Copy identifying attributes from the first selected table row."""
+            sel = dataui.display_table.selection
+            if not sel:
+                if pn.state.notifications is not None:
+                    pn.state.notifications.warning(
+                        "Select a table row first to copy its attributes.", duration=3000
+                    )
+                return
+            row = dataui._dfcat.iloc[sel[0]]
+            ident = _identifying_attrs(dict(row))
+            if ident:
+                attrs_input.value = "\n".join(f"{k}: {v}" for k, v in ident.items())
+            else:
+                if pn.state.notifications is not None:
+                    pn.state.notifications.warning(
+                        "No identifying string attributes found on selected row.", duration=3000
+                    )
+
+        copy_attrs_btn.on_click(_on_copy_attrs)
+
         attrs_input = pn.widgets.TextAreaInput(
-            name="Attributes  (key: value — one per line)",
+            name="",
             value=pre_attrs,
             placeholder="variable: water_level_bias\nstationid: RIO001\nunit: m",
-            height=110,
+            height=70,
+            sizing_mode="stretch_width",
         )
 
         # ── Search Map: dynamic row editor ─────────────────────────────────────
         sm_rows: list = []  # list of (var_inp, multi_cb, crit_inp, row_container)
 
-        sm_header_md = pn.pane.Markdown(
-            "**Search Map** — one row per expression variable.  "
-            "Each alias is resolved against the catalog at `getData()` time using the criteria.",
-            sizing_mode="stretch_width",
-        )
         # Collect catalog attribute names for the picker (exclude internal cols).
         try:
             _df_cat_cols = [
@@ -327,33 +533,28 @@ class MathRefEditorAction:
         _attr_picker_options = [""] + sorted(_df_cat_cols)
 
         sm_col_labels = pn.Row(
-            pn.pane.Markdown("**Alias**", width=100, margin=(0, 4, 0, 4)),
-            pn.pane.Markdown("**Match all**", width=80, margin=(0, 4, 0, 4)),
-            pn.pane.Markdown(
-                "**Catalog criteria** (`attr=val` exact · `attr~regex` pattern)",
-                sizing_mode="stretch_width",
-                margin=(0, 4, 0, 4),
-            ),
-            pn.pane.Markdown("**+attr**", width=96, margin=(0, 4, 0, 4)),
-            pn.pane.Markdown("", width=36),   # ▶ spacer
-            pn.pane.Markdown("", width=36),   # ✕ spacer
+            pn.pane.HTML("<span style='font-size:10px;color:#666;width:100px'>Alias</span>", width=100, margin=(0, 4, 0, 4)),
+            pn.pane.HTML("<span style='font-size:10px;color:#666'>Match all</span>", width=80, margin=(0, 4, 0, 4)),
+            pn.pane.HTML("<span style='font-size:10px;color:#666'>Catalog criteria (attr=val · attr~regex)</span>", sizing_mode="stretch_width", margin=(0, 4, 0, 4)),
+            pn.pane.HTML("<span style='font-size:10px;color:#666'>+attr</span>", width=96, margin=(0, 4, 0, 4)),
+            pn.pane.HTML("", width=36),
+            pn.pane.HTML("", width=36),
             margin=(2, 0, 0, 0),
         )
         add_var_btn = pn.widgets.Button(
             name="+ Add variable",
             button_type="default",
             icon="plus",
-            width=170,
-            height=34,
-            margin=(6, 4, 4, 4),
+            width=140,
+            height=28,
+            margin=(4, 4, 2, 4),
         )
         search_map_section = pn.Column(
-            sm_header_md,
             sm_col_labels,
             # dynamic rows are inserted before add_var_btn
             add_var_btn,
             sizing_mode="stretch_width",
-            styles={"border": "1px solid #ddd", "border-radius": "4px", "padding": "8px"},
+            styles={"border": "1px solid #e0e0e0", "border-radius": "4px", "padding": "4px 6px"},
         )
 
         def _add_sm_row(
@@ -560,102 +761,71 @@ class MathRefEditorAction:
                 "_Could not read catalog attributes._", sizing_mode="stretch_width"
             )
 
-        status_md = pn.pane.Markdown("", sizing_mode="stretch_width")
+        status_md = pn.pane.Markdown("", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
         test_result_md = pn.pane.Markdown("", sizing_mode="stretch_width")
         test_btn = pn.widgets.Button(
-            name="Test Expression",
+            name="Test",
             button_type="light",
             icon="player-play",
-            width=160,
-            margin=(6, 4, 4, 4),
+            width=80,
+            height=28,
+            margin=(0, 4, 0, 0),
         )
-        save_btn = pn.widgets.Button(name="Save to Catalog", button_type="success", icon="device-floppy")
-        cancel_btn = pn.widgets.Button(name="Cancel", button_type="default", icon="x")
+        save_btn = pn.widgets.Button(
+            name="Save",
+            button_type="success",
+            icon="device-floppy",
+            height=32,
+            margin=(0, 4, 0, 0),
+        )
+        cancel_btn = pn.widgets.Button(
+            name="Cancel",
+            button_type="default",
+            icon="x",
+            height=32,
+            margin=(0, 0, 0, 0),
+        )
 
-        # ── Client-side YAML upload ───────────────────────────────────────────
-        upload_widget = pn.widgets.FileInput(
-            accept=".yaml,.yml",
-            name="Upload YAML",
+        # Attr browser collapsed so it doesn't eat vertical space
+        attr_browser_card = pn.Card(
+            attr_browser_md,
+            title="Catalog attributes reference",
+            collapsed=True,
             sizing_mode="stretch_width",
-        )
-        upload_btn = pn.widgets.Button(
-            name="Load Uploaded YAML",
-            button_type="primary",
-            icon="file-import",
-            width=180,
-        )
-
-        # ── Client-side YAML download ─────────────────────────────────────────
-        def _yaml_download_callback():
-            """Return an in-memory YAML byte stream using the canonical save_math_refs format."""
-            from io import BytesIO
-            import tempfile, os
-            from .math_reference import save_math_refs
-
-            # save_math_refs writes to a file path; use a temp file then read bytes.
-            with tempfile.NamedTemporaryFile(
-                suffix=".yaml", delete=False, mode="w", encoding="utf-8"
-            ) as tmp:
-                tmp_path = tmp.name
-            try:
-                save_math_refs(catalog, tmp_path)
-                with open(tmp_path, "rb") as fh:
-                    data = fh.read()
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            return BytesIO(data)
-
-        download_yaml_btn = pn.widgets.FileDownload(
-            label="Download YAML",
-            callback=_yaml_download_callback,
-            filename=self._default_yaml_filename,
-            button_type="primary",
-            icon="file-export",
-            embed=False,
-        )
-
-        yaml_section = pn.Column(
-            pn.pane.Markdown("#### YAML — Upload / Download"),
-            pn.Row(
-                pn.Column(
-                    pn.pane.Markdown("**Upload** a YAML file from your computer:"),
-                    upload_widget,
-                    upload_btn,
-                ),
-                pn.Column(
-                    pn.pane.Markdown("**Download** all math refs as YAML:"),
-                    download_yaml_btn,
-                ),
-                sizing_mode="stretch_width",
-            ),
-            sizing_mode="stretch_width",
+            margin=(4, 0, 4, 0),
         )
 
         editor_panel = pn.Column(
-            title_md,
-            pn.layout.Divider(),
-            help_md,
+            # ── Header: title + action buttons in one row ───────────────
+            pn.Row(title_html, pn.layout.HSpacer(), save_btn, cancel_btn,
+                   align="center", margin=(0, 0, 4, 0)),
+            status_md,
+            # ── Reference ────────────────────────────────────────────────
+            _section("Reference"),
             name_input,
             expr_input,
+            # Token picker: type to search catalog names and click to insert
+            token_picker,
+            token_hint,
             alias_hint_row,
+            # ── Attributes ───────────────────────────────────────────────
+            pn.Row(
+                _section("Attributes  (key: value — one per line)"),
+                copy_attrs_btn,
+                align="center",
+            ),
             attrs_input,
-            pn.layout.Divider(),
+            # ── Search Map ───────────────────────────────────────────────
+            _section("Search Map — resolve aliases at getData() time"),
             search_map_section,
-            pn.layout.Divider(),
-            pn.Row(test_btn),
+            # ── Test ─────────────────────────────────────────────────────
+            pn.Row(test_btn, align="center", margin=(4, 0, 0, 0)),
             test_result_md,
-            pn.layout.Divider(),
-            attr_browser_md,
-            pn.layout.Divider(),
-            yaml_section,
-            pn.layout.Divider(),
-            status_md,
-            pn.Row(save_btn, cancel_btn),
+            # ── Catalog reference (collapsed) ────────────────────────────
+            attr_browser_card,
             sizing_mode="stretch_width",
-            min_width=640,
+            min_width=580,
+            margin=(4, 8, 8, 8),
         )
 
         def _on_save(event: Any) -> None:
@@ -757,44 +927,6 @@ class MathRefEditorAction:
                 logger.exception("MathRefEditorAction save error")
                 status_md.object = f"❌ **Error:** {exc}"
 
-        def _on_upload_yaml(event: Any) -> None:
-            if upload_widget.value is None:
-                status_md.object = "⚠️ **No file selected. Please choose a YAML file to upload.**"
-                return
-            try:
-                import yaml as _yaml
-                from .math_reference import MathDataReference, MathDataCatalogReader
-
-                raw = upload_widget.value  # bytes
-                data = _yaml.safe_load(raw)
-                # Delegate parsing to MathDataCatalogReader.build_from_data() so
-                # match_all handling is always in sync with the canonical loader.
-                refs = MathDataCatalogReader().build_from_data(data, parent_catalog=catalog)
-                added = 0
-                for r in refs:
-                    try:
-                        catalog.remove(r.name)
-                    except KeyError:
-                        pass
-                    catalog.add(r)
-                    added += 1
-                if hasattr(dataui, "_dfcat"):
-                    try:
-                        dataui._dfcat = manager.get_data_catalog()
-                        new_cols = manager.get_table_columns()
-                        dataui.display_table.value = dataui._dfcat[new_cols]
-                        dataui.display_table.widths = manager.get_table_column_width_map()
-                        dataui.display_table.header_filters = manager.get_table_filters()
-                    except Exception as _te:
-                        logger.warning("Could not refresh table after upload: %s", _te)
-                fname = getattr(upload_widget, "filename", "uploaded file")
-                status_md.object = f"✅ **Uploaded** {added} math ref(s) from `{fname}`."
-            except Exception as exc:
-                logger.exception("MathRefEditorAction YAML upload error")
-                status_md.object = f"❌ **YAML upload error:** {exc}"
-
-        upload_btn.on_click(_on_upload_yaml)
-
         def _on_test(event: Any) -> None:
             """Evaluate the expression against real catalog data and show a preview."""
             expr = expr_input.value.strip()
@@ -846,7 +978,12 @@ class MathRefEditorAction:
         test_btn.on_click(_on_test)
 
         def _on_cancel(event: Any) -> None:
-            editor_panel.objects = [pn.pane.Markdown("*Editor closed.*")]
+            editor_panel.objects = [
+                pn.pane.HTML(
+                    "<span style='color:#999;font-size:12px'>Editor closed. "
+                    "Select a row and click Math Ref to open again.</span>",
+                )
+            ]
 
         save_btn.on_click(_on_save)
         cancel_btn.on_click(_on_cancel)
