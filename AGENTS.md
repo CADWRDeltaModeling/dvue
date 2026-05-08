@@ -94,39 +94,37 @@ catalog.rename("JER__tf", "JER_tidal_filtered")  # chainable, raises KeyError / 
 
 `rename()` does **not** affect `_source_index` — the source (file path) is unchanged.
 
-### `name` vs display label in mixed catalogs
+### Design decision: `name` is both the catalog key and the user-visible display
 
-`name` serves two roles that can conflict:
+**`name` is the single source of truth** — it is the catalog lookup key, the
+expression token, and the display identity shown in the UI table.  Do not add a
+separate `label` column as an alias for `name`.
 
-| Role | Raw DSS example | Transform ref example |
-|------|-----------------|----------------------|
-| Catalog lookup key | `"study.dss::/A/JER/EC//15MIN/F/"` | `"JER__tf"` |
-| User-visible display | *ugly — should be hidden* | *clean — should be shown* |
+Rationale:
 
-**General rule** (handled automatically by `get_table_column_width_map()`):
+- A `label` column that mirrors `name` for derived refs and is blank for raw refs
+  adds complexity (two concepts for one value) with no functional gain.
+- Users can rename any ref — raw or math — via `catalog.rename(old, new)`, which
+  atomically updates both the dict key and `ref.name`.  After renaming, the new
+  name works immediately in expressions and in the table.
+- Persistence of custom names can be solved independently (e.g. by including a
+  `name` column in a downloaded catalog CSV; on reload, if a `name` column is
+  present it overrides the auto-derived name instead of re-deriving it).
+
+**What managers with ugly auto-derived names should do instead:**
+
+Give raw refs clean auto-names when building the catalog.  For `DSSDataUIManager`
+the raw-ref key is currently `"filename::pathname"` — the right fix is to
+auto-derive names from the DSS path parts (B/C/F) so they are already
+human-readable, not to paper over ugly names with a `label` column.
+
+**Framework behaviour (handled automatically by `get_table_column_width_map()`):**
 
 When math refs are present the table automatically gains a `name` column so users
-can see what their transform refs are called.  For managers whose raw-ref names
-are human-readable (e.g. `"RSAC075_flow"`) this is sufficient.
-
-**For managers with ugly raw-ref names** (e.g. `DSSDataUIManager` where the raw-ref
-key is `"filename::pathname"`), override `get_data_catalog()` to inject a `label`
-column:
-
-```python
-def get_data_catalog(self):
-    df = self._dvue_catalog.to_dataframe().reset_index()
-    # blank for raw refs (identified by domain columns); catalog key for derived refs
-    df["label"] = df.apply(
-        lambda r: r["name"] if r.get("ref_type", "raw") != "raw" else "",
-        axis=1,
-    )
-    return df
-```
-
-Add `"label"` to `_get_table_column_width_map()` so it appears first in the table.
-When a `label` column is present the framework suppresses the generic `name`
-injection, so the two columns never double-up.
+can see what their transform/math refs are called.  The `name` column is only
+injected when not already declared in the subclass column map, so subclasses that
+explicitly include `"name"` in `_get_table_column_width_map()` retain full
+control over placement and width.
 
 ### `get_data_reference` — always use `row["name"]`
 
