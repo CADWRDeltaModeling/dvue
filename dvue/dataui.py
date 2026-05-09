@@ -1078,7 +1078,7 @@ class DataUI(param.Parameterized):
         )
         gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=True, allow_drag=False)
         gspec[0:4, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
-        gspec[5:14, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
+        gspec[5:14, 0:10] = fullscreen.FullScreen(self._display_panel)
         self._main_panel = gspec
         return gspec
 
@@ -1168,7 +1168,7 @@ class DataUI(param.Parameterized):
             return pn.Column(self._action_panel, gspec, sizing_mode="stretch_both")
         elif self.view_type == "display":
             gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
-            gspec[0:14, 0:10] = fullscreen.FullScreen(pn.Row(self._display_panel, scroll=True))
+            gspec[0:14, 0:10] = fullscreen.FullScreen(self._display_panel)
             return pn.Column(self._action_panel, gspec, sizing_mode="stretch_both")
         else:  # combined — action panel above the resizable GridStack
             return pn.Column(self._action_panel, self._main_panel, sizing_mode="stretch_both")
@@ -1208,16 +1208,23 @@ class DataUI(param.Parameterized):
         self._status_label.visible = False
 
     def show_in_display_panel(self, title, content):
-        """Add *content* as a closable tab in the display panel."""
+        """Add *content* as a closable tab in the display panel.
+
+        Content is wrapped in a scrollable Column so that tall panels (e.g.
+        the Math Ref editor) scroll within the fixed display area instead of
+        inflating the display panel height and disrupting other tabs.
+        """
+        scrollable = pn.Column(content, scroll=True, sizing_mode="stretch_both")
         if len(self._display_panel.objects) > 0 and isinstance(
             self._display_panel.objects[0], pn.Tabs
         ):
             tabs = self._display_panel.objects[0]
-            tabs.append((title, content))
+            tabs.append((title, scrollable))
             tabs.active = len(tabs) - 1
         else:
             self._display_panel.objects = [
-                pn.Tabs((title, content), closable=True)
+                pn.Tabs((title, scrollable), closable=True,
+                        sizing_mode="stretch_both", dynamic=True)
             ]
 
     def show_map_in_display_panel(self, event):
@@ -1244,11 +1251,6 @@ class DataUI(param.Parameterized):
             ):
                 # Add to existing tabs
                 tabs = self._display_panel.objects[0]
-
-                # Initialize tab_count if it doesn't exist
-                if not hasattr(self, "_tab_count"):
-                    self._tab_count = 0
-
                 self._tab_count += 1
                 tabs.append((f"Interactive Map {self._tab_count}", map_display))
                 tabs.active = len(tabs) - 1  # Activate the new tab
@@ -1259,6 +1261,8 @@ class DataUI(param.Parameterized):
                     pn.Tabs(
                         (f"Interactive Map {self._tab_count}", map_display),
                         closable=True,
+                        sizing_mode="stretch_both",
+                        dynamic=True,
                     )
                 ]
 

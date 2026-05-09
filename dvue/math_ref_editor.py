@@ -988,6 +988,10 @@ class MathRefEditorAction:
         save_btn.on_click(_on_save)
         cancel_btn.on_click(_on_cancel)
 
+        # Wrap editor in a scrollable Column so it never inflates the display
+        # area height — tall editors scroll within the available space.
+        editor_scrollable = pn.Column(editor_panel, scroll=True, sizing_mode="stretch_both")
+
         # Show editor as a new tab in the display panel.
         if len(dataui._display_panel.objects) > 0 and isinstance(
             dataui._display_panel.objects[0], pn.Tabs
@@ -996,10 +1000,11 @@ class MathRefEditorAction:
             if not hasattr(dataui, "_tab_count"):
                 dataui._tab_count = 0
             dataui._tab_count += 1
-            tabs.append((f"Math Ref Editor {dataui._tab_count}", editor_panel))
+            tabs.append((f"Math Ref Editor {dataui._tab_count}", editor_scrollable))
             tabs.active = len(tabs) - 1
         else:
             dataui._tab_count = 1
             dataui._display_panel.objects = [
-                pn.Tabs(("Math Ref Editor", editor_panel), closable=True, dynamic=True)
+                pn.Tabs(("Math Ref Editor", editor_scrollable), closable=True,
+                        dynamic=True, sizing_mode="stretch_both")
             ]
