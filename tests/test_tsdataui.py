@@ -519,6 +519,10 @@ class TestTransformToCatalogActionExpressionBuilder:
         assert "1D_mean" in tag
         assert "x0.3048" in tag
 
+    @pytest.mark.skipif(
+        not __import__("dvue.tsdataui", fromlist=["_VTOOLS_AVAILABLE"])._VTOOLS_AVAILABLE,
+        reason="vtools3 not installed — do_tidal_filter is constant",
+    )
     def test_tidal_filter_before_resample_in_expression(self):
         """cosine_lanczos must wrap x before resample chains on the result."""
         from dvue.actions import TransformToCatalogAction
