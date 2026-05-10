@@ -314,6 +314,7 @@ class TransformToCatalogAction:
         call.  The *tag* is a concise label used in the auto-generated ref name.
 
         Tag shorthand:
+          - fill gaps N     → ``fillN``
           - tidal filter    → ``tf``
           - resample 1D/mean → ``1D_mean``
           - rolling 24H/mean → ``r24H_mean``
@@ -325,7 +326,13 @@ class TransformToCatalogAction:
         expr = "x"
         tags = []
 
-        # Tidal filter first — operates on raw sub-daily data.
+        # Fill gaps first — same order as the plot path in tsdataui.py.
+        fill_gap = getattr(manager, "fill_gap", 0)
+        if fill_gap and fill_gap > 0:
+            expr = f"{expr}.interpolate(limit={fill_gap})"
+            tags.append(f"fill{fill_gap}")
+
+        # Tidal filter next — operates on raw (gap-filled) sub-daily data.
         # Resampling and rolling are applied to the filtered result.
         if getattr(manager, "do_tidal_filter", False):
             expr = f"cosine_lanczos({expr}, '40h')"
@@ -405,6 +412,34 @@ class TransformToCatalogAction:
         # expressions (e.g. "STA1_flow__tf * 0.5").
         return re.sub(r"[^a-zA-Z0-9_]", "_", raw)
 
+    @staticmethod
+    def _get_id_column(manager, catalog) -> str | None:
+        """Return the primary-key column used to tag transform-ref identifiers.
+
+        Resolution order
+        ----------------
+        1. ``manager.transform_id_column`` — explicit opt-in by a subclass.
+        2. First primary-key column (excluding ``source_num`` and ``name``)
+           whose name contains the substring ``"id"`` (case-insensitive).
+        3. First primary-key column (excluding ``source_num`` and ``name``).
+        4. ``None`` when the catalog has no usable primary-key columns.
+
+        The returned column's value is modified in the new transform ref's
+        attributes (``original_value__tag``) so that catalog searches using
+        the original value as a criterion do not match the transform ref.
+        """
+        pk_cols = [
+            c for c in (catalog.primary_key if catalog else [])
+            if c not in ("source_num", "name")
+        ]
+        explicit = getattr(manager, "transform_id_column", None)
+        if explicit and explicit in pk_cols:
+            return explicit
+        for col in pk_cols:
+            if "id" in col.lower():
+                return col
+        return pk_cols[0] if pk_cols else None
+
     # ------------------------------------------------------------------
     # UI refresh helper (mirrors MathRefEditorAction._on_save)
     # ------------------------------------------------------------------
@@ -461,6 +496,7 @@ class TransformToCatalogAction:
 
         selected_rows = dataui._dfcat.iloc[dataui.display_table.selection]
         added_names = []
+        id_col = self._get_id_column(manager, catalog)
 
         for _, row in selected_rows.iterrows():
             try:
@@ -486,6 +522,14 @@ class TransformToCatalogAction:
                 for k, v in orig_ref.attributes.items()
                 if k not in ("source",) and not _is_nan(v)
             }
+
+            # Stamp the id column with the tag so the transform ref's value
+            # differs from the original (e.g. "STA001" → "STA001__tf").
+            # This prevents catalog.search(**x_criteria) from matching both
+            # the original ref and the transform ref at getData() time.
+            if id_col and id_col in inherited_attrs:
+                orig_id_val = str(inherited_attrs[id_col])
+                inherited_attrs[id_col] = f"{orig_id_val}__{tag}"
 
             # Record the transform tag as a dedicated "tag" attribute.
             # This is the clean, domain-agnostic discriminator used in ref_key().

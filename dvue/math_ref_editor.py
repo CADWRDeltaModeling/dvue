@@ -314,6 +314,23 @@ class MathRefEditorAction:
         dataui._math_yaml_sidebar_added = True
 
     # ------------------------------------------------------------------
+    # Sidebar lifecycle hook
+    # ------------------------------------------------------------------
+
+    def setup_sidebar(self, dataui: Any) -> None:
+        """Inject the Math YAML sidebar tab at app startup without waiting for a button click.
+
+        Called by :class:`~dvue.dataui.DataUI` after ``_sidebar_tabs`` is
+        created so the upload/download tab is visible immediately when the app
+        loads.  Idempotent — safe to call multiple times.
+        """
+        manager = dataui._dataui_manager
+        catalog = getattr(manager, "data_catalog", None)
+        if catalog is None:
+            return
+        self._inject_yaml_sidebar_tab(catalog, manager, dataui)
+
+    # ------------------------------------------------------------------
     # Main callback
     # ------------------------------------------------------------------
 
@@ -972,6 +989,8 @@ class MathRefEditorAction:
                 )
             except Exception as exc:
                 test_result_md.object = f"❌ **Test failed:** {exc}"
+                if pn.state.notifications is not None:
+                    pn.state.notifications.error(f"Test failed: {exc}", duration=8000)
             finally:
                 dataui.hide_progress()
 

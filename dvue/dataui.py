@@ -1056,6 +1056,7 @@ class DataUI(param.Parameterized):
         self._action_panel = pn.Row()
         self._tab_count = 0
         actions = self._dataui_manager.get_data_actions()
+        self._registered_actions = actions  # saved for _setup_action_sidebars
 
         if actions:
             action_buttons = self.create_data_actions(actions)
@@ -1206,6 +1207,25 @@ class DataUI(param.Parameterized):
         self.progress_bar.indeterminate = False
         self._status_label.object = ""
         self._status_label.visible = False
+
+    def _setup_action_sidebars(self) -> None:
+        """Let registered actions inject sidebar tabs at startup.
+
+        Iterates over ``_registered_actions`` (set in :meth:`create_data_table`)
+        and, for any action whose callback object exposes a ``setup_sidebar``
+        method, calls that method so the tab appears without requiring a button
+        click first.
+        """
+        for action in getattr(self, "_registered_actions", []):
+            cb = action.get("callback")
+            action_obj = getattr(cb, "__self__", None) if callable(cb) else None
+            if action_obj is not None and hasattr(action_obj, "setup_sidebar"):
+                try:
+                    action_obj.setup_sidebar(self)
+                except Exception as exc:
+                    logger.warning(
+                        "Action sidebar setup failed for %r: %s", action.get("name"), exc
+                    )
 
     def show_in_display_panel(self, title, content):
         """Add *content* as a closable tab in the display panel.
@@ -1509,6 +1529,8 @@ class DataUI(param.Parameterized):
                 self._sidebar_tabs,
                 sizing_mode="stretch_both",
             )
+        # Let actions inject their sidebar tabs now that _sidebar_tabs exists.
+        self._setup_action_sidebars()
         # Create view navigation buttons.
         # Nav bar is placed inside _main_view (not in template.header) so it
         # is part of template.main and remains visible when DataUI is embedded
