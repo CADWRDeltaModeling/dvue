@@ -560,6 +560,86 @@ class TimeSeriesDataUIManager(DataUIManager):
             items.append(xform_btn)
         return items
 
+    def setup_url_sync(self):
+        """Bi-directionally sync transform/display params with URL query string.
+
+        On page load, URL query params override defaults.  On param change,
+        the URL is updated so that F5 / bookmark / share preserves the state.
+
+        Must be called inside a live server session (``pn.state.location``
+        is not ``None``).  Safe to call multiple times — ``location.sync``
+        is idempotent per parameterized instance.
+        """
+        if not pn.state.location:
+            return
+        # Map param names → short URL query keys to keep URLs compact.
+        # Also exposed as _URL_PARAM_MAP for DataUI session-cache integration.
+        # time_range is handled separately: pn.state.location.sync() deserialises
+        # CalendarDateRange as date objects, but the DatetimeRangeInput widget
+        # requires datetime objects, causing a TypeError on comparison.
+        import datetime as _dt
+        import json as _json
+        valid = {p: k for p, k in self._URL_PARAM_MAP.items()
+                 if p != "time_range" and p in self.param}
+        pn.state.location.sync(self, valid)
+
+        # --- time_range: manual sync ---
+        loc = pn.state.location
+        qp = loc.query_params or {}
+        if "tr" in qp:
+            try:
+                raw = qp["tr"]
+                parts = _json.loads(raw) if isinstance(raw, str) and raw.startswith("[") else raw.split(",")
+                def _to_dt(v):
+                    v = str(v).strip()
+                    # JSON may give 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS'
+                    d = _dt.datetime.fromisoformat(v)
+                    return d
+                self.time_range = (_to_dt(parts[0]), _to_dt(parts[1]))
+            except Exception:
+                logger.warning("Could not restore time_range from URL: %s", qp["tr"])
+
+        def _on_time_range(event):
+            if not pn.state.location:
+                return
+            tr = event.new
+            if tr is None:
+                pn.state.location.update_query(tr="")
+                return
+            # Serialise both bounds as ISO date strings (date only, no time part,
+            # to keep the URL compact and avoid TZ issues).
+            try:
+                s = tr[0].isoformat()[:10] if hasattr(tr[0], "isoformat") else str(tr[0])[:10]
+                e = tr[1].isoformat()[:10] if hasattr(tr[1], "isoformat") else str(tr[1])[:10]
+                pn.state.location.update_query(tr=f"{s},{e}")
+            except Exception:
+                pass
+
+        self.param.watch(_on_time_range, "time_range")
+
+    # Exposed as a class attribute so DataUI can introspect without importing
+    # tsdataui (avoids circular imports when session_state.py snapshots state).
+    _URL_PARAM_MAP: dict = {
+        "time_range": "tr",
+        "fill_gap": "fg",
+        "do_tidal_filter": "tf",
+        "resample_period": "rp",
+        "resample_agg": "ra",
+        "rolling_window": "rw",
+        "rolling_agg": "rwa",
+        "do_diff": "dd",
+        "diff_periods": "dp",
+        "do_cumsum": "cs",
+        "scale_factor": "sf",
+        "show_legend": "sl",
+        "legend_position": "lp",
+        "regular_curve_connection": "rcc",
+        "irregular_curve_connection": "icc",
+        "sensible_range_yaxis": "sry",
+        "color_cycle_name": "ccn",
+        "shared_axes": "sa",
+    }
+
     def get_mobile_widgets(self):
         """Return a compact widget set for mobile: time range + key plot options."""
         time_range_w = pn.widgets.DatetimeRangeInput.from_param(
@@ -706,7 +786,12 @@ class TimeSeriesDataUIManager(DataUIManager):
             data.index = data.index.to_timestamp()
         elif len(data.index) > 0 and isinstance(data.index[0], pd.Period):
             data.index = pd.PeriodIndex(data.index).to_timestamp()
-        data = data[(data.index >= time_range[0]) & (data.index <= time_range[1])]
+        # Coerce time_range bounds to Timestamp so that comparison with a
+        # datetime64 index works regardless of whether the values arrived as
+        # datetime, date, or string (e.g. after URL query-param deserialization).
+        t0 = pd.Timestamp(time_range[0])
+        t1 = pd.Timestamp(time_range[1])
+        data = data[(data.index >= t0) & (data.index <= t1)]
 
         # Apply optional data transformations
         if self.fill_gap > 0:

@@ -1097,6 +1097,112 @@ class DataUI(param.Parameterized):
         else:
             pn.state.onload(_do_sync)
 
+    def setup_url_sync(self):
+        """Sync DataUI view params and manager params with URL query string.
+
+        Bi-directional: on load, URL params restore state; on change, URL is
+        updated.  Also restores table selection and filters from URL.
+        """
+        if not pn.state.location:
+            return
+        # Sync DataUI's own params
+        dataui_params = {
+            "view_type": "vt",
+            "use_regex_filter": "rf",
+            "query": "q",
+        }
+        valid = {p: k for p, k in dataui_params.items() if p in self.param}
+        if valid:
+            pn.state.location.sync(self, valid)
+        # Delegate to the manager's url sync for transform/display params
+        mgr = self._dataui_manager
+        if hasattr(mgr, "setup_url_sync"):
+            mgr.setup_url_sync()
+        # Restore table selection from URL query param "sel"
+        self._setup_selection_url_sync()
+        # Restore table filters from URL query param "flt"
+        self._setup_filter_url_sync()
+        # Write the Bokeh session ID into the URL so that a full page reload
+        # (F5) re-uses the same live server session — zero deserialization,
+        # all in-memory state (catalog, math refs, transforms) is preserved.
+        # Works with the default --session-ids unsigned Bokeh mode.
+        # session_context is on the Bokeh document, not on pn.state directly.
+        try:
+            doc = pn.state.curdoc
+            ctx = doc.session_context if doc is not None else None
+        except Exception:
+            ctx = None
+        if ctx:
+            pn.state.location.update_query(**{"bokeh-session-id": ctx.id})
+
+    def _setup_selection_url_sync(self):
+        """Sync table row selection with the URL ``sel`` query parameter.
+
+        Selections are encoded as a pipe-separated list of row ``name``
+        values (the catalog key), e.g. ``sel=STA1_flow_hourly|STA2_ec_daily``.
+        """
+        loc = pn.state.location
+        if not loc:
+            return
+
+        # --- Restore on load ---
+        query_params = loc.query_params or {}
+        sel_str = query_params.get("sel", "")
+        if sel_str:
+            names = sel_str.split("|")
+            if hasattr(self, "_dfcat") and "name" in self._dfcat.columns:
+                indices = self._dfcat.index[self._dfcat["name"].isin(names)].tolist()
+                if indices and hasattr(self, "display_table"):
+                    self.display_table.selection = indices
+
+        # --- Watch for changes and update URL ---
+        def _on_selection_change(event):
+            if not hasattr(self, "_dfcat") or "name" not in self._dfcat.columns:
+                return
+            sel = event.new or []
+            if not sel:
+                loc.update_query(sel="")
+                return
+            # Cap at 30 to avoid URL length issues
+            sel = sel[:30]
+            selected_names = self._dfcat.iloc[sel]["name"].tolist()
+            sel_encoded = "|".join(str(n) for n in selected_names if n)
+            loc.update_query(sel=sel_encoded)
+
+        if hasattr(self, "display_table"):
+            self.display_table.param.watch(_on_selection_change, "selection")
+
+    def _setup_filter_url_sync(self):
+        """Sync table header filter values with the URL ``flt`` query parameter.
+
+        Filters are encoded as ``col1:val1|col2:val2``.  Only restores on
+        page load; write-back is not supported because Tabulator header-filter
+        changes are client-side and not reflected as Python param events.
+        """
+        loc = pn.state.location
+        if not loc:
+            return
+
+        # --- Restore on load ---
+        query_params = loc.query_params or {}
+        flt_str = query_params.get("flt", "")
+        if flt_str and hasattr(self, "display_table"):
+            try:
+                for pair in flt_str.split("|"):
+                    if ":" in pair:
+                        col, val = pair.split(":", 1)
+                        # Use a callable filter for partial text match.
+                        # Capture col/val in default args to avoid late-binding.
+                        self.display_table.add_filter(
+                            lambda df, c=col, v=val: (
+                                df[c].astype(str).str.lower().str.contains(v.lower(), na=False)
+                                if c in df.columns
+                                else df[c].notna()
+                            )
+                        )
+            except Exception:
+                logger.warning("Could not restore filters from URL: %s", flt_str)
+
     def get_version(self):
         try:
             return self._dataui_manager.get_version()
@@ -1344,6 +1450,14 @@ class DataUI(param.Parameterized):
         """Update the view based on the URL hash value (browser back/forward)."""
         if not pn.state.location:
             return
+        # If view_type is already governed by the URL query param (vt=...),
+        # don't let the hash override it.  The hash watcher fires on every
+        # reconnect (even with the same value), so without this guard a
+        # fresh page load with ?vt=display would be reset to 'combined' by
+        # an empty hash before the URL sync could apply.
+        query_params = pn.state.location.query_params or {}
+        if "vt" in query_params:
+            return
         hash_value = pn.state.location.hash.lstrip("#")
         self._apply_view_type(hash_value)
         # Keep the nav Select in sync when navigating via browser back/forward.
@@ -1578,6 +1692,15 @@ class DataUI(param.Parameterized):
 
         # finally sync location views
         self.setup_location_sync()
+        # Sync all params (manager transforms + DataUI view) with URL query string
+        # so state survives page reload / bookmark / share.
+        # Deferred to onload so pn.state.location is available.
+        def _deferred_url_sync():
+            self.setup_url_sync()
+        if pn.state.location:
+            _deferred_url_sync()
+        else:
+            pn.state.onload(_deferred_url_sync)
 
         return template
 
