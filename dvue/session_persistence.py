@@ -227,6 +227,14 @@ def serve_session_app(
     """
     install_session_handler(cookie_name=cookie_name)
 
+    # Suppress the harmless Bokeh race-condition noise where the browser sends
+    # patch messages for model IDs that no longer exist after a document rebuild.
+    class _SuppressUnknownRef(logging.Filter):
+        def filter(self, record):
+            return "UnknownReferenceError" not in record.getMessage()
+
+    logging.getLogger("bokeh.server.protocol_handler").addFilter(_SuppressUnknownRef())
+
     _cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".dvue_sessions"
     _cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -292,7 +300,10 @@ def serve_session_app(
                     None,
                 )
                 if plot_cb:
-                    ui.display_table.selection = sel
+                    n_rows = len(ui.display_table.value) if ui.display_table.value is not None else 0
+                    valid_sel = [i for i in sel if i < n_rows]
+                    if valid_sel:
+                        ui.display_table.selection = valid_sel
                     pn.state.curdoc.add_next_tick_callback(
                         lambda: plot_cb(None, ui)
                     )
