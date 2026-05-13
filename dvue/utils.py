@@ -79,9 +79,9 @@ def get_unique_short_names(paths):
 
 def interpret_file_relative_to(base_dir, fpath):
     full_path = base_dir / fpath
-    print(f"full_path: {full_path}")
+    logger.debug(f"full_path: {full_path}")
     if not full_path.exists():
         logger.warning(f"File {full_path} does not exist. Using {fpath} instead.")
         full_path = fpath
-    print(f"full_path: {full_path}")
+    logger.debug(f"full_path: {full_path}")
     return full_path
