@@ -579,13 +579,53 @@ class TimeSeriesDataUIManager(DataUIManager):
         # requires datetime objects, causing a TypeError on comparison.
         import datetime as _dt
         import json as _json
-        valid = {p: k for p, k in self._URL_PARAM_MAP.items()
-                 if p != "time_range" and p in self.param}
-        pn.state.location.sync(self, valid)
 
-        # --- time_range: manual sync ---
         loc = pn.state.location
         qp = loc.query_params or {}
+
+        # Build (url_key, default) pairs for all non-time_range params.
+        # We never write defaults to the URL; on restore, absent/empty keys
+        # mean "keep the default".
+        _non_tr = {p: k for p, k in self._URL_PARAM_MAP.items()
+                   if p != "time_range" and p in self.param}
+
+        # --- Restore from URL (load) ---
+        for p_name, url_key in _non_tr.items():
+            raw = qp.get(url_key)
+            if not raw:
+                continue
+            p_obj = self.param[p_name]
+            default = p_obj.default
+            try:
+                if isinstance(p_obj, param.Boolean):
+                    val = raw.lower() in ("true", "1", "yes")
+                elif isinstance(p_obj, param.Integer):
+                    val = int(raw)
+                elif isinstance(p_obj, param.Number):
+                    val = float(raw)
+                elif isinstance(p_obj, param.Selector):
+                    val = raw if raw in p_obj.objects else default
+                else:
+                    val = raw
+                if val != default:
+                    setattr(self, p_name, val)
+            except Exception:
+                pass
+
+        # --- Write back on change (only when value differs from default) ---
+        def _make_watcher(url_key, default):
+            def _on_change(event):
+                if event.new == default:
+                    loc.update_query(**{url_key: ""})
+                else:
+                    loc.update_query(**{url_key: str(event.new)})
+            return _on_change
+
+        for p_name, url_key in _non_tr.items():
+            default = self.param[p_name].default
+            self.param.watch(_make_watcher(url_key, default), p_name)
+
+        # --- time_range: manual sync ---
         if "tr" in qp:
             try:
                 raw = qp["tr"]
@@ -604,7 +644,7 @@ class TimeSeriesDataUIManager(DataUIManager):
                 return
             tr = event.new
             if tr is None:
-                pn.state.location.update_query(tr="")
+                # None is the default — omit from URL rather than writing tr=
                 return
             # Serialise both bounds as ISO date strings (date only, no time part,
             # to keep the URL compact and avoid TZ issues).
