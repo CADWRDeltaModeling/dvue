@@ -913,7 +913,7 @@ class DataUI(param.Parameterized):
                     callback=_dynamic_dl_callback,
                     filename=items_cfg[0]["filename"],
                     embed=False,
-                    auto=False,
+                    auto=True,
                     visible=False,
                     width=0,
                     height=0,
@@ -1673,21 +1673,18 @@ class DataUI(param.Parameterized):
             )
         # Let actions inject their sidebar tabs now that _sidebar_tabs exists.
         self._setup_action_sidebars()
-        # Create view navigation buttons.
-        # Nav bar is placed inside _main_view (not in template.header) so it
-        # is part of template.main and remains visible when DataUI is embedded
-        # in another template that only extracts .sidebar/.main/.modal and
-        # discards .header.
-        nav_buttons = pn.Row(self.create_view_navigation())
-        nav_bar = pn.Row(nav_buttons, pn.layout.HSpacer(), sizing_mode="stretch_width")
+        # Append the view-navigation widget to the right end of the action
+        # panel (after the HSpacer) so it lives on the same row as Plot /
+        # Download instead of occupying a dedicated row above them.
+        self._action_panel.append(self.create_view_navigation())
 
         # _main_content is swapped by update_view_from_location on view-type
-        # changes; nav_bar stays pinned at the top of _main_view.
+        # changes; the action panel (which now includes the nav widget) stays
+        # pinned inside each _create_main_view() call.
         # Progress bar is placed here (not in sidebar) so it is visible during
         # long plot operations without requiring a tab switch.
         self._main_content = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
         self._main_view = pn.Column(
-            nav_bar,
             self.progress_bar,
             self._status_label,
             self._main_content,
