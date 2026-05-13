@@ -174,6 +174,7 @@ def serve_session_app(
     station_id_column: str | None = None,
     cookie_name: str = "dvue_user_id",
     cache_dir: str | Path | None = None,
+    persist: bool = False,
     **pn_serve_kwargs,
 ) -> None:
     """Launch a session-aware Panel app for a single dvue manager.
@@ -187,8 +188,8 @@ def serve_session_app(
       ``DataUI``, and ``VanillaTemplate`` are reused.  Only per-Document hooks
       (URL/location sync) are re-registered via ``pn.state.onload``.
     * **Registry miss** (new user or server restart): ``build_manager_fn()`` is
-      called, diskcache params are restored, a fresh ``DataUI`` is created, and
-      live-save watchers are wired via ``pn.state.onload``.
+      called, and — when *persist* is ``True`` — diskcache params are restored
+      and live-save watchers are wired via ``pn.state.onload``.
 
     Parameters
     ----------
@@ -211,10 +212,12 @@ def serve_session_app(
         ``"dvue_user_id"``.  Pass a custom name to avoid collisions when
         multiple dvue apps are served on the same origin.
     cache_dir:
-        Directory for the diskcache session store.  Defaults to
-        ``~/.dvue_sessions``.  Using a home-directory default keeps the cache
-        persistent across working-directory changes and avoids littering
-        project directories.
+        Directory for the diskcache session store.  Only used when *persist*
+        is ``True``.  Defaults to ``~/.dvue_sessions``.
+    persist:
+        When ``True``, enable Layer 2 disk persistence: save/restore
+        ``time_range`` and table ``selection`` across server restarts using
+        diskcache.  Defaults to ``False``.
     **pn_serve_kwargs:
         Extra keyword arguments forwarded verbatim to ``pn.serve()``.
 
@@ -235,18 +238,24 @@ def serve_session_app(
 
     logging.getLogger("bokeh.server.protocol_handler").addFilter(_SuppressUnknownRef())
 
-    _cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".dvue_sessions"
-    _cache_dir.mkdir(parents=True, exist_ok=True)
+    # Layer 2: diskcache — only when persist=True
+    if persist:
+        _cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".dvue_sessions"
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        import diskcache
+        _session_cache = diskcache.Cache(str(_cache_dir))
 
-    import diskcache
+        def _load_state(user_id: str) -> dict:
+            return _session_cache.get(user_id, default={})
 
-    _session_cache = diskcache.Cache(str(_cache_dir))
+        def _save_state(user_id: str, state: dict) -> None:
+            _session_cache.set(user_id, state, expire=_TTL)
+    else:
+        def _load_state(user_id: str) -> dict:
+            return {}
 
-    def _load_state(user_id: str) -> dict:
-        return _session_cache.get(user_id, default={})
-
-    def _save_state(user_id: str, state: dict) -> None:
-        _session_cache.set(user_id, state, expire=_TTL)
+        def _save_state(user_id: str, state: dict) -> None:
+            pass
 
     # In-memory registry: user_id → {"mgr": ..., "ui": ..., "template": ...}
     _registry: dict = {}
@@ -309,15 +318,16 @@ def serve_session_app(
                     )
 
             # Wire live-persistence watchers so any param change is
-            # immediately flushed to diskcache.
-            def _do_save(event=None):
-                if user_id:
-                    _save_state(user_id, snapshot(mgr, ui))
+            # immediately flushed to diskcache (only when persist=True).
+            if persist:
+                def _do_save(event=None):
+                    if user_id:
+                        _save_state(user_id, snapshot(mgr, ui))
 
-            if "time_range" in mgr.param:
-                mgr.param.watch(_do_save, "time_range")
-            if hasattr(ui, "display_table"):
-                ui.display_table.param.watch(_do_save, "selection")
+                if "time_range" in mgr.param:
+                    mgr.param.watch(_do_save, "time_range")
+                if hasattr(ui, "display_table"):
+                    ui.display_table.param.watch(_do_save, "selection")
 
         pn.state.onload(_on_load)
 
