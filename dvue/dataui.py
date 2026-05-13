@@ -1105,15 +1105,51 @@ class DataUI(param.Parameterized):
         """
         if not pn.state.location:
             return
-        # Sync DataUI's own params
-        dataui_params = {
-            "view_type": "vt",
-            "use_regex_filter": "rf",
-            "query": "q",
+        loc = pn.state.location
+        query_params = loc.query_params or {}
+
+        # Param → (url_key, default_value) map.  We never write defaults to
+        # the URL — they are omitted on first load and cleared (set to "") on
+        # revert.  On restore an empty/absent key is treated as "use default".
+        _URL_PARAMS = {
+            "view_type":        ("vt", self.param["view_type"].default),
+            "use_regex_filter": ("rf", self.param["use_regex_filter"].default),
+            "query":            ("q",  self.param["query"].default),
         }
-        valid = {p: k for p, k in dataui_params.items() if p in self.param}
-        if valid:
-            pn.state.location.sync(self, valid)
+
+        # --- Restore from URL (load) ---
+        for p_name, (url_key, default) in _URL_PARAMS.items():
+            if p_name not in self.param:
+                continue
+            raw = query_params.get(url_key)
+            if not raw:          # absent or empty string → keep default
+                continue
+            p_obj = self.param[p_name]
+            try:
+                if isinstance(p_obj, param.Boolean):
+                    val = raw.lower() in ("true", "1", "yes")
+                elif isinstance(p_obj, param.Selector):
+                    val = raw if raw in p_obj.objects else default
+                else:
+                    val = type(default)(raw) if default is not None else raw
+                if val != default:
+                    setattr(self, p_name, val)
+            except Exception:
+                pass
+
+        # --- Write back on change (only when value differs from default) ---
+        def _make_watcher(url_key, default):
+            def _on_change(event):
+                if event.new == default:
+                    loc.update_query(**{url_key: ""})
+                else:
+                    loc.update_query(**{url_key: str(event.new)})
+            return _on_change
+
+        for p_name, (url_key, default) in _URL_PARAMS.items():
+            if p_name in self.param:
+                self.param.watch(_make_watcher(url_key, default), p_name)
+
         # Delegate to the manager's url sync for transform/display params
         mgr = self._dataui_manager
         if hasattr(mgr, "setup_url_sync"):
@@ -1122,18 +1158,10 @@ class DataUI(param.Parameterized):
         self._setup_selection_url_sync()
         # Restore table filters from URL query param "flt"
         self._setup_filter_url_sync()
-        # Write the Bokeh session ID into the URL so that a full page reload
-        # (F5) re-uses the same live server session — zero deserialization,
-        # all in-memory state (catalog, math refs, transforms) is preserved.
-        # Works with the default --session-ids unsigned Bokeh mode.
-        # session_context is on the Bokeh document, not on pn.state directly.
-        try:
-            doc = pn.state.curdoc
-            ctx = doc.session_context if doc is not None else None
-        except Exception:
-            ctx = None
-        if ctx:
-            pn.state.location.update_query(**{"bokeh-session-id": ctx.id})
+        # Note: we intentionally do NOT write bokeh-session-id to the URL.
+        # Session continuity is handled by the dvue_user_id cookie + _APP_REGISTRY
+        # in the server entry point.  Pinning the URL to a specific Bokeh session
+        # ID would break navigation once that session expires.
 
     def _setup_selection_url_sync(self):
         """Sync table row selection with the URL ``sel`` query parameter.
@@ -1161,7 +1189,7 @@ class DataUI(param.Parameterized):
                 return
             sel = event.new or []
             if not sel:
-                loc.update_query(sel="")
+                # Empty selection → omit the param (don't write sel= to URL)
                 return
             # Cap at 30 to avoid URL length issues
             sel = sel[:30]
