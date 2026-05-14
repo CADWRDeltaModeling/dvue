@@ -55,66 +55,25 @@ from dvue import MathDataCatalogReader
 # example must be run as `python examples/ex_tsdataui.py`, not
 # `panel serve examples/ex_tsdataui.py`.
 #
-# Two-layer approach:
-#   Layer 1 — manager registry (in-memory):  UUID cookie → _MANAGER_REGISTRY
-#     lookup → reuse existing param.Parameterized manager → fresh DataUI wraps
-#     it.  All param state (time_range, catalog, math refs) is already live.
-#   Layer 2 — diskcache (disk):  After a server restart the registry is empty;
-#     diskcache restores picklable params into a newly created manager.
+# install_session_handler() patches Bokeh's per_app_patterns to set a
+# persistent UUID cookie on first visit.  SessionManager provides a two-layer
+# store: in-memory registry (Layer 1) + diskcache (Layer 2, server-restart).
 
 import panel as pn
-from uuid import uuid4
-from bokeh.server.urls import per_app_patterns
-from panel.io.server import DocHandler
+from dvue.session_persistence import (
+    install_session_handler,
+    SessionManager,
+    snapshot as _snapshot,
+    restore as _restore,
+)
 
+install_session_handler()
 
-class _SessionAwareDocHandler(DocHandler):
-    """Sets a persistent 'dvue_user_id' UUID cookie on first visit and injects
-    it into the current request so session_key_func sees it immediately."""
-
-    _COOKIE_NAME = "dvue_user_id"
-
-    async def get(self, *args, **kwargs):
-        user_id = self.get_cookie(self._COOKIE_NAME)
-        if not user_id:
-            user_id = uuid4().hex
-            self.set_cookie(self._COOKIE_NAME, user_id, expires_days=365, path="/")
-            # Inject into request.cookies (Tornado SimpleCookie) so
-            # session_key_func can read it on the very first visit.
-            self.request.cookies[self._COOKIE_NAME] = user_id
-        await super().get(*args, **kwargs)
-
-
-per_app_patterns[0] = (r"/?", _SessionAwareDocHandler)
-
-# -- diskcache state store (server-restart fallback) -------------------------
-#
-# Panel already depends on diskcache (used by pn.state.as_cached), so it is
-# always available in the Panel conda/pip environment.
-#
-# diskcache advantages over hand-rolled JSON:
-#  - file-locking: safe for concurrent multi-user writes
-#  - built-in TTL: entries expire automatically (no manual eviction needed)
-#  - cleaner API: no tmp-file dance
-#
-# IMPORTANT: diskcache stores plain picklable Python objects (dicts, lists,
-# datetimes).  It CANNOT store live Panel/HoloViews objects (pn.Tabs, hv.Overlay
-# etc.) — those are not meaningfully picklable.  Only the *inputs* that produce
-# plots (selection indices, time range) are stored here.
-
-import diskcache
-
-_CACHE_DIR = Path(__file__).parent.parent / ".session_cache"
-_SESSION_CACHE = diskcache.Cache(str(_CACHE_DIR))
-_TTL = 30 * 24 * 3600  # 30 days
-
-
-def _load_state(user_id: str) -> dict:
-    return _SESSION_CACHE.get(user_id, default={})
-
-
-def _save_state(user_id: str, state: dict) -> None:
-    _SESSION_CACHE.set(user_id, state, expire=_TTL)
+_session_mgr = SessionManager(
+    cookie_name="dvue_user_id",
+    cache_dir=Path(__file__).parent.parent / ".session_cache",
+    persist=True,
+)
 
 # %% -- [2] Station metadata and synthetic data generator ---------------------
 STATIONS = [
@@ -372,20 +331,11 @@ MATH_REFS_FILE = Path(__file__).parent / "data" / "math_refs_tsdataui.yaml"
 MATH_REFS_SEARCH_MAP_FILE = Path(__file__).parent / "data" / "math_refs_search_map.yaml"
 
 
-# %% -- [6] App registry ------------------------------------------------------
+# %% -- [6] Per-user catalog factory ------------------------------------------
 #
-# user_id → {"mgr": manager, "ui": DataUI, "template": VanillaTemplate}
-#
-# Panel widgets (pn.Tabs, pn.Row, hv.HoloViews panes …) maintain their Python-
-# level state (.objects, param values) independently of any Bokeh Document.
-# When template.servable() is called in a new session, Panel creates fresh
-# Bokeh models for the new Document that mirror the current Python state —
-# including all plot tabs already in _display_panel.  No replay needed.
-#
-# Per-session work (URL/location sync) is re-registered via pn.state.onload
-# because pn.state.location is bound to the current Bokeh Document.
-
-_APP_REGISTRY: dict = {}  # user_id → {mgr, ui, template}
+# Each user gets an independent DataCatalog instance so math refs added by one
+# user do not affect others.  Session registry and persistence are handled by
+# _session_mgr (dvue.SessionManager).
 
 
 def _make_catalog():
@@ -394,32 +344,6 @@ def _make_catalog():
     for ref in catalog.list():
         cat.add(ref)
     return cat
-
-
-def _snapshot(mgr, ui) -> dict:
-    """Picklable snapshot for diskcache (server-restart fallback only)."""
-    tr = getattr(mgr, "time_range", None)
-    tbl = getattr(ui, "display_table", None)
-    return {
-        "time_range": (
-            [pd.Timestamp(tr[0]).isoformat(), pd.Timestamp(tr[1]).isoformat()]
-            if tr else None
-        ),
-        "selection": list(tbl.selection or []) if tbl is not None else [],
-    }
-
-
-def _restore(mgr, saved: dict) -> None:
-    """Apply diskcache params to a freshly created manager."""
-    tr = saved.get("time_range")
-    if tr:
-        try:
-            mgr.time_range = (
-                pd.Timestamp(tr[0]).to_pydatetime(),
-                pd.Timestamp(tr[1]).to_pydatetime(),
-            )
-        except Exception:
-            pass
 
 
 # %% -- [7] App factory -------------------------------------------------------
@@ -437,22 +361,24 @@ def _restore(mgr, saved: dict) -> None:
 #   Re-trigger plot for the saved selection (diskcache case only).
 
 def make_app():
-    user_id = pn.state.cookies.get("dvue_user_id", "")
+    user_id = _session_mgr.current_user_id
+    reg_key = _session_mgr.make_reg_key(user_id, "tsdataui")
+    entry   = _session_mgr.get_entry(reg_key)
 
-    if user_id and user_id in _APP_REGISTRY:
+    if entry:
         # --- Registry hit: reuse existing objects --------------------------
-        entry = _APP_REGISTRY[user_id]
-        mgr   = entry["mgr"]
-        ui    = entry["ui"]
-        tmpl  = entry["template"]
+        mgr  = entry["mgr"]
+        ui   = entry["ui"]
+        tmpl = entry["template"]
         # Re-register per-Document setup (location/URL sync binds to curdoc).
         pn.state.onload(lambda: (ui.setup_location_sync(), ui.setup_url_sync()))
         tmpl.servable()
         return
 
     # --- No registry: new user or server restart ---------------------------
+    saved = _session_mgr.load_state(user_id)
     mgr = ExampleTimeSeriesDataUIManager(_make_catalog())
-    saved = _load_state(user_id) if user_id else {}
+    mgr.show_reset_session_button = True  # reset button appears in DataUI action row
     if saved:
         _restore(mgr, saved)
 
@@ -462,12 +388,11 @@ def make_app():
     )
     tmpl.servable()
 
-    if user_id:
-        _APP_REGISTRY[user_id] = {"mgr": mgr, "ui": ui, "template": tmpl}
+    _session_mgr.set_entry(reg_key, {"mgr": mgr, "ui": ui, "template": tmpl})
 
     # Restore selection + re-trigger plot (only meaningful after server restart
     # when diskcache had a saved selection; fresh users have no saved state).
-    sel = saved.get("selection", [])
+    sel = saved.get("selection", []) if saved else []
 
     def _on_load():
         if sel and hasattr(ui, "display_table") and hasattr(ui, "_registered_actions"):
@@ -481,8 +406,7 @@ def make_app():
 
         # Wire live-persistence watchers.
         def _save(event=None):
-            if user_id:
-                _save_state(user_id, _snapshot(mgr, ui))
+            _session_mgr.save_state(user_id, _snapshot(mgr, ui))
 
         mgr.param.watch(_save, "time_range")
         if hasattr(ui, "display_table"):
