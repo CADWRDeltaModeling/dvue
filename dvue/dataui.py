@@ -349,6 +349,18 @@ class DataUIManager(DataProvider):
         default=False,
         doc="Show the 'Permalink' button in the action bar. Set to False to hide it.",
     )
+    show_reset_session_button = param.Boolean(
+        default=False,
+        doc="Show a 'Reset Session' button at the right end of the action bar.",
+    )
+    session_cookie_name = param.String(
+        default="dvue_user_id",
+        doc=(
+            "Name of the persistent user-identity cookie cleared by the "
+            "'Reset Session' button.  Must match the cookie_name used by "
+            "install_session_handler() / SessionManager."
+        ),
+    )
 
     @classmethod
     def help(cls):
@@ -1071,6 +1083,14 @@ class DataUI(param.Parameterized):
                 action_buttons = [action_buttons[0], _vsep] + action_buttons[1:]
             self._action_panel.extend(action_buttons)
         self._action_panel.append(pn.layout.HSpacer())
+        if self._dataui_manager.show_reset_session_button:
+            from dvue.session_persistence import make_reset_session_button
+            self._action_panel.append(
+                make_reset_session_button(
+                    cookie_name=self._dataui_manager.session_cookie_name,
+                    sizing_mode="fixed",
+                )
+            )
         self._display_panel.append(
             pn.pane.HTML(
                 self._dataui_manager.get_no_selection_message(),

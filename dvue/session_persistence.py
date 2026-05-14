@@ -341,3 +341,216 @@ def serve_session_app(
         unused_session_lifetime_milliseconds=2_592_000_000,
         **pn_serve_kwargs,
     )
+
+
+def make_reset_session_button(
+    cookie_name: str = "dvue_user_id",
+    label: str = "Reset Session",
+    button_type: str = "warning",
+    on_reset=None,
+    **kwargs,
+) -> "pn.widgets.Button":
+    """Create a Panel button that resets the persistent user-session cookie.
+
+    Clicking the button:
+
+    1. Calls *on_reset* server-side (optional) — use this to remove stale
+       registry or diskcache entries for the old user identity.
+    2. Deletes the *cookie_name* cookie in the browser via JavaScript.
+    3. Reloads the page so the server assigns a fresh UUID, starting a
+       completely clean session with no saved state.
+
+    Parameters
+    ----------
+    cookie_name : str
+        Name of the cookie to clear.  Must match the *cookie_name* passed to
+        :func:`install_session_handler` / :func:`serve_session_app`.
+        Default ``"dvue_user_id"``.
+    label : str
+        Button label shown in the UI.  Default ``"Reset Session"``.
+    button_type : str
+        Panel button styling (``"default"``, ``"primary"``, ``"warning"``,
+        ``"danger"``).  Default ``"warning"``.
+    on_reset : callable or None
+        Optional zero-argument callable invoked server-side when the button is
+        clicked.  Use it to evict the current user's entry from an in-memory
+        registry or a diskcache store before the browser reloads.
+
+        .. note::
+            The server-side callback and the browser-side reload run
+            concurrently (Panel sends the Python event; JavaScript fires the
+            cookie-deletion and ``window.location.reload()`` independently).
+            The callback is best-effort: if the session closes before it
+            completes the old entry will remain until the server restarts or
+            the cache TTL expires.
+    **kwargs
+        Extra keyword arguments forwarded verbatim to ``pn.widgets.Button``.
+
+    Returns
+    -------
+    pn.widgets.Button
+
+    Examples
+    --------
+    Minimal usage — no server-side cleanup::
+
+        reset_btn = make_reset_session_button()
+        template.header.append(reset_btn)
+
+    With registry cleanup::
+
+        reset_btn = make_reset_session_button(
+            on_reset=lambda: _APP_REGISTRY.pop(reg_key, None)
+        )
+    """
+    btn = pn.widgets.Button(name=label, button_type=button_type, **kwargs)
+
+    # Client-side: expire the cookie immediately then reload.
+    btn.js_on_click(
+        args={},
+        code=(
+            f"document.cookie = '{cookie_name}=; "
+            f"expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';"
+            f"window.location.reload();"
+        ),
+    )
+
+    # Server-side: optional cleanup before the browser reloads.
+    if on_reset is not None:
+        btn.on_click(lambda event: on_reset())
+
+    return btn
+
+
+class SessionManager:
+    """Two-layer Panel session persistence manager.
+
+    Encapsulates the in-memory registry (Layer 1) and optional diskcache
+    persistence (Layer 2) used by dvue session-aware apps.  Create one
+    instance per server process and share it across all app factories.
+
+    Parameters
+    ----------
+    cookie_name : str
+        Name of the persistent user-identity cookie.  Must match the value
+        passed to :func:`install_session_handler`.  Default ``"dvue_user_id"``.
+    cache_dir : str or Path or None
+        Directory for the diskcache store.  Only used when *persist* is
+        ``True``.  Defaults to ``~/.dvue_sessions``.
+    ttl : int
+        Diskcache entry lifetime in seconds.  Default 30 days.
+    persist : bool
+        Enable Layer 2 disk persistence (survive server restarts).
+        Default ``False``.
+
+    Examples
+    --------
+    Typical setup in a server entry-point::
+
+        from dvue.session_persistence import install_session_handler, SessionManager
+
+        install_session_handler()
+        _session_mgr = SessionManager(cache_dir=".session_cache", persist=True)
+
+        def make_app():
+            user_id = _session_mgr.current_user_id
+            reg_key  = _session_mgr.make_reg_key(user_id, "myapp")
+            entry    = _session_mgr.get_entry(reg_key)
+            if entry:
+                ...  # reuse
+            else:
+                mgr = build_manager()
+                saved = _session_mgr.load_state(user_id)
+                ...
+                _session_mgr.set_entry(reg_key, {"mgr": mgr, ...})
+                def _save(event=None):
+                    _session_mgr.save_state(user_id, snapshot(mgr, ui))
+    """
+
+    def __init__(
+        self,
+        cookie_name: str = "dvue_user_id",
+        cache_dir: "str | Path | None" = None,
+        ttl: int = 30 * 24 * 3600,
+        persist: bool = False,
+    ) -> None:
+        self.cookie_name = cookie_name
+        self._ttl = ttl
+        self._registry: dict = {}
+
+        if persist:
+            _cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".dvue_sessions"
+            _cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                import diskcache as _dc
+                self._session_cache = _dc.Cache(str(_cache_dir))
+            except ImportError:
+                logger.warning(
+                    "dvue.session_persistence: diskcache not installed; "
+                    "Layer 2 persistence disabled."
+                )
+                self._session_cache = None
+        else:
+            self._session_cache = None
+
+    # ── Cookie helpers ────────────────────────────────────────────────────────
+
+    @property
+    def current_user_id(self) -> str:
+        """Return the current user's UUID from the Panel session cookie."""
+        return pn.state.cookies.get(self.cookie_name, "")
+
+    def make_reg_key(self, user_id: str, suffix: str) -> str:
+        """Return ``"{user_id}:{suffix}"`` or ``""`` when *user_id* is empty."""
+        return f"{user_id}:{suffix}" if user_id else ""
+
+    # ── Registry ──────────────────────────────────────────────────────────────
+
+    def get_entry(self, reg_key: str) -> "dict | None":
+        """Return the registry entry for *reg_key*, or ``None``."""
+        return self._registry.get(reg_key) if reg_key else None
+
+    def set_entry(self, reg_key: str, entry: dict) -> None:
+        """Store *entry* in the registry under *reg_key*."""
+        if reg_key:
+            self._registry[reg_key] = entry
+
+    def evict(self, reg_key: str) -> None:
+        """Remove *reg_key* from the registry (no-op if absent)."""
+        self._registry.pop(reg_key, None)
+
+    # ── Diskcache ─────────────────────────────────────────────────────────────
+
+    def load_state(self, user_id: str) -> dict:
+        """Return the persisted state dict for *user_id*, or ``{}``."""
+        if self._session_cache and user_id:
+            return self._session_cache.get(user_id, default={})
+        return {}
+
+    def save_state(self, user_id: str, state: dict) -> None:
+        """Persist *state* for *user_id* with the configured TTL."""
+        if self._session_cache and user_id:
+            self._session_cache.set(user_id, state, expire=self._ttl)
+
+    # ── Reset button ──────────────────────────────────────────────────────────
+
+    def make_reset_button(self, reg_key: str = "", **kwargs) -> "pn.widgets.Button":
+        """Return a reset-session button bound to this manager.
+
+        Clicking the button evicts *reg_key* from the in-memory registry,
+        clears the user-identity cookie in the browser, and reloads the page.
+
+        Parameters
+        ----------
+        reg_key : str
+            Registry key to evict on click (e.g. ``"{user_id}:myapp"``).
+            Pass ``""`` to skip server-side eviction.
+        **kwargs
+            Forwarded to :func:`make_reset_session_button`.
+        """
+        on_reset = (lambda: self.evict(reg_key)) if reg_key else None
+        return make_reset_session_button(
+            cookie_name=self.cookie_name,
+            on_reset=on_reset,
+            **kwargs,
+        )
