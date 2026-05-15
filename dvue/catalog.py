@@ -540,6 +540,13 @@ class DataReference:
 
         data = self._load_data(time_range=time_range)
 
+        # Fallback slice: if the reader did not honour time_range natively
+        # (e.g. InMemoryDataReferenceReader), trim here before caching.
+        if time_range is not None and not data.empty:
+            start = pd.Timestamp(time_range[0])
+            end = pd.Timestamp(time_range[1])
+            data = data.loc[start:end]
+
         # Populate dynamic metadata from df.attrs (e.g. unit set by the reader).
         # Runs on the first real load for each unique time_range; subsequent
         # cache-hits skip _load_data entirely.

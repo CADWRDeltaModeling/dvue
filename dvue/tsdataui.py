@@ -701,7 +701,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         )
         return pn.Column(time_widget, plot_opts, sizing_mode="stretch_width")
 
-    def get_data(self, df):
+    def get_data(self, df, time_range=None):
         # Start with 0 progress
         # Get the DataUI instance from the caller
         dataui = self._dataui if hasattr(self, "_dataui") else None
@@ -719,13 +719,14 @@ class TimeSeriesDataUIManager(DataUIManager):
         # so that mixed catalogs with different reader types are handled automatically.
         # Otherwise fall back to the legacy get_data_for_time_range() hook.
         use_catalog = self.data_catalog is not None
+        effective_time_range = time_range if time_range is not None else self.time_range
 
         # Process each row, updating progress as we go
         for i, (_, r) in enumerate(df.iterrows()):
             if use_catalog:
-                data = self.get_data_reference(r).getData(time_range=self.time_range)
+                data = self.get_data_reference(r).getData(time_range=effective_time_range)
             else:
-                data, _, _ = self.get_data_for_time_range(r, self.time_range)
+                data, _, _ = self.get_data_for_time_range(r, effective_time_range)
 
             # Update progress - scale from 0 to 50%
             if dataui:
