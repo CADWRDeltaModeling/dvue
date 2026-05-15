@@ -28,6 +28,7 @@ pn.extension("gridstack")  # for GridStack layout
 from . import fullscreen
 from .actions import (
     PlotAction,
+    TabulateAction,
     PermalinkAction,
     DownloadDataAction,
     DownloadDataCatalogAction,
@@ -489,6 +490,7 @@ class DataUIManager(DataProvider):
     def get_data_actions(self) -> list:
         """Return a list of default data actions. Override to customize available actions."""
         plot_action = PlotAction()
+        tabulate_action = TabulateAction()
         download_action = DownloadDataAction()
         permalink_action = PermalinkAction()
         download_catalog = DownloadDataCatalogAction()
@@ -498,6 +500,13 @@ class DataUIManager(DataProvider):
             icon="chart-line",
             action_type="display",
             callback=plot_action.callback,
+        )
+        tabulate_button = dict(
+            name="Tabulate",
+            button_type="primary",
+            icon="table",
+            action_type="display",
+            callback=tabulate_action.callback,
         )
         # Combine Download Data + Download Catalog into a single MenuButton.
         download_menu_button = dict(
@@ -517,7 +526,7 @@ class DataUIManager(DataProvider):
             action_type="link",
             callback=permalink_action.callback,
         )
-        actions = [plot_button, download_menu_button]
+        actions = [plot_button, tabulate_button, download_menu_button]
         if self.show_permalink:
             actions.append(permalink_button)
         return actions

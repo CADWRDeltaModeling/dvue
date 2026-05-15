@@ -40,6 +40,14 @@ class PlotAction:
             except NotImplementedError:
                 yield row, None, None
 
+    def get_tab_label(self, tab_count: int) -> str:
+        """Return the tab title for the given tab counter.
+
+        Override in subclasses to customise the label (e.g. prefix with
+        ``"T"`` for tabulate actions).
+        """
+        return str(tab_count)
+
     def render(self, df, refs_and_data, manager):
         """Build and return a Panel/HoloViews object from *refs_and_data*.
 
@@ -111,12 +119,12 @@ class PlotAction:
                     ):
                         tabs = dataui._display_panel.objects[0]
                         dataui._tab_count += 1
-                        tabs.append((str(dataui._tab_count), plot_panel))
+                        tabs.append((self.get_tab_label(dataui._tab_count), plot_panel))
                         tabs.active = len(tabs) - 1
                     else:
                         dataui._tab_count = 0
                         dataui._display_panel.objects = [
-                            pn.Tabs((str(dataui._tab_count), plot_panel), closable=True,
+                            pn.Tabs((self.get_tab_label(dataui._tab_count), plot_panel), closable=True,
                                     sizing_mode="stretch_both", dynamic=True)
                         ]
                     dataui.set_progress(100, "Done")
@@ -156,6 +164,63 @@ class PlotAction:
         """Hide the progress bar and status label after a short delay."""
         await asyncio.sleep(0.5)
         dataui.hide_progress()
+
+
+class TabulateAction(PlotAction):
+    """Action that loads selected series and displays them as a data table.
+
+    Reuses :class:`PlotAction`'s threaded callback (progress bar, tab
+    management) and only overrides :meth:`render` to produce a
+    :class:`panel.widgets.Tabulator` instead of a HoloViews plot.
+
+    All selected series are merged into a single wide DataFrame — one column
+    per series — indexed by datetime.  The columns are named after the first
+    available identifying field in the catalog row (``name``, ``station_name``,
+    or ``station_id``).
+    """
+
+    def get_tab_label(self, tab_count: int) -> str:
+        return f"T{tab_count}"
+
+    def render(self, df, refs_and_data, manager):
+        frames = []
+        for row, ref, data in refs_and_data:
+            if data is None or not isinstance(data, pd.DataFrame):
+                continue
+            label = None
+            for col in ("name", "station_name", "station_id"):
+                val = row.get(col) if hasattr(row, "get") else None
+                if val and str(val).strip():
+                    label = str(val).strip()
+                    break
+            if label is None:
+                label = f"series_{len(frames)}"
+            if len(data.columns) == 1:
+                data = data.copy()
+                data.columns = [label]
+            else:
+                data = data.copy()
+                data.columns = [f"{label}_{c}" for c in data.columns]
+            frames.append(data)
+
+        if not frames:
+            return pn.pane.Markdown("_No data to display._", sizing_mode="stretch_both")
+
+        combined = pd.concat(frames, axis=1)
+        combined.index.name = "datetime"
+        combined = combined.reset_index()
+        # Round floats to 4 significant figures for readability.
+        float_cols = combined.select_dtypes(include="float").columns.tolist()
+        if float_cols:
+            combined[float_cols] = combined[float_cols].round(4)
+
+        return pn.widgets.Tabulator(
+            combined,
+            pagination="remote",
+            page_size=50,
+            show_index=False,
+            sizing_mode="stretch_both",
+        )
 
 
 class DownloadDataAction:
