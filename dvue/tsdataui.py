@@ -69,6 +69,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         doc="Time window for data. If None, all data is displayed. Format: (start, end)",
     )
     show_legend = param.Boolean(default=True, doc="Show legend")
+    show_gridlines = param.Boolean(default=False, doc="Show gridlines on plot")
     legend_position = param.Selector(
         objects=["top_right", "top_left", "bottom_right", "bottom_left"],
         default="top_right",
@@ -380,6 +381,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         plot_widgets = pn.Column(
             pn.WidgetBox(
                 self.param.show_legend,
+                self.param.show_gridlines,
                 self.param.legend_position,
             ),
             pn.WidgetBox(
@@ -1328,6 +1330,7 @@ class TimeSeriesPlotAction(PlotAction):
             overlays.append(
                 hv.Overlay(styled_curves).opts(
                     show_legend=manager.show_legend,
+                    show_grid=manager.show_gridlines,
                     legend_position=manager.legend_position,
                     ylim=(
                         tuple(range_map[group_key])
