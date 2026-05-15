@@ -1564,7 +1564,7 @@ class DataUI(param.Parameterized):
 
         self._column_picker.param.watch(_on_column_picker_change, "value")
         table_options.append(self._column_picker)
-        # Build map options as a collapsible Card (used inside the Map sidebar tab)
+        # Build map options panel inside the Map sidebar tab
         if hasattr(self, "_map_features"):
             _extra_map_widgets = self._dataui_manager.get_map_option_widgets()
             _map_option_items = [
@@ -1579,13 +1579,12 @@ class DataUI(param.Parameterized):
             ]
             if _extra_map_widgets is not None:
                 _map_option_items.append(_extra_map_widgets)
-            # Build a collapsible accordion for map options inside the Map tab
-            map_options_card = pn.Card(
+            # Plain column — no collapsible wrapper needed since the options
+            # live in their own scrollable area below the map.
+            map_options_card = pn.Column(
                 *_map_option_items,
-                title="Map Options",
-                collapsed=True,
                 sizing_mode="stretch_width",
-                margin=(8, 4, 4, 4),
+                margin=(4, 4, 4, 4),
             )
             # Use HoloViews streams.Params instead of pn.bind so that ALL param
             # changes (including color/marker category) are routed through
@@ -1653,21 +1652,21 @@ class DataUI(param.Parameterized):
 
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
-                # Wrap map in inner Column with flex-shrink:0 so it never
-                # loses height when Map Options card expands below.
+                # Map pane: fixed portion of the sidebar height.
                 pn.Column(
                     self._tmap * self._map_function,
-                    sizing_mode="stretch_both",
+                    sizing_mode="stretch_width",
                     min_height=250,
-                    styles={"flex-shrink": "0"},
+                    height=350,
                 ),
-                map_options_card,
+                # Options live in their own scrollable area below the map.
+                pn.Column(
+                    map_options_card,
+                    sizing_mode="stretch_width",
+                    styles={"overflow-y": "auto", "flex-shrink": "0"},
+                ),
                 min_width=300,
-                min_height=300,
-                sizing_mode="stretch_both",
-                # overflow-y:auto lets options expand downward (sidebar scrolls)
-                # rather than squeezing the map pane above.
-                styles={"overflow-y": "auto"},
+                sizing_mode="stretch_width",
             )
 
             # Build a flat tab list: Time / Transform / Plot / Map / Table
