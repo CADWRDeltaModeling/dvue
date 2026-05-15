@@ -487,6 +487,27 @@ class DataUIManager(DataProvider):
             sizing_mode="stretch_width",
         )
 
+    def get_version(self) -> str:
+        """Return a version string for the running application.
+
+        Override in a subclass to return the app-specific package version.
+        The default reads the dvue package version.
+        """
+        try:
+            from dvue._version import version
+            return version
+        except Exception:
+            return "unknown"
+
+    def get_about_text(self) -> str:
+        """Return a markdown string shown in the About modal.
+
+        Override in a subclass to provide application-specific information.
+        Return an empty string (the default) to show only the auto-generated
+        version block.
+        """
+        return ""
+
     def get_data_actions(self) -> list:
         """Return a list of default data actions. Override to customize available actions."""
         plot_action = PlotAction()
@@ -1271,24 +1292,40 @@ class DataUI(param.Parameterized):
     def get_version(self):
         try:
             return self._dataui_manager.get_version()
-        except Exception as e:
-            return "Unknown version"
+        except Exception:
+            return "unknown"
 
     def get_about_text(self):
+        import textwrap
+        from datetime import datetime
+
+        version = self.get_version()
+        build_date = datetime.now().strftime("%Y-%m-%d")
+
+        manager_text = ""
         try:
-            return self._dataui_manager.get_about_text()
-        except Exception as e:
-            version = self.get_version()
+            manager_text = self._dataui_manager.get_about_text()
+        except Exception:
+            pass
 
-            # insert app version with date time of last commit and commit id
-            version_string = f"Data UI: {version}"
-            about_text = f"""
-            ## App version:
-            ### {version}
+        body = manager_text.strip() if manager_text.strip() else (
+            "An application for exploring and visualising time-series data "
+            "using HoloViews and Panel."
+        )
 
-            ## An App to view data using Holoviews and Panel
-            """
-            return about_text
+        text = textwrap.dedent(f"""\
+            ## About
+
+            {body}
+
+            ---
+
+            | | |
+            |---|---|
+            | **Version** | `{version}` |
+            | **Date** | {build_date} |
+        """)
+        return pn.pane.Markdown(text, sizing_mode="stretch_width")
 
     def create_about_button(self, template):
         about_btn = pn.widgets.Button(name="About App", button_type="primary", icon="info-circle")
@@ -1325,11 +1362,8 @@ class DataUI(param.Parameterized):
         disclaimer_content = self._dataui_manager.get_sidebar_disclaimer()
         if disclaimer_content is not None:
             disclaimer_button = self.create_disclaimer_button(template, disclaimer_content)
-            template.header.append(
-                pn.Row(pn.layout.HSpacer(), disclaimer_button, about_button)
-            )
-        else:
-            template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
+            template.header.append(disclaimer_button)
+        template.header.append(about_button)
         template.modal.append(self.get_about_text())
 
     def _create_main_view(self):
@@ -1741,9 +1775,8 @@ class DataUI(param.Parameterized):
         disclaimer_text = self._dataui_manager.get_sidebar_disclaimer()
         if disclaimer_text is not None:
             disclaimer_button = self.create_disclaimer_button(template, disclaimer_text)
-            template.header.append(pn.Row(pn.layout.HSpacer(), disclaimer_button, about_button))
-        else:
-            template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
+            template.header.append(disclaimer_button)
+        template.header.append(about_button)
         template.main.append(self._main_view)
 
         # Adding about button
@@ -1952,7 +1985,7 @@ class DataUI(param.Parameterized):
 
         template.main.extend(main_items)
         about_button = self.create_about_button(template)
-        template.header.append(pn.Row(pn.layout.HSpacer(), about_button))
+        template.header.append(about_button)
         template.modal.append(self.get_about_text())
         self._template = template
         return template
