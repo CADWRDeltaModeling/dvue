@@ -130,7 +130,198 @@ executes the patch at the right moment.  `pn.serve()` must receive a
 **callable** (`make_app`), not a file path, so the module-level manager
 creation code runs only once.
 
-### Known Limitations
+---
+
+### VanillaTemplate + pn.state.onload — The Correct Serving Pattern
+
+#### Use VanillaTemplate, not FastListTemplate
+
+`FastListTemplate` wraps each `main` item in a Bootstrap `<li>` with fixed height,
+which collapses the `GridStack` layout so the table and display panel disappear.
+`VanillaTemplate` renders `main` items full-width without that wrapping — always use
+it as the outer served template when embedding a `DataUI`.
+
+#### Pre-import heavy modules before `pn.serve()`
+
+`cdecuimgr.py` (and similar manager modules) call `hv.extension("bokeh")` at module
+level.  If the module is first imported inside `make_app()` (a per-session callable),
+that module-level call fires inside a live Bokeh session and can reset
+`pn.state.curdoc`, orphaning existing Bokeh models.
+
+Import the manager class once, before `pn.serve()`:
+
+```python
+from myapp.mymanager import MyManager  # noqa: F401  — side-effect: hv.extension()
+pn.serve({"route": make_app}, ...)
+```
+
+#### `template.servable()` must be called synchronously in `make_app()`
+
+```python
+def make_app():
+    ...
+    template = pn.template.VanillaTemplate(...)
+    pn.state.onload(_load_app)
+    template.servable()   # ← REQUIRED here, NOT only inside pn.state.onload
+```
+
+Without `template.servable()` in the synchronous body of `make_app()`, the Bokeh
+document is never registered and the browser receives an empty page.
+
+#### Critical: VanillaTemplate DOM Placeholder Rule
+
+`VanillaTemplate`'s Jinja HTML embeds Bokeh roots for items that exist **when
+`.servable()` is called**.  Items appended to `template.header` or `template.modal`
+inside `pn.state.onload` (which fires *after* `.servable()`) have no `<div>`
+placeholder in the served HTML and will never render.
+
+The vanilla.html Jinja template loops over `doc.roots` at page-load time:
+
+```html
+<!-- header slot — only roots that exist at .servable() time are embedded -->
+{% for doc in docs %}{% for root in doc.roots %}
+{% if "header" in root.tags %}{{ embed(root) }}{% endif %}
+{% endfor %}{% endfor %}
+
+<!-- modal slot — same rule -->
+{% for doc in docs %}{% for root in doc.roots %}
+{% if "modal" in root.tags %}{{ embed(root) }}{% endif %}
+{% endfor %}{% endfor %}
+```
+
+**Fix — pre-render container objects before `.servable()`, populate inside `_load_app`:**
+
+```python
+def make_app():
+    header_row = pn.Row(sizing_mode="fixed")           # created before .servable()
+    modal_pane = pn.Column(sizing_mode="stretch_width") # created before .servable()
+
+    template = pn.template.VanillaTemplate(
+        ...,
+        header=[header_row],          # embedded in Jinja HTML at page-load time
+    )
+    template.modal.append(modal_pane) # also before .servable()
+
+    def _load_app():
+        ...
+        # Swap contents of the pre-rendered containers.
+        # NEVER call template.modal.clear() — it removes the pre-rendered root.
+        modal_pane.objects = [ui.get_about_text()]
+
+        about_btn = pn.widgets.Button(name="About App", button_type="primary", icon="info-circle")
+        def _about_click(event):
+            modal_pane.objects = [ui.get_about_text()]
+            template.open_modal()
+        about_btn.on_click(_about_click)
+
+        disclaimer = mgr.get_sidebar_disclaimer()
+        if disclaimer:
+            dis_btn = pn.widgets.Button(name="Disclaimer", button_type="light", icon="alert-circle")
+            def _dis_click(event):
+                modal_pane.objects = [disclaimer]
+                template.open_modal()
+            dis_btn.on_click(_dis_click)
+            header_row.append(dis_btn)
+
+        header_row.append(about_btn)
+
+    pn.state.onload(_load_app)
+    template.servable()   # ← registers the pre-rendered header_row and modal_pane roots
+```
+
+> **Never call `template.modal.clear()` after `.servable()`.**  It destroys the
+> pre-rendered `modal_pane` root permanently; all subsequent `template.open_modal()`
+> calls open an empty dialog.
+
+#### Full make_app() Reference Implementation
+
+```python
+def make_app():
+    user_id  = session_mgr.current_user_id
+    reg_key  = session_mgr.make_reg_key(user_id, "myapp")
+    entry    = session_mgr.get_entry(reg_key)
+
+    main_panel    = pn.Column(pn.indicators.LoadingSpinner(value=True, color="primary", size=50),
+                              sizing_mode="stretch_both")
+    sidebar_panel = pn.Column(pn.indicators.LoadingSpinner(value=True, color="primary", size=50))
+    header_row    = pn.Row(sizing_mode="fixed")
+    modal_pane    = pn.Column(sizing_mode="stretch_width")
+
+    if entry:
+        # Registry hit — reuse the already-built template and DataUI.
+        template   = entry["template"]
+        ui         = entry["ui"]
+        stored_main = entry.get("main_panel")
+        if stored_main is not None:
+            stored_main.loading = True
+        def _reattach():
+            try:
+                ui.setup_location_sync()
+                ui.setup_url_sync()
+            finally:
+                if stored_main is not None:
+                    stored_main.loading = False
+        pn.state.onload(_reattach)
+        template.servable()
+        return
+
+    template = pn.template.VanillaTemplate(
+        title="My App",
+        sidebar=[sidebar_panel],
+        main=[main_panel],
+        header=[header_row],       # pre-rendered header container
+    )
+    template.modal.append(modal_pane)  # pre-rendered modal container
+
+    def _load_app():
+        try:
+            mgr = build_manager()
+            ui  = DataUI(mgr, crs=..., station_id_column="ID")
+            ui_template = ui.create_view(title="My App")
+
+            # Transplant sidebar/main into the outer VanillaTemplate.
+            sidebar_panel.objects = list(ui_template.sidebar)
+            main_panel.objects    = list(ui_template.main)
+            ui_template.sidebar.clear()
+            ui_template.main.clear()
+            ui_template.modal.clear()  # safe: clears inner FastListTemplate only
+
+            # Populate the pre-rendered header/modal containers.
+            about_text = ui.get_about_text()
+            modal_pane.objects = [about_text]
+
+            about_btn = pn.widgets.Button(name="About App", button_type="primary", icon="info-circle")
+            def _about_click(event):
+                modal_pane.objects = [about_text]
+                template.open_modal()
+            about_btn.on_click(_about_click)
+
+            disclaimer = mgr.get_sidebar_disclaimer()
+            if disclaimer:
+                dis_btn = pn.widgets.Button(name="Disclaimer", button_type="light", icon="alert-circle")
+                def _dis_click(event):
+                    modal_pane.objects = [disclaimer]
+                    template.open_modal()
+                dis_btn.on_click(_dis_click)
+                header_row.append(dis_btn)
+
+            header_row.append(about_btn)
+
+            session_mgr.set_entry(reg_key, {
+                "template": template, "ui": ui,
+                "main_panel": main_panel,
+                "header_row": header_row, "modal_pane": modal_pane,
+            })
+        except Exception:
+            import traceback
+            logger.error("_load_app failed:\n%s", traceback.format_exc())
+            main_panel.objects = [pn.pane.Markdown("## Error\n\nCheck server logs.")]
+
+    pn.state.onload(_load_app)
+    template.servable()
+```
+
+
 
 1. `setup_url_sync` on the manager accumulates `param.watch` watchers across
    sessions (one per session for the same user).  Dead watchers (from ended

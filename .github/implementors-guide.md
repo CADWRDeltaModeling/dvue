@@ -316,3 +316,63 @@ selected_indices = sorted(set(non_geo_positions + geo_selected_indices))
 
 Both fixes and their regression tests live in
 `dvue/tests/test_dataui_geo_selection.py`.
+
+---
+
+## 12. Serving a dvue App — VanillaTemplate Gotchas
+
+### Use VanillaTemplate, not FastListTemplate, as the outer served template
+
+`FastListTemplate.main` wraps each item in a Bootstrap `<li>` with a fixed height, which
+collapses the `GridStack` so the data table and display panel disappear.  `VanillaTemplate`
+renders `main` items full-width without that wrapping.
+
+`create_view()` returns a `FastListTemplate` (correct for standalone use / notebook).  When
+embedding inside an outer served template, transplant sidebar and main content out of the
+inner `FastListTemplate` into a `VanillaTemplate`, then clear the inner template so Panel
+doesn't try to serve the same Bokeh models from two documents.
+
+### `template.servable()` must be called synchronously in `make_app()`
+
+`make_app()` is the per-session callable passed to `pn.serve()`.  Without a synchronous
+`template.servable()` call in `make_app()`, the Bokeh document is never registered and the
+browser receives an empty page — even if `_load_app` runs and builds everything correctly.
+
+```python
+def make_app():
+    ...
+    pn.state.onload(_load_app)  # deferred heavy work
+    template.servable()          # ← must be here, not only inside onload
+```
+
+### VanillaTemplate DOM Placeholder Rule (header and modal)
+
+`VanillaTemplate`'s Jinja HTML embeds a Bokeh root `<div>` for every item in
+`template.header` and `template.modal` **at the time `.servable()` is called**.
+Items appended to those lists *after* `.servable()` (including inside
+`pn.state.onload`) have no DOM placeholder and silently fail to render.
+
+**Pattern:** create `pn.Row()` / `pn.Column()` container objects *before* the
+template, pass them at construction or append them before `.servable()`, then
+update their `.objects` inside `_load_app`:
+
+```python
+header_row = pn.Row(sizing_mode="fixed")       # ← before VanillaTemplate()
+modal_pane = pn.Column(sizing_mode="stretch_width")
+
+template = pn.template.VanillaTemplate(..., header=[header_row])
+template.modal.append(modal_pane)               # ← before .servable()
+
+def _load_app():
+    # ✅ update container contents — root already has a DOM slot
+    modal_pane.objects = [ui.get_about_text()]
+    header_row.append(about_btn)
+    # ❌ never do this — destroys the pre-rendered modal root permanently
+    # template.modal.clear()
+```
+
+`template.modal.clear()` after `.servable()` destroys the pre-rendered root; all
+subsequent `template.open_modal()` calls open an empty dialog.
+
+See `session-management.md` for the complete `make_app()` reference implementation.
+

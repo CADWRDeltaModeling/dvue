@@ -173,6 +173,61 @@ class MyManager(TimeSeriesDataUIManager):
         return MyPlotAction()
 ```
 
+## Feature Flag Params
+
+`TimeSeriesDataUIManager` (and `DataUIManager`) expose several `param.Boolean` flags
+that `DataUI` reads to conditionally add buttons and tabs.  Set them in the class body:
+
+| Param | Default | Effect |
+|---|---|---|
+| `show_math_ref_editor` | `True` | Math Ref editor tab in the action bar |
+| `show_transform_to_catalog` | `True` | "Transform → Ref" button |
+| `show_reset_session_button` | `False` | "Reset Session" button at end of action bar |
+| `session_cookie_name` | `"dvue_user_id"` | Cookie cleared by Reset Session button |
+| `show_permalink` | `False` | "Permalink" button in action bar |
+| `disclaimer_text` | `None` | Collapsible Disclaimer card in sidebar |
+
+**`show_reset_session_button`** — set to `True` in any app that uses
+`install_session_handler()`.  Also set `session_cookie_name` to match the
+`cookie_name` passed to `install_session_handler()` / `SessionManager()`:
+
+```python
+class MyManager(TimeSeriesDataUIManager):
+    show_reset_session_button = param.Boolean(default=True)
+    session_cookie_name       = param.String(default="myapp_user_id")
+```
+
+**`show_math_ref_editor`** — default is `True`; the Math Ref editor is on by default.
+Do **not** add `show_math_ref_editor = param.Boolean(default=False)` to a subclass
+unless you intentionally want to disable it — this is a common mistake that silently
+removes a useful feature.
+
+## Disclaimer and About Buttons — Header Modal, Not Action Row
+
+`disclaimer_text` (when non-empty) adds a sidebar card automatically.  For a modal
+Disclaimer button in the page header, wire it via the pre-rendered `header_row` /
+`modal_pane` pattern described in `session-management.md`.
+
+**Do not** add a Disclaimer action to `get_data_actions()` — that puts it in the
+action row next to Plot/Tabulate, which is the wrong affordance for a legal notice:
+
+```python
+# ❌ Wrong — disclaimer clutters the data-action row
+def get_data_actions(self):
+    actions = super().get_data_actions()
+    actions.append(dict(name="Disclaimer", icon="alert-circle", ...))
+    return actions
+
+# ✅ Correct — only override get_data_actions() when you need extra data actions
+def get_data_actions(self):
+    return super().get_data_actions()
+    # (or omit the override entirely — pure passthrough adds no value)
+```
+
+`get_data_actions()` should only be overridden when you need to **add** actions beyond
+what `super()` provides.  A pure `return super().get_data_actions()` override is dead
+code — delete it.
+
 ## Checklist
 
 - [ ] Subclass `TimeSeriesDataUIManager` (not `DataUIManager` for time-series)
@@ -188,6 +243,10 @@ class MyManager(TimeSeriesDataUIManager):
 - [ ] Math ref YAML criteria use `source_num:` not `url_num:`
 - [ ] Return `(df, unit_str, ptype_or_None)` from `get_data_for_time_range`
 - [ ] Primary key values used as station identifiers start with a letter (e.g. `"STA1"` not `"1"`) — values starting with a digit get a `_` prefix in auto-derived names
+- [ ] Do **not** set `show_math_ref_editor = False` unless intentionally disabling
+- [ ] If using session persistence: `show_reset_session_button = True` + `session_cookie_name` matches `install_session_handler(cookie_name=...)`
+- [ ] Disclaimer/About wired via pre-rendered `header_row` / `modal_pane` — not via `get_data_actions()`
+- [ ] Pure `return super().get_data_actions()` override deleted
 
 ## Finding Old API Usage (grep patterns)
 
