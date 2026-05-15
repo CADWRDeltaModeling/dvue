@@ -69,7 +69,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         doc="Time window for data. If None, all data is displayed. Format: (start, end)",
     )
     show_legend = param.Boolean(default=True, doc="Show legend")
-    show_gridlines = param.Boolean(default=False, doc="Show gridlines on plot")
+    show_gridlines = param.Boolean(default=True, doc="Show gridlines on plot")
     legend_position = param.Selector(
         objects=["top_right", "top_left", "bottom_right", "bottom_left"],
         default="top_right",
