@@ -1003,3 +1003,77 @@ class SourceCompareAction:
         )
 
         dataui.show_in_display_panel("Source Compare", form)
+
+
+class AddSourceFilesAction:
+    """Append source files to the live catalog at runtime.
+
+    Opens a form in the display area with a file-path text input.  On
+    confirm, calls ``manager.add_source_files(path)`` and refreshes the
+    catalog table.  Supported file types depend on the active manager's
+    :meth:`~dvue.tsdataui.TimeSeriesDataUIManager.add_source_files` override.
+
+    In desktop (pywebview) sessions, files can also be dragged directly onto
+    the window — :func:`~dvue.session_persistence.serve_desktop_app` wires
+    the drop events to call ``add_source_files`` automatically via a
+    background queue.  This toolbar button is the manual fallback.
+    """
+
+    def callback(self, event, dataui):
+        manager = dataui._dataui_manager
+
+        path_input = pn.widgets.TextInput(
+            name="File path",
+            placeholder="Enter absolute path to a supported file…",
+            sizing_mode="stretch_width",
+        )
+        add_btn = pn.widgets.Button(
+            name="Add",
+            button_type="success",
+            icon="folder-plus",
+            width=100,
+        )
+        status_pane = pn.pane.Markdown("", sizing_mode="stretch_width")
+
+        def _on_add(evt):
+            path = (path_input.value or "").strip()
+            if not path:
+                status_pane.object = "_Please enter a file path._"
+                return
+            try:
+                added = manager.add_source_files(path)
+                if added:
+                    TransformToCatalogAction._refresh_table(dataui, manager)
+                    status_pane.object = (
+                        f"**Added {len(added)} reference(s)** from `{path}`."
+                    )
+                    path_input.value = ""
+                    logger.info(
+                        "AddSourceFilesAction: added %d refs from %s", len(added), path
+                    )
+                else:
+                    status_pane.object = (
+                        f"_No references added from `{path}`.  "
+                        "Check that the file type is supported by this manager._"
+                    )
+            except Exception as e:
+                logger.error(
+                    "AddSourceFilesAction: error adding %s: %s", path, e
+                )
+                status_pane.object = f"**Error:** {e}"
+
+        add_btn.on_click(_on_add)
+
+        form = pn.Column(
+            pn.pane.Markdown(
+                "### Add Files\n"
+                "Enter a file path to append its catalog entries to the current view.  "
+                "Supported types depend on the active data manager.  "
+                "In desktop mode, you can also drag files directly onto the window."
+            ),
+            pn.Row(path_input, add_btn),
+            status_pane,
+            sizing_mode="stretch_width",
+        )
+
+        dataui.show_in_display_panel("Add Files", form)

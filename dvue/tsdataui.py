@@ -287,7 +287,33 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="inline",
                 callback=ClearCacheAction().callback,
             ))
+        from .actions import AddSourceFilesAction
+        actions.append(dict(
+            name="Add Files",
+            button_type="light",
+            icon="folder-plus",
+            action_type="display",
+            callback=AddSourceFilesAction().callback,
+        ))
         return actions
+
+    def add_source_files(self, *paths: str) -> list:
+        """Incrementally add source files to the live catalog.
+
+        Override in subclasses to support specific file types.  The base
+        implementation is a no-op that returns an empty list.
+
+        Parameters
+        ----------
+        *paths : str
+            Absolute OS paths of files to add.
+
+        Returns
+        -------
+        list[str]
+            Paths that were successfully added (for status feedback).
+        """
+        return []
 
     def get_time_range(self, dfcat):
         raise NotImplementedError("Method get_time_range not implemented")

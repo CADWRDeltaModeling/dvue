@@ -464,10 +464,112 @@ def serve_desktop_app(
         ) from exc
 
     import threading
+    import tornado.ioloop as _tornado_ioloop
 
     # Reserve a free port before starting the server thread so we know the URL.
     if port == 0:
         port = _find_free_port()
+
+    # Mutable dict shared between the pywebview GUI thread and the Panel/Tornado
+    # event loop.  Populated once the first Panel session starts (_on_load).
+    _app_state: dict = {}  # keys: "mgr", "ui", "ioloop"
+
+    def _on_drag(e):  # noqa: ARG001
+        """Intercept dragenter/dragover to prevent browser's default behaviour."""
+
+    def _on_file_drop(e):
+        """Receive pywebview drop event; schedule a confirmation form on the IOLoop."""
+        paths = [
+            f["pywebviewFullPath"]
+            for f in (e.get("dataTransfer") or {}).get("files", [])
+            if f.get("pywebviewFullPath")
+        ]
+        if not paths:
+            return
+        ioloop = _app_state.get("ioloop")
+        if ioloop is None:
+            logger.warning("serve_desktop_app: drop received before session ready; ignoring")
+            return
+        # add_callback is documented as thread-safe in Tornado — no queue needed.
+        ioloop.add_callback(_show_drop_confirm, paths)
+
+    def _show_drop_confirm(paths: list) -> None:
+        """Build and show a confirmation form for dropped file paths.
+
+        Runs inside the Panel/Tornado event loop (scheduled via add_callback).
+        """
+        import os
+        ui = _app_state.get("ui")
+        mgr = _app_state.get("mgr")
+        if ui is None or mgr is None:
+            return
+
+        labels = [os.path.basename(p) for p in paths]
+        header = pn.pane.Markdown(
+            "### Add dropped file(s)\n\n"
+            + "\n".join(f"- `{p}`" for p in paths),
+            sizing_mode="stretch_width",
+        )
+        add_btn = pn.widgets.Button(
+            name="Add", button_type="success", icon="folder-plus", width=120
+        )
+        cancel_btn = pn.widgets.Button(
+            name="Cancel", button_type="light", width=100
+        )
+        status = pn.pane.Markdown("", sizing_mode="stretch_width")
+
+        def _on_confirm(evt):  # noqa: ARG001
+            add_btn.disabled = True
+            cancel_btn.disabled = True
+            total_added: list = []
+            errors: list = []
+            for path in paths:
+                try:
+                    added = mgr.add_source_files(path)
+                    total_added.extend(added)
+                except Exception as exc:
+                    errors.append(f"`{os.path.basename(path)}`: {exc}")
+            if total_added:
+                try:
+                    from dvue.actions import TransformToCatalogAction
+                    TransformToCatalogAction._refresh_table(ui, mgr)
+                except Exception as exc:
+                    logger.warning("serve_desktop_app: table refresh failed: %s", exc)
+                msg = f"**Added {len(total_added)} reference(s)** from {', '.join(f'`{l}`' for l in labels)}."
+            else:
+                msg = "_No new references were added._"
+            if errors:
+                msg += "\n\n**Errors:**\n" + "\n".join(f"- {e}" for e in errors)
+            status.object = msg
+
+        def _on_cancel(evt):  # noqa: ARG001
+            ui.show_in_display_panel("Cancelled", pn.pane.Markdown("_Drop cancelled._"))
+
+        add_btn.on_click(_on_confirm)
+        cancel_btn.on_click(_on_cancel)
+        form = pn.Column(
+            header,
+            pn.Row(add_btn, cancel_btn),
+            status,
+            sizing_mode="stretch_width",
+        )
+        ui.show_in_display_panel("File Dropped", form)
+
+    def _bind_drop_events(window):
+        """Register document-level drag-and-drop handlers after the window loads."""
+        try:
+            from webview.dom import DOMEventHandler
+            window.dom.document.events.dragenter += DOMEventHandler(
+                _on_drag, True, True
+            )
+            window.dom.document.events.dragover += DOMEventHandler(
+                _on_drag, True, True, debounce=200
+            )
+            window.dom.document.events.drop += DOMEventHandler(
+                _on_file_drop, True, True
+            )
+        except Exception as _exc:  # pragma: no cover
+            logger.warning("Could not bind drop events: %s", _exc)
 
     # --- Build the same session-aware make_app factory as serve_session_app ---
     install_session_handler(cookie_name=cookie_name)
@@ -525,12 +627,20 @@ def serve_desktop_app(
         tmpl = ui.create_view(title=title)
         tmpl.servable()
 
+        # Expose mgr/ui to the drop-event handler as soon as they exist.
+        _app_state["mgr"] = mgr
+        _app_state["ui"] = ui
+
         if user_id:
             _registry[user_id] = {"mgr": mgr, "ui": ui, "template": tmpl}
 
         sel = saved.get("selection", [])
 
         def _on_load():
+            # Capture the running Tornado IOLoop so the pywebview GUI thread can
+            # schedule confirmation callbacks via IOLoop.add_callback (thread-safe).
+            _app_state["ioloop"] = _tornado_ioloop.IOLoop.current()
+
             if sel and hasattr(ui, "display_table") and hasattr(ui, "_registered_actions"):
                 plot_cb = next(
                     (
@@ -583,8 +693,10 @@ def serve_desktop_app(
     logger.info("Panel server ready — opening desktop window at %s", url)
 
     # Open the app in a native window, maximised to fill the screen.
-    webview.create_window(title, url, maximized=True)
-    webview.start()  # blocks until window is closed
+    _win = webview.create_window(title, url, maximized=True)
+    # Pass _bind_drop_events so pywebview calls it once the window is ready,
+    # registering document-level drag-and-drop handlers.
+    webview.start(_bind_drop_events, _win)  # blocks until window is closed
 
 
 def make_reset_session_button(

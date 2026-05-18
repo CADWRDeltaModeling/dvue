@@ -1071,7 +1071,7 @@ class DataUI(param.Parameterized):
     def create_data_table(self, dfs):
         column_width_map = self._dataui_manager.get_table_column_width_map()
         all_cols = self._dataui_manager.get_table_columns()
-        dfs = dfs[all_cols]
+        dfs = dfs.reindex(columns=[c for c in all_cols if c in dfs.columns])
         # GeoDataFrame column slices can still be GeoDataFrames; Tabulator
         # cannot JSON-serialize geometry objects, so force a plain DataFrame.
         try:
