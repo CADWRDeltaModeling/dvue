@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 
 import panel as pn
@@ -1064,14 +1065,101 @@ class AddSourceFilesAction:
 
         add_btn.on_click(_on_add)
 
+        # Browse button — only available when tkinter is importable (local process).
+        # In a remote-server session tkinter cannot open a dialog on the server
+        # machine, so the button is hidden rather than raising an error.
+        _tkinter_available = False
+        try:
+            import tkinter as _tk_probe  # noqa: F401
+            _tkinter_available = True
+        except Exception:
+            pass
+
+        input_row = pn.Row(path_input, add_btn, sizing_mode="stretch_width")
+
+        if _tkinter_available:
+            browse_btn = pn.widgets.Button(
+                name="Browse…",
+                button_type="light",
+                icon="folder-open",
+                width=120,
+            )
+
+            def _on_browse(evt):  # noqa: ARG001
+                browse_btn.disabled = True
+                status_pane.object = "_Opening file picker…_"
+                curdoc = pn.state.curdoc
+
+                def _run_dialog():
+                    selected = ()
+                    try:
+                        import tkinter as tk
+                        from tkinter import filedialog
+                        root = tk.Tk()
+                        root.withdraw()
+                        root.wm_attributes("-topmost", True)
+                        selected = filedialog.askopenfilenames(
+                            title="Select file(s) to add",
+                            parent=root,
+                        )
+                        root.destroy()
+                    except Exception as exc:
+                        logger.warning(
+                            "AddSourceFilesAction: file dialog error: %s", exc
+                        )
+
+                    def _apply():
+                        browse_btn.disabled = False
+                        if not selected:
+                            status_pane.object = "_No file selected._"
+                            return
+                        if len(selected) == 1:
+                            # Single file — populate the text input for review.
+                            path_input.value = selected[0]
+                            status_pane.object = (
+                                "_Path set — click **Add** to confirm._"
+                            )
+                        else:
+                            # Multiple files — add immediately.
+                            total: list = []
+                            errors: list = []
+                            for p in selected:
+                                try:
+                                    total.extend(manager.add_source_files(p))
+                                except Exception as exc:
+                                    errors.append(
+                                        f"`{os.path.basename(p)}`: {exc}"
+                                    )
+                            if total:
+                                TransformToCatalogAction._refresh_table(
+                                    dataui, manager
+                                )
+                            msg = (
+                                f"**Added {len(total)} reference(s)** from "
+                                f"{len(selected)} file(s)."
+                            )
+                            if errors:
+                                msg += "\n\n**Errors:**\n" + "\n".join(
+                                    f"- {e}" for e in errors
+                                )
+                            status_pane.object = msg
+
+                    curdoc.add_next_tick_callback(_apply)
+
+                threading.Thread(target=_run_dialog, daemon=True).start()
+
+            browse_btn.on_click(_on_browse)
+            input_row = pn.Row(path_input, add_btn, browse_btn, sizing_mode="stretch_width")
+
         form = pn.Column(
             pn.pane.Markdown(
                 "### Add Files\n"
-                "Enter a file path to append its catalog entries to the current view.  "
+                "Enter or browse to a file path to append its catalog entries "
+                "to the current view.  "
                 "Supported types depend on the active data manager.  "
                 "In desktop mode, you can also drag files directly onto the window."
             ),
-            pn.Row(path_input, add_btn),
+            input_row,
             status_pane,
             sizing_mode="stretch_width",
         )

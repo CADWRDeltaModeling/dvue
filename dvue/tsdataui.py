@@ -387,6 +387,13 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     def get_widgets(self):
         _M = (1, 3, 1, 0)
+        # DatetimeRangeInput.from_param requires a concrete (start, end) tuple;
+        # it fails when time_range is None (e.g. empty catalog at startup).
+        # Set a sensible default so the widget can initialize; the user or
+        # add_source_files will update it once real data is loaded.
+        if self.time_range is None:
+            _today = pd.Timestamp.now().normalize()
+            self.time_range = (_today - pd.DateOffset(years=2), _today)
         time_range_w = pn.widgets.DatetimeRangeInput.from_param(
             self.param.time_range,
             name="Time range",
