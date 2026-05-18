@@ -343,6 +343,250 @@ def serve_session_app(
     )
 
 
+# ---------------------------------------------------------------------------
+# Desktop-mode helpers
+# ---------------------------------------------------------------------------
+
+def _find_free_port() -> int:
+    """Return an available TCP port assigned by the OS."""
+    import socket
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _wait_for_server(port: int, timeout: float = 15.0) -> None:
+    """Block until a TCP listener is ready on localhost:*port*.
+
+    Raises
+    ------
+    TimeoutError
+        If the server does not respond within *timeout* seconds.
+    """
+    import socket
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("localhost", port), timeout=0.5):
+                return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.1)
+    raise TimeoutError(
+        f"Panel server did not become ready on port {port} within {timeout:.0f}s"
+    )
+
+
+def serve_desktop_app(
+    build_manager_fn,
+    title: str,
+    port: int = 0,
+    server_timeout: float = 15.0,
+    crs=None,
+    station_id_column: str | None = None,
+    cookie_name: str = "dvue_user_id",
+    cache_dir: str | Path | None = None,
+    persist: bool = False,
+    **pn_serve_kwargs,
+) -> None:
+    """Launch a session-aware Panel app in a native desktop window via pywebview.
+
+    Drop-in replacement for :func:`serve_session_app` that opens the app in a
+    native OS window (using ``pywebview``) instead of a browser tab.  All
+    session-persistence behaviour (cookie, in-memory registry, optional
+    diskcache) is identical.
+
+    The window starts maximised so it fills the available screen space on all
+    platforms.  The user can resize it freely after launch.
+
+    Parameters
+    ----------
+    build_manager_fn:
+        Zero-argument callable returning a fresh ``DataUIManager`` instance.
+    title:
+        Window title; also used as the URL path key (lower-cased, spaces →
+        hyphens).
+    port:
+        TCP port for the Bokeh/Panel server.  ``0`` (default) selects a free
+        port automatically — the port is reserved *before* the server thread
+        starts so the URL is known for the webview call.
+    server_timeout:
+        Seconds to wait for the Panel server to become ready before raising
+        ``TimeoutError``.  Default ``15.0``.
+    crs:
+        Cartopy CRS passed as ``DataUI(mgr, crs=crs)``.  ``None`` → no map.
+    station_id_column:
+        Column name passed as ``DataUI(mgr, station_id_column=...)``.
+    cookie_name:
+        Name of the persistent user-identity cookie.  Default
+        ``"dvue_user_id"``.
+    cache_dir:
+        Directory for the diskcache session store.  Only used when *persist*
+        is ``True``.  Defaults to ``~/.dvue_sessions``.
+    persist:
+        Enable Layer 2 disk persistence across server restarts via diskcache.
+        Default ``False``.
+    **pn_serve_kwargs:
+        Extra keyword arguments forwarded verbatim to ``pn.serve()``.
+
+    Raises
+    ------
+    ImportError
+        If ``pywebview`` is not installed.
+    TimeoutError
+        If the Panel server is not ready within *server_timeout* seconds.
+
+    Notes
+    -----
+    * Must be launched as a regular Python script, **not** via ``panel serve``.
+      ``install_session_handler()`` must run before ``BokehServer.__init__()``.
+    * ``num_procs=1`` is required for the in-memory registry (Layer 1) to work.
+    * The Panel server thread is a **daemon** — it exits automatically when the
+      webview window is closed.
+
+    Examples
+    --------
+    Minimal usage::
+
+        from dvue.session_persistence import serve_desktop_app
+
+        def build_manager():
+            return MyTimeSeriesDataUIManager(*files)
+
+        serve_desktop_app(build_manager, title="My App")
+    """
+    try:
+        import webview
+    except ImportError as exc:
+        raise ImportError(
+            "pywebview is required for desktop mode.  Install it with:\n"
+            "    pip install pywebview"
+        ) from exc
+
+    import threading
+
+    # Reserve a free port before starting the server thread so we know the URL.
+    if port == 0:
+        port = _find_free_port()
+
+    # --- Build the same session-aware make_app factory as serve_session_app ---
+    install_session_handler(cookie_name=cookie_name)
+
+    class _SuppressUnknownRef(logging.Filter):
+        def filter(self, record):
+            return "UnknownReferenceError" not in record.getMessage()
+
+    logging.getLogger("bokeh.server.protocol_handler").addFilter(_SuppressUnknownRef())
+
+    if persist:
+        _cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".dvue_sessions"
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        import diskcache
+        _session_cache = diskcache.Cache(str(_cache_dir))
+
+        def _load_state(user_id: str) -> dict:
+            return _session_cache.get(user_id, default={})
+
+        def _save_state(user_id: str, state: dict) -> None:
+            _session_cache.set(user_id, state, expire=_TTL)
+    else:
+        def _load_state(user_id: str) -> dict:
+            return {}
+
+        def _save_state(user_id: str, state: dict) -> None:
+            pass
+
+    _registry: dict = {}
+
+    def make_app():
+        from dvue.dataui import DataUI
+
+        user_id = pn.state.cookies.get(cookie_name, "")
+
+        if user_id and user_id in _registry:
+            entry = _registry[user_id]
+            mgr, ui, tmpl = entry["mgr"], entry["ui"], entry["template"]
+            pn.state.onload(lambda: (ui.setup_location_sync(), ui.setup_url_sync()))
+            tmpl.servable()
+            return
+
+        mgr = build_manager_fn()
+        saved = _load_state(user_id) if user_id else {}
+        if saved:
+            restore(mgr, saved)
+
+        dataui_kwargs: dict = {}
+        if crs is not None:
+            dataui_kwargs["crs"] = crs
+        if station_id_column is not None:
+            dataui_kwargs["station_id_column"] = station_id_column
+
+        ui = DataUI(mgr, **dataui_kwargs)
+        tmpl = ui.create_view(title=title)
+        tmpl.servable()
+
+        if user_id:
+            _registry[user_id] = {"mgr": mgr, "ui": ui, "template": tmpl}
+
+        sel = saved.get("selection", [])
+
+        def _on_load():
+            if sel and hasattr(ui, "display_table") and hasattr(ui, "_registered_actions"):
+                plot_cb = next(
+                    (
+                        a["callback"]
+                        for a in ui._registered_actions
+                        if a.get("name") == "Plot"
+                    ),
+                    None,
+                )
+                if plot_cb:
+                    n_rows = len(ui.display_table.value) if ui.display_table.value is not None else 0
+                    valid_sel = [i for i in sel if i < n_rows]
+                    if valid_sel:
+                        ui.display_table.selection = valid_sel
+                    pn.state.curdoc.add_next_tick_callback(
+                        lambda: plot_cb(None, ui)
+                    )
+
+            if persist:
+                def _do_save(event=None):
+                    if user_id:
+                        _save_state(user_id, snapshot(mgr, ui))
+
+                if "time_range" in mgr.param:
+                    mgr.param.watch(_do_save, "time_range")
+                if hasattr(ui, "display_table"):
+                    ui.display_table.param.watch(_do_save, "selection")
+
+        pn.state.onload(_on_load)
+
+    app_key = title.lower().replace(" ", "-")
+    url = f"http://localhost:{port}/{app_key}"
+
+    # Start Panel server in a background daemon thread (show=False).
+    server_thread = threading.Thread(
+        target=lambda: pn.serve(
+            {app_key: make_app},
+            port=port,
+            show=False,
+            unused_session_lifetime_milliseconds=2_592_000_000,
+            **pn_serve_kwargs,
+        ),
+        daemon=True,
+        name="panel-server",
+    )
+    server_thread.start()
+
+    logger.info("Waiting for Panel server on port %d...", port)
+    _wait_for_server(port, server_timeout)
+    logger.info("Panel server ready — opening desktop window at %s", url)
+
+    # Open the app in a native window, maximised to fill the screen.
+    webview.create_window(title, url, maximized=True)
+    webview.start()  # blocks until window is closed
+
+
 def make_reset_session_button(
     cookie_name: str = "dvue_user_id",
     label: str = "Reset Session",
