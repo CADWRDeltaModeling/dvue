@@ -1725,6 +1725,8 @@ class DataUI(param.Parameterized):
             self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
             sidebar_view = pn.Column(
                 self._sidebar_tabs,
+                self.progress_bar,
+                self._status_label,
                 sizing_mode="stretch_both",
             )
         else:
@@ -1739,6 +1741,8 @@ class DataUI(param.Parameterized):
             self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
             sidebar_view = pn.Column(
                 self._sidebar_tabs,
+                self.progress_bar,
+                self._status_label,
                 sizing_mode="stretch_both",
             )
         # Let actions inject their sidebar tabs now that _sidebar_tabs exists.
@@ -1751,12 +1755,10 @@ class DataUI(param.Parameterized):
         # _main_content is swapped by update_view_from_location on view-type
         # changes; the action panel (which now includes the nav widget) stays
         # pinned inside each _create_main_view() call.
-        # Progress bar is placed here (not in sidebar) so it is visible during
-        # long plot operations without requiring a tab switch.
+        # Progress bar lives in the sidebar (above the tabs) so it is always
+        # visible without causing resize/jitter in the main content area.
         self._main_content = pn.Column(self._create_main_view(), sizing_mode="stretch_both")
         self._main_view = pn.Column(
-            self.progress_bar,
-            self._status_label,
             self._main_content,
             sizing_mode="stretch_both",
         )
