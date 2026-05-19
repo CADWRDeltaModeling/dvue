@@ -221,6 +221,7 @@ class TabulateAction(PlotAction):
             page_size=50,
             show_index=False,
             sizing_mode="stretch_both",
+            editable=False,
         )
 
 
