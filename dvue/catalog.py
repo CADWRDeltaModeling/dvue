@@ -874,6 +874,11 @@ class DataCatalog:
         # Maps each unique non-empty ref.source → integer index (order of first appearance).
         # source_num is never stored on the ref itself — it is derived from this mapping.
         self._source_index: Dict[str, int] = {}
+        # Maps pk_tuple → ref.name for O(1) duplicate detection in add().
+        # Without this, add() would scan all existing refs → O(n²) for bulk adds.
+        self._pk_to_name: Dict[tuple, str] = {}
+        # Count of math refs (ref_type == "math") for O(1) _has_math_refs() checks.
+        self._math_ref_count: int = 0
         self._schema_map: Dict[str, str] = schema_map or {}
         self._crs: Optional[str] = crs
         # Start with a snapshot of the global registry; instance-local additions
@@ -1015,15 +1020,13 @@ class DataCatalog:
 
         # 3. Check for primary-key collision (different name, same pk values).
         pk = self._pk_tuple(ref)
-        for existing_name, existing_ref in self._references.items():
-            if existing_name == ref.name:
-                continue  # same-name replacement handled below
-            if self._pk_tuple(existing_ref) == pk:
-                raise ValueError(
-                    f"A DataReference with primary-key {dict(zip(self._primary_key, pk))!r} "
-                    f"already exists in the catalog under the name {existing_name!r}.  "
-                    "Remove it first or use different primary-key values."
-                )
+        existing_owner = self._pk_to_name.get(pk)
+        if existing_owner is not None and existing_owner != ref.name:
+            raise ValueError(
+                f"A DataReference with primary-key {dict(zip(self._primary_key, pk))!r} "
+                f"already exists in the catalog under the name {existing_owner!r}.  "
+                "Remove it first or use different primary-key values."
+            )
 
         # 4. Same-name exact-duplicate guard.
         existing = self._references.get(ref.name)
@@ -1044,6 +1047,9 @@ class DataCatalog:
                 )
 
         self._references[ref.name] = ref
+        self._pk_to_name[pk] = ref.name
+        if getattr(ref, "ref_type", "") == "math":
+            self._math_ref_count += 1
         return self
 
     def add_source(self, source: Any) -> "DataCatalog":
@@ -1085,7 +1091,11 @@ class DataCatalog:
         """
         if name not in self._references:
             raise KeyError(f"No DataReference named {name!r} in catalog.")
-        del self._references[name]
+        ref = self._references.pop(name)
+        pk = self._pk_tuple(ref)
+        self._pk_to_name.pop(pk, None)
+        if getattr(ref, "ref_type", "") == "math":
+            self._math_ref_count = max(0, self._math_ref_count - 1)
         return self
 
     def rename(self, old_name: str, new_name: str) -> "DataCatalog":
@@ -1123,8 +1133,12 @@ class DataCatalog:
         if old_name == new_name:
             return self
         ref = self._references.pop(old_name)
+        old_pk = self._pk_tuple(ref)
+        self._pk_to_name.pop(old_pk, None)
         ref.name = new_name
         self._references[new_name] = ref
+        new_pk = self._pk_tuple(ref)
+        self._pk_to_name[new_pk] = new_name
         return self
 
     def get(self, name: Optional[str] = None, **pk_kwargs: Any) -> DataReference:

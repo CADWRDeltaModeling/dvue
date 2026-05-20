@@ -3,6 +3,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 #
+import numpy as np
 import pandas as pd
 import geopandas as gpd
 from io import StringIO
@@ -1071,7 +1072,12 @@ class DataUI(param.Parameterized):
     def create_data_table(self, dfs):
         column_width_map = self._dataui_manager.get_table_column_width_map()
         all_cols = self._dataui_manager.get_table_columns()
-        dfs = dfs.reindex(columns=[c for c in all_cols if c in dfs.columns])
+        # Always reindex to all expected columns (fill missing ones with NaN).
+        # This guarantees that the Tabulator is created with correct column
+        # definitions even for an empty startup catalog — Tabulator.js column
+        # definitions are fixed at init time and are not updated when only
+        # .value changes later.
+        dfs = dfs.reindex(columns=all_cols)
         # GeoDataFrame column slices can still be GeoDataFrames; Tabulator
         # cannot JSON-serialize geometry objects, so force a plain DataFrame.
         try:
@@ -1080,6 +1086,18 @@ class DataUI(param.Parameterized):
                 dfs = pd.DataFrame(dfs)
         except ImportError:
             pass
+        # Normalize dtypes for Panel/Bokeh compatibility.
+        # An empty reindex produces all-NaN float64 columns; pandas 3.x with
+        # infer_string=True produces StringDtype columns for populated catalogs.
+        # Both must be converted to object so the Tabulator is initialised with
+        # text-column definitions and subsequent data-only updates send
+        # compatible numpy object arrays (not ExtensionArrays or float64).
+        _dtype_convert = {
+            c: object for c, dt in dfs.dtypes.items()
+            if not isinstance(dt, np.dtype) or (dt.kind == "f" and dfs[c].isna().all())
+        }
+        if _dtype_convert:
+            dfs = dfs.astype(_dtype_convert)
         # Determine which columns to hide initially.  ref_type is hidden when
         # all rows share the same type (homogeneous catalog).
         initial_hidden = []
@@ -1095,6 +1113,7 @@ class DataUI(param.Parameterized):
             show_index=False,
             sizing_mode="stretch_width",
             header_filters=self._dataui_manager.get_table_filters(),
+            pagination="local",
             page_size=200,
             configuration={
                 "headerFilterLiveFilterDelay": 600,

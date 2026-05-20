@@ -521,26 +521,44 @@ def serve_desktop_app(
         def _on_confirm(evt):  # noqa: ARG001
             add_btn.disabled = True
             cancel_btn.disabled = True
-            total_added: list = []
-            errors: list = []
-            for path in paths:
-                try:
-                    added = mgr.add_source_files(path)
-                    total_added.extend(added)
-                except Exception as exc:
-                    errors.append(f"`{os.path.basename(path)}`: {exc}")
-            if total_added:
-                try:
-                    from dvue.actions import TransformToCatalogAction
-                    TransformToCatalogAction._refresh_table(ui, mgr)
-                except Exception as exc:
-                    logger.warning("serve_desktop_app: table refresh failed: %s", exc)
-                msg = f"**Added {len(total_added)} reference(s)** from {', '.join(f'`{l}`' for l in labels)}."
-            else:
-                msg = "_No new references were added._"
-            if errors:
-                msg += "\n\n**Errors:**\n" + "\n".join(f"- {e}" for e in errors)
-            status.object = msg
+            status.object = "_Loading\u2026_"
+            curdoc = pn.state.curdoc
+
+            def _do_add():
+                total_added: list = []
+                errors: list = []
+                for path in paths:
+                    try:
+                        added = mgr.add_source_files(path)
+                        total_added.extend(added)
+                    except Exception as exc:
+                        errors.append(f"`{os.path.basename(path)}`: {exc}")
+
+                def _done():
+                    if total_added:
+                        try:
+                            from dvue.actions import TransformToCatalogAction
+                            TransformToCatalogAction._refresh_table(ui, mgr)
+                        except Exception as exc:
+                            logger.warning(
+                                "serve_desktop_app: table refresh failed: %s", exc
+                            )
+                        msg = (
+                            f"**Added {len(total_added)} reference(s)** from "
+                            f"{', '.join(f'`{l}`' for l in labels)}."
+                        )
+                    else:
+                        msg = "_No new references were added._"
+                    if errors:
+                        msg += "\n\n**Errors:**\n" + "\n".join(
+                            f"- {e}" for e in errors
+                        )
+                    status.object = msg
+
+                curdoc.add_next_tick_callback(_done)
+
+            import threading as _th
+            _th.Thread(target=_do_add, daemon=True).start()
 
         def _on_cancel(evt):  # noqa: ARG001
             ui.show_in_display_panel("Cancelled", pn.pane.Markdown("_Drop cancelled._"))

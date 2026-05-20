@@ -210,17 +210,17 @@ class TimeSeriesDataUIManager(DataUIManager):
     def _has_math_refs(self) -> bool:
         """Return True if the backing catalog contains at least one math reference.
 
-        Uses ``self.data_catalog`` when available (preferred — avoids rebuilding
-        the full display DataFrame).  Falls back to inspecting the ``ref_type``
-        column of the cached catalog DataFrame.
+        Uses ``self.data_catalog`` when available (O(1) via ``_math_ref_count``
+        maintained by :class:`DataCatalog`).  Falls back to inspecting the
+        ``ref_type`` column of the cached catalog DataFrame.
         """
         cat = getattr(self, "data_catalog", None)
         if cat is not None:
-            return any(getattr(r, "ref_type", "raw") != "raw" for r in cat.list())
+            return getattr(cat, "_math_ref_count", 0) > 0
         # Fallback: check cached DataFrame
         cached = getattr(self, "_cached_catalog", None)
         if cached is not None and "ref_type" in cached.columns:
-            return (cached["ref_type"] != "raw").any()
+            return (cached["ref_type"] == "math").any()
         return False
 
     def _enrich_catalog_with_math_ref_hints(self, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -278,6 +278,14 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="display",
                 callback=math_action.callback,
             ))
+        from .actions import AddSourceFilesAction
+        actions.append(dict(
+            name="Add Files",
+            button_type="light",
+            icon="folder-plus",
+            action_type="display",
+            callback=AddSourceFilesAction().callback,
+        ))
         if self.show_clear_cache:
             from .actions import ClearCacheAction
             actions.append(dict(
@@ -287,14 +295,6 @@ class TimeSeriesDataUIManager(DataUIManager):
                 action_type="inline",
                 callback=ClearCacheAction().callback,
             ))
-        from .actions import AddSourceFilesAction
-        actions.append(dict(
-            name="Add Files",
-            button_type="light",
-            icon="folder-plus",
-            action_type="display",
-            callback=AddSourceFilesAction().callback,
-        ))
         return actions
 
     def add_source_files(self, *paths: str) -> list:

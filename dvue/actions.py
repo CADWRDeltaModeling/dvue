@@ -2,6 +2,7 @@ import asyncio
 import os
 import threading
 
+import numpy as np
 import panel as pn
 
 pn.extension()
@@ -518,7 +519,16 @@ class TransformToCatalogAction:
             new_df = manager.get_data_catalog()
             dataui._dfcat = new_df
             new_cols = manager.get_table_columns()
-            dataui.display_table.value = dataui._dfcat[new_cols]
+            sliced = dataui._dfcat.reindex(columns=new_cols)
+            # Convert pandas ExtensionDtype columns (e.g. StringDtype from pandas 3.x)
+            # to plain object dtype.  Panel's Tabulator data-only update path does not
+            # handle non-numpy dtypes: the browser column definitions expect numpy-typed
+            # arrays, so StringDtype values display as NaN for all but numeric-looking
+            # columns (which get coerced to float).
+            _ext_cols = {c: object for c, dt in sliced.dtypes.items() if not isinstance(dt, np.dtype)}
+            if _ext_cols:
+                sliced = sliced.astype(_ext_cols)
+            dataui.display_table.value = sliced
             dataui.display_table.widths = manager.get_table_column_width_map()
             dataui.display_table.header_filters = manager.get_table_filters()
         except Exception as e:
@@ -1042,27 +1052,46 @@ class AddSourceFilesAction:
             if not path:
                 status_pane.object = "_Please enter a file path._"
                 return
-            try:
-                added = manager.add_source_files(path)
-                if added:
-                    TransformToCatalogAction._refresh_table(dataui, manager)
-                    status_pane.object = (
-                        f"**Added {len(added)} reference(s)** from `{path}`."
-                    )
-                    path_input.value = ""
-                    logger.info(
-                        "AddSourceFilesAction: added %d refs from %s", len(added), path
-                    )
-                else:
-                    status_pane.object = (
-                        f"_No references added from `{path}`.  "
-                        "Check that the file type is supported by this manager._"
-                    )
-            except Exception as e:
-                logger.error(
-                    "AddSourceFilesAction: error adding %s: %s", path, e
-                )
-                status_pane.object = f"**Error:** {e}"
+            add_btn.disabled = True
+            status_pane.object = "_Loading\u2026_"
+            curdoc = pn.state.curdoc
+
+            def _do_add():
+                try:
+                    added = manager.add_source_files(path)
+                    err = None
+                except Exception as e:
+                    added = []
+                    err = str(e)
+
+                def _done():
+                    add_btn.disabled = False
+                    if err:
+                        logger.error(
+                            "AddSourceFilesAction: error adding %s: %s", path, err
+                        )
+                        status_pane.object = f"**Error:** {err}"
+                        return
+                    if added:
+                        TransformToCatalogAction._refresh_table(dataui, manager)
+                        status_pane.object = (
+                            f"**Added {len(added)} reference(s)** from `{path}`."
+                        )
+                        path_input.value = ""
+                        logger.info(
+                            "AddSourceFilesAction: added %d refs from %s",
+                            len(added),
+                            path,
+                        )
+                    else:
+                        status_pane.object = (
+                            f"_No references added from `{path}`.  "
+                            "Check that the file type is supported by this manager._"
+                        )
+
+                curdoc.add_next_tick_callback(_done)
+
+            threading.Thread(target=_do_add, daemon=True).start()
 
         add_btn.on_click(_on_add)
 
