@@ -712,9 +712,12 @@ def serve_desktop_app(
 
     # Open the app in a native window, maximised to fill the screen.
     _win = webview.create_window(title, url, maximized=True)
+    # Resolve the bundled dvue icon (falls back gracefully if missing).
+    _icon_path = Path(__file__).parent / "assets" / "icon.ico"
+    _icon = str(_icon_path) if _icon_path.is_file() else None
     # Pass _bind_drop_events so pywebview calls it once the window is ready,
     # registering document-level drag-and-drop handlers.
-    webview.start(_bind_drop_events, _win)  # blocks until window is closed
+    webview.start(_bind_drop_events, _win, icon=_icon)  # blocks until window is closed
 
 
 def make_reset_session_button(
