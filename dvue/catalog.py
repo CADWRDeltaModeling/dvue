@@ -102,6 +102,23 @@ class DataReferenceReader(abc.ABC):
         ...
 
     @classmethod
+    def scan(cls, path: str) -> List["DataReference"]:
+        """Scan *path* and return the :class:`DataReference`\\s it contains.
+
+        The default implementation raises :exc:`NotImplementedError`.  Reader
+        subclasses that support file discovery must override this method.
+
+        Each returned reference must have ``source`` set to *path*.
+        Manager-level enrichment (geoid, geometry, station names from lookup
+        tables) is **not** performed here — that responsibility belongs in
+        ``add_source_files()`` via :meth:`~DataReference.set_attribute`.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__}.scan() is not implemented. "
+            "Override scan() in the reader subclass to support file discovery."
+        )
+
+    @classmethod
     def fqcn(cls) -> str:
         """Return the fully qualified class name (``\"module.ClassName\"")."""
         return f"{cls.__module__}.{cls.__qualname__}"
@@ -611,8 +628,24 @@ class DataReference:
 
         Subclasses (e.g. :class:`~dvue.math_reference.MathDataReference`) may
         override this method to compute data without a reader.
+
+        Registry fallback
+        -----------------
+        When no embedded reader is present (``reader=None`` was passed at
+        construction) and ``ref_type != "raw"``, the method falls back to
+        :class:`~dvue.registry.ReaderRegistry` using ``(ref_type, source)``
+        as the lookup key.  This allows DataReferences created by
+        ``scan()`` to load data without carrying a live reader instance.
         """
-        return self._get_reader().load(**{**self._attributes, "time_range": time_range})
+        try:
+            reader = self._get_reader()
+        except ValueError:
+            # No embedded reader — resolve via registry using ref_type + source.
+            if self.ref_type == "raw":
+                raise  # "raw" has no registry entry; re-raise the original error
+            from dvue.registry import ReaderRegistry  # lazy to avoid circular import
+            reader = ReaderRegistry.get_reader(self.ref_type, self.source)
+        return reader.load(**{**self._attributes, "time_range": time_range})
 
     # ------------------------------------------------------------------
     # Arithmetic operator overloading → auto-creates MathDataReference
@@ -1680,7 +1713,7 @@ from .math_reference import (  # noqa: E402, F401
 
 def build_catalog_from_dataframe(
     dfcat: "pd.DataFrame",
-    reader: DataReferenceReader,
+    reader: Optional[DataReferenceReader],
     ref_name_fn,
     primary_key: "Optional[List[str]]" = None,
     crs: "Optional[str]" = None,

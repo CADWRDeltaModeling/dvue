@@ -38,6 +38,7 @@ from .readers import (
     PatternCSVDirectoryReader,   # backward-compat alias
 )
 from .session_persistence import make_reset_session_button, SessionManager
+from .registry import ReaderRegistry
 
 __all__ = [
     # UI layer
@@ -74,4 +75,6 @@ __all__ = [
     # Session utilities
     "make_reset_session_button",
     "SessionManager",
+    # Reader registry
+    "ReaderRegistry",
 ]
