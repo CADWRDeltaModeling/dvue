@@ -69,6 +69,65 @@ See [`examples/ex_tsdataui.py`](examples/ex_tsdataui.py) for the complete implem
 - Advanced time series plotting with multiple variables
 - Bidirectional selection between map and table
 
+## Command-Line Interface
+
+After installing dvue, the `dvue` command is available on your PATH.
+
+### `dvue ui` — generic file viewer
+
+```
+dvue ui [--plugin MODULE]... [--port PORT] [--desktop] [FILES...]
+```
+
+Launches a `RegistryUIManager` window pre-loaded with FILES.  Omit FILES to
+start empty and add files via drag-and-drop.
+
+| Option | Description |
+|---|---|
+| `--plugin MODULE` | Import MODULE before launching (may be repeated). Modules that call `ReaderRegistry.register()` at import time register their file-type readers. |
+| `--port PORT` | TCP port for the Panel server. `0` (default) picks a free port automatically. |
+| `--desktop` | Open in a native OS window via pywebview instead of a browser tab. Requires `pip install pywebview`. |
+
+**Examples**
+
+```bash
+# Drag-and-drop DSM2 HDF5 tidefiles and DSS output files
+dvue ui --plugin dsm2ui.dsm2ui --desktop
+
+# Pre-load specific files; mix .h5 and .dss freely
+dvue ui --plugin dsm2ui.dsm2ui run.h5 hist_qual.dss hist_hydro.dss
+
+# Multiple plugin packages — each registers its own file extensions
+dvue ui --plugin dsm2ui.dsm2ui --plugin schismviz.readers output.staout run.h5
+
+# Browser mode on a fixed port
+dvue ui --plugin dsm2ui.dsm2ui --port 5007 run.h5
+```
+
+### How the plugin system works
+
+`ReaderRegistry` (in `dvue.registry`) is a class-level dict mapping a
+`ref_type` key and file extension list to a reader class.  Any installed
+package can register its readers at module-import time:
+
+```python
+# inside dsm2ui/dsm2ui.py (runs when --plugin dsm2ui.dsm2ui is passed)
+from dvue.registry import ReaderRegistry
+ReaderRegistry.register("dsm2_hdf5", TidefileReader, extensions=[".h5", ".hdf5"])
+ReaderRegistry.register("dsm2_dss",  DSM2DSSReader,  extensions=[".dss"])
+```
+
+The `dvue ui` command imports each `--plugin` module *before* constructing
+the manager, so all registered readers are available when the catalog is
+built.  Dropping additional files onto the running window after launch also
+works — the registry resolves the reader from the dropped file's extension.
+
+### `dvue show-version`
+
+```bash
+dvue show-version
+```
+
 ## Core Components
 
 ### DataUIManager
