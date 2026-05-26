@@ -1,6 +1,6 @@
 # Reader Registry — Architecture Overview
 
-## Status: Implementation Phase
+## Status: Implemented ✅
 
 ---
 
@@ -117,12 +117,15 @@ graph TD
         RR["ReaderRegistry\n_registry\n_extension_map\n_instances"]
         DRR["DataReferenceReader ABC\nscan classmethod\nload instance method"]
         DC["DataCatalog"]
+        RUI["RegistryUIManager\nadd_source_files()\nnormalize_ref() hook\non_file_added() hook"]
+        RPA["RegistryPlotAction\nformat_variable() hook"]
     end
 
     subgraph dsm2ui_app["dsm2ui (app)"]
         TR["TidefileReader\n__init__(source)\nscan classmethod\nload instance method"]
         DSSR["DSM2DSSReader\n__init__(source)\nscan classmethod\nload instance method"]
-        CUI["DSM2CombinedUIManager\nempty catalog\nDnD dispatch\nthin config only"]
+        CUI["DSM2CombinedUIManager\nsubclass of RegistryUIManager\nnormalize_ref() override\non_file_added() override"]
+        CPA["_CombinedPlotAction\nsubclass of RegistryPlotAction\nformat_variable() → _smart_title"]
     end
 
     DR -- "_load_data(): ref_type + source" --> RR
@@ -131,9 +134,13 @@ graph TD
     DRR -- "implemented by" --> DSSR
     TR -- "register() at module level" --> RR
     DSSR -- "register() at module level" --> RR
-    CUI -- "add_source_files()\nReaderRegistry.scan(path)" --> RR
+    RUI -- "add_source_files()\nReaderRegistry.scan(path)" --> RR
     RR -- "scan(path)\nlist[DataReference]" --> DC
     DC -- "contains" --> DR
+    CUI -- "subclasses" --> RUI
+    CPA -- "subclasses" --> RPA
+    RUI -- "_make_plot_action()" --> RPA
+    CUI -- "_make_plot_action()" --> CPA
 ```
 
 ---
@@ -197,11 +204,15 @@ DataFrame returned → plotted
 | `ReaderRegistry` class and caching logic | Framework | `dvue/registry.py` |
 | `DataReference._load_data()` fallback to registry | Framework | `dvue/catalog.py` |
 | `DataReferenceReader.scan()` abstract base | Framework | `dvue/catalog.py` |
+| `RegistryUIManager` + `RegistryPlotAction` base classes | Framework | `dvue/registry_ui.py` |
+| `add_source_files()` scan-normalise-add loop | Framework | `dvue/registry_ui.py` |
+| `normalize_ref()` / `on_file_added()` extension hooks | Framework | `dvue/registry_ui.py` |
+| `format_variable()` hook for curve label formatting | Framework | `dvue/registry_ui.py` |
 | Registration of `TidefileReader` and `DSM2DSSReader` | App | `dsm2ui/dsm2ui.py` module level |
 | Extension → reader class mapping | App | `dsm2ui/dsm2ui.py` module level |
-| Enrichment via `ref.set_attribute()` (geoid, geometry, station names) | App | `add_source_files()` — before `catalog.add()` |
-| `time_range` UI-state expansion | App | `add_source_files()` — separate from ref attributes |
-| Plot action dispatch by `ref_type` | App | `_CombinedPlotAction` in `dsm2ui/dsm2ui.py` |
+| Enrichment via `ref.set_attribute()` (geoid, geometry, station names) | App | `DSM2CombinedUIManager.normalize_ref()` — before `catalog.add()` |
+| `time_range` UI-state expansion | App | `DSM2CombinedUIManager.on_file_added()` — separate from ref attributes |
+| `_smart_title()` variable formatting | App | `_CombinedPlotAction.format_variable()` in `dsm2ui/dsm2ui.py` |
 
 dvue defines the *interfaces* and the *caching mechanics*; dsm2ui supplies all domain
 knowledge (what formats exist, how to open them, what metadata to extract).
@@ -224,17 +235,24 @@ new combined manager).  After migration:
 
 ## 8. The New Combined UI Manager
 
-`DSM2CombinedUIManager` is a thin manager that starts with an empty catalog and accepts
-any registered file type:
+`DSM2CombinedUIManager` is a thin subclass of `RegistryUIManager` (from `dvue/registry_ui.py`).
+The scan-normalise-add loop and all catalog wiring live in `RegistryUIManager`; the dsm2ui
+subclass provides only DSM2-specific behaviour:
 
-- Starts empty; no files required at construction.
-- `add_source_files(*paths)`: calls `ReaderRegistry.scan(path)` for each path, enriches
-  HDF5 refs with geoid/geometry, adds all refs to one `DataCatalog`.
-- `primary_key = ["source_num", "name"]` — works for both HDF5 and DSS entries.
-- Table columns: union of HDF5 and DSS relevant columns (NaN for irrelevant entries).
-- Plot action: `_CombinedPlotAction` dispatches to existing per-type plot actions based
-  on `ref.ref_type`.
+- **`RegistryUIManager` (dvue)**: starts empty, auto-detects file types via
+  `ReaderRegistry.can_handle()`, runs `scan()` → `normalize_ref()` → `catalog.add()` loop
+  in `add_source_files()`, exposes `on_file_added()` hook. Primary key:
+  `["source_num", "station", "variable"]`. Table columns: `station`, `variable`, `ref_type`.
+- **`DSM2CombinedUIManager` (dsm2ui)**: overrides three methods:
+  - `normalize_ref(ref)` — prefers `geoid` over `id` when mapping to `station`.
+  - `on_file_added(path, refs)` — expands `self.time_range` from HDF5
+    `get_start_end_dates()` when the added file is `.h5` / `.hdf5`.
+  - `_make_plot_action()` — returns `_CombinedPlotAction` (applies `_smart_title` to
+    variable labels).
 - CLI: `dsm2ui ui combined`.
+
+Any downstream app that registers its reader with `ReaderRegistry` can instantiate
+`RegistryUIManager` directly without subclassing if no domain-specific hooks are needed.
 
 ---
 

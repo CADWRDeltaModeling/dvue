@@ -1,6 +1,6 @@
 # Reader Registry — Detailed Design
 
-## Status: Implementation Phase
+## Status: Implemented ✅
 
 See [reader-registry-architecture.md](reader-registry-architecture.md) for the high-level overview.
 
@@ -445,95 +445,119 @@ is instantiated by the registry on first `getData()` call.
 
 ---
 
-## 6. `DSM2CombinedUIManager`
+## 5b. `dvue/registry_ui.py` — New File (Implemented)
 
-### 6.1 Class Skeleton
+`registry_ui.py` is the dvue-side generic base for registry-backed UI managers.
+It lives in the dvue framework so any downstream app can subclass it without
+re-implementing the scan-normalise-add loop.
+
+### Classes
+
+**`RegistryPlotAction(TimeSeriesPlotAction)`**
+
+Generic plot action for registry-backed catalogs.  Labels curves as
+`station/variable` (single variable: just `station`).  Extension hook:
 
 ```python
-class DSM2CombinedUIManager(TimeSeriesDataUIManager):
-    """Mixed-type manager accepting HDF5 tidefiles and DSS output files.
+def format_variable(self, variable: str) -> str:
+    """Override to apply domain-specific label formatting."""
+    return variable   # default: unchanged
+```
 
-    Starts with an empty catalog; files are added via DnD or add_source_files().
-    Dispatches to the appropriate reader via ReaderRegistry.
-    """
+**`RegistryUIManager(TimeSeriesDataUIManager)`**
 
-    def __init__(self, files=None, **kwargs):
-        self.channels = kwargs.pop("channels", None)
-        geo_crs = (
-            str(self.channels.crs)
-            if self.channels is not None and hasattr(self.channels, "crs")
-            else None
-        )
-        self._dvue_catalog = DataCatalog(primary_key=["source_num", "name"], crs=geo_crs)
-        self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
-        super().__init__(**kwargs)
-        if files:
-            self.add_source_files(*files)
+Starts with an empty catalog; auto-detects file types via `ReaderRegistry.can_handle()`.
 
-    def add_source_files(self, *paths: str) -> list:
-        added = []
-        for path in paths:
-            if not ReaderRegistry.can_handle(path):
-                logger.warning("add_source_files: no reader for %s, skipping", path)
-                continue
+```python
+class RegistryUIManager(TimeSeriesDataUIManager):
+    def __init__(self, files=(), **kwargs): ...
+
+    # Extension hooks (override in subclasses)
+    def normalize_ref(self, ref): ...      # map file attrs → station/variable schema
+    def on_file_added(self, path, refs): ... # expand time_range, load geometry, etc.
+
+    # Core loop (do not override)
+    def add_source_files(self, *paths): ...
+```
+
+`primary_key = ["source_num", "station", "variable"]`.  Table columns: `station`, `variable`, `ref_type`.
+
+### Extension pattern
+
+```python
+# Register your reader (typically at module import time)
+ReaderRegistry.register("myformat", MyReader, extensions=[".xyz"])
+
+# Use directly if default hooks are sufficient
+mgr = RegistryUIManager(files=["data/run.xyz"])
+
+# Or subclass for domain-specific behaviour
+class MyUIManager(RegistryUIManager):
+    def normalize_ref(self, ref):
+        # Map file-specific attr names to station/variable
+        if not ref._attributes.get("station"):
+            ref.set_attribute("station", ref._attributes.get("id", ""))
+
+    def on_file_added(self, path, refs):
+        # Expand time range from file metadata
+        ...
+
+    def _make_plot_action(self):
+        return MyPlotAction()  # subclass of RegistryPlotAction
+```
+
+---
+
+## 6. `DSM2CombinedUIManager` (Actual Implementation)
+
+`DSM2CombinedUIManager` is a **thin subclass of `RegistryUIManager`** (not
+`TimeSeriesDataUIManager` directly).  The scan-normalise-add loop is entirely in
+`RegistryUIManager.add_source_files()`; the dsm2ui subclass overrides only three
+methods:
+
+```python
+class _CombinedPlotAction(RegistryPlotAction):
+    def format_variable(self, variable: str) -> str:
+        return _smart_title(variable)   # FLOW → Flow; EC unchanged
+
+class DSM2CombinedUIManager(RegistryUIManager):
+    def normalize_ref(self, ref):
+        """Prefer geoid over id when mapping to station."""
+        if not ref._attributes.get("station"):
+            station = (
+                ref._attributes.get("geoid")
+                or ref._attributes.get("id")
+                or ref._attributes.get("NAME")
+                or ref._attributes.get("name", "")
+            )
+            ref.set_attribute("station", str(station))
+        if not ref._attributes.get("variable"):
+            var = ref._attributes.get("VARIABLE", "")
+            ref.set_attribute("variable", str(var).lower())
+
+    def on_file_added(self, path, refs):
+        """Expand time_range from HDF5 get_start_end_dates()."""
+        import os
+        if os.path.splitext(path)[1].lower() in (".h5", ".hdf5"):
             try:
-                refs = ReaderRegistry.scan(path)
-            except Exception as exc:
-                logger.error("add_source_files: scan failed for %s: %s", path, exc)
-                continue
-            refs = self._enrich_refs(path, refs)   # geoid, geometry, time_range for HDF5
-            n_before = len(self._dvue_catalog)
-            for ref in refs:
-                try:
-                    self._dvue_catalog.add(ref)
-                except ValueError:
-                    pass  # duplicate pk — already present
-            if len(self._dvue_catalog) > n_before:
-                self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
-                self._expand_time_range(path)
-                added.append(path)
-        return added
+                h5 = ReaderRegistry.get_reader("dsm2_hdf5", path)._h5
+                t0, t1 = h5.get_start_end_dates()
+                cur = self.time_range or (None, None)
+                new_start = min(pd.to_datetime(t0), cur[0]) if cur[0] else pd.to_datetime(t0)
+                new_end   = max(pd.to_datetime(t1), cur[1]) if cur[1] else pd.to_datetime(t1)
+                self.time_range = (new_start, new_end)
+            except Exception:
+                pass
+
+    def _make_plot_action(self):
+        return _CombinedPlotAction()
 ```
 
-### 6.2 Plot Action Dispatch
+### `primary_key` and table columns
 
-`_CombinedPlotAction` holds a dispatch dict and routes by `ref.ref_type`:
-
-```python
-_PLOT_ACTION_MAP = {
-    "dsm2_hdf5": _TidefilePlotAction,
-    "dsm2_dss":  _DSM2DSSPlotAction,
-}
-```
-
-When a selection arrives, the action groups selected rows by `ref_type` and calls the
-corresponding inner action for each group.
-
-### 6.3 `primary_key` Choice
-
-`["source_num", "name"]` is used because:
-
-- `source_num` is auto-injected by `DataCatalog` when more than one unique `source` is
-  present.  It distinguishes refs from different files that have the same station+variable.
-- `name` is auto-derived from PK values by `DataCatalog._derive_name()`.
-- For single-file sessions `source_num` is absent from the table (standard catalog behavior).
-
-### 6.4 Table Column Layout
-
-The combined manager's `_get_table_column_width_map()` covers the union of HDF5 and DSS
-columns.  Columns irrelevant to a given ref_type are `NaN` in that ref's row.
-
-| Column | Present for | Notes |
-|--------|------------|-------|
-| `source_num` | multi-source sessions | auto from catalog |
-| `name` | all | auto-derived PK |
-| `variable` | both | lowercase; HDF5 and DSS |
-| `id` | HDF5 only | e.g. `"CHAN_1_UP"` |
-| `station_name` | HDF5 only | geoid or id |
-| `NAME` | DSS only | B-part |
-| `FILE` | DSS only | DSS file path |
-| `INTERVAL` | DSS only | e.g. `"15MIN"` |
-| `source` | all | file path |
+`RegistryUIManager` uses `primary_key=["source_num", "station", "variable"]`, which
+`DSM2CombinedUIManager` inherits.  Table columns: `station`, `variable`, `ref_type`.
+For single-file sessions `source_num` is absent (standard catalog behaviour).
 
 ---
 

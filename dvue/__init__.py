@@ -39,6 +39,7 @@ from .readers import (
 )
 from .session_persistence import make_reset_session_button, SessionManager
 from .registry import ReaderRegistry
+from .registry_ui import RegistryUIManager, RegistryPlotAction
 
 __all__ = [
     # UI layer
@@ -77,4 +78,6 @@ __all__ = [
     "SessionManager",
     # Reader registry
     "ReaderRegistry",
+    "RegistryUIManager",
+    "RegistryPlotAction",
 ]

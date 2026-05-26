@@ -376,3 +376,86 @@ subsequent `template.open_modal()` calls open an empty dialog.
 
 See `session-management.md` for the complete `make_app()` reference implementation.
 
+---
+
+## 13. `RegistryUIManager` — Building a Registry-Backed Manager
+
+`RegistryUIManager` (in `dvue/registry_ui.py`) is the recommended base class whenever
+your manager should accept multiple file types via `ReaderRegistry`.  It handles the
+scan-normalise-add loop, catalog wiring, and `DataReference` lookup; you only provide
+domain-specific hooks.
+
+### Minimum implementation
+
+```python
+from dvue.registry import ReaderRegistry
+from dvue.registry_ui import RegistryUIManager, RegistryPlotAction
+
+# 1. Register your reader class at module level
+ReaderRegistry.register("myformat", MyReader, extensions=[".xyz"])
+
+# 2. Optionally subclass for domain-specific hooks
+class MyUIManager(RegistryUIManager):
+
+    def normalize_ref(self, ref):
+        """Map file-sourced attribute names to the station/variable schema.
+
+        Called once per ref returned by ReaderRegistry.scan(), before catalog.add().
+        All ref.set_attribute() calls here are safe — the ref is not yet in the catalog.
+        """
+        if not ref._attributes.get("station"):
+            ref.set_attribute("station", ref._attributes.get("id", ""))
+        if not ref._attributes.get("variable"):
+            ref.set_attribute("variable", ref._attributes.get("quantity", "").lower())
+
+    def on_file_added(self, path, refs):
+        """Post-add hook for file-level side effects.
+
+        Called once after all refs from *path* have been added to the catalog.
+        Use to expand time_range, load geometry from a companion file, etc.
+        """
+        pass  # default is a no-op; override only when needed
+
+    def _make_plot_action(self):
+        return MyPlotAction()  # subclass of RegistryPlotAction
+```
+
+### `RegistryPlotAction` — curve label customisation
+
+Override `format_variable()` to apply domain-specific formatting to the variable
+part of a curve label:
+
+```python
+class MyPlotAction(RegistryPlotAction):
+    def format_variable(self, variable: str) -> str:
+        # e.g. title-case long ALL-CAPS names, keep abbreviations unchanged
+        return variable.title() if len(variable) > 2 else variable
+```
+
+Curve labels are `station/variable` when multiple variables are selected, or just
+`station` when only one variable appears in the selection.  Math refs use their
+`name` attribute instead.
+
+### What `RegistryUIManager` provides (do not re-implement)
+
+| Provided by base | Notes |
+|------------------|-------|
+| `add_source_files(*paths)` | scan → normalize → add loop; logs and skips unregistered extensions |
+| `data_catalog` property | returns `self._dvue_catalog` |
+| `get_data_reference(row)` | catalog lookup by `row["name"]` |
+| `get_data_catalog()` | rebuilds `_display_dfcat` only when catalog length changes |
+| `primary_key=["source_num", "station", "variable"]` | set in `__init__` |
+| Table columns: `station`, `variable`, `ref_type` | from `_get_table_column_width_map()` |
+| `build_station_name(r)` | prefix with `source_num:` for multi-source catalogs |
+| `is_irregular()`, `get_tooltips()`, `get_map_*()` | sensible defaults; override if needed |
+
+### Invariants
+
+- `normalize_ref()` must finish all `ref.set_attribute()` calls **before** returning.
+  `add_source_files()` calls `catalog.add(ref)` immediately after `normalize_ref()`.
+- Do **not** call `catalog.add()` inside `normalize_ref()` — that is done by the base.
+- Do **not** store a reference to the scanned refs list after `on_file_added()` returns —
+  the base does not hold it, and the catalog is the canonical store.
+- When `normalize_ref()` cannot determine a `station` value, set it to a non-empty
+  fallback (e.g. the `source` basename) so the auto-derived catalog name is stable.
+

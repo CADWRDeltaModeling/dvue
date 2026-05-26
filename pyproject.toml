@@ -55,6 +55,9 @@ dev = [
     "sphinx-rtd-theme>=1.0.0",
 ]
 
+[project.scripts]
+dvue = "dvue.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/CADWRDeltaModeling/dvue"
 Documentation = "https://github.com/CADWRDeltaModeling/dvue#readme"

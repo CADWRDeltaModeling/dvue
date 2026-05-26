@@ -216,14 +216,15 @@ class TabulateAction(PlotAction):
         if float_cols:
             combined[float_cols] = combined[float_cols].round(4)
 
-        return pn.widgets.Tabulator(
+        tab = pn.widgets.Tabulator(
             combined,
             pagination="remote",
             page_size=50,
             show_index=False,
             sizing_mode="stretch_both",
-            editable=False,
         )
+        tab.editors = {col: None for col in combined.columns}  # make all columns read-only
+        return tab
 
 
 class DownloadDataAction:

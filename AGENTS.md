@@ -29,12 +29,18 @@ Use this file when working in the `dvue/` workspace root.
 - `dvue/dataui.py` (base manager/provider patterns)
 - `dvue/tsdataui.py` (time-series UI manager behavior)
 - `dvue/catalog.py` (`DataReference`, `DataCatalog`, builders, math references)
+- `dvue/registry.py` (`ReaderRegistry` — extension/ref_type dispatch and reader caching)
+- `dvue/registry_ui.py` (`RegistryUIManager`, `RegistryPlotAction` — generic registry-backed UI base)
 - `dvue/actions.py` (default actions + extension points)
 - `README.md` and `docs/Architecture.md` (usage and architecture)
+- `.github/implementors-guide.md` (design invariants, section 13 covers `RegistryUIManager` subclassing)
 
 ## Conventions And Pitfalls
 
 - Keep API surface backward-compatible where practical; downstream apps subclass these components.
+- For new managers that need to support multiple file types via `ReaderRegistry`, prefer
+  subclassing `RegistryUIManager` over `TimeSeriesDataUIManager` directly.  Override only
+  `normalize_ref()`, `on_file_added()`, and `_make_plot_action()` as needed.
 - Ensure Panel/HoloViews extensions are initialized consistently when changing startup behavior.
 - When adding catalog attributes used for filtering/grouping, document them and keep table/map selection flow intact.
 - If changing math-reference behavior, update examples and docs linked from `README-mathref.md`.
