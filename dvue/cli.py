@@ -54,8 +54,146 @@ def list_plugins():
         click.echo("No readers registered.")
 
 
+# ---------------------------------------------------------------------------
+# diagnose command — plugin and registry diagnostics
+# ---------------------------------------------------------------------------
+
+@main.command(name="diagnose")
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Show detailed error messages and tracebacks.",
+)
+def diagnose(verbose):
+    """Diagnose dvue plugin and registry status.
+
+    Checks:
+    1. Entry points discovery (``dvue.plugins`` group)
+    2. Plugin import and registration success/failure
+    3. Registered readers and file extension mappings
+    4. Version information
+
+    Useful for troubleshooting "no registered reader" errors when files won't load.
+    """
+    import sys
+    from dvue.registry import ReaderRegistry
+
+    click.echo("=" * 70)
+    click.echo("DVue Plugin & Registry Diagnostics")
+    click.echo("=" * 70)
+
+    # Step 1: Check entry points discovery
+    click.echo("\n[1] Entry Points Discovery")
+    click.echo("-" * 70)
+    try:
+        from importlib.metadata import entry_points
+
+        eps = entry_points()
+        group = (
+            eps.select(group="dvue.plugins")
+            if hasattr(eps, "select")
+            else eps.get("dvue.plugins", [])
+        )
+        ep_count = len(group)
+        click.echo(f"✓ Entry points API available")
+        click.echo(f"  Found {ep_count} plugin(s) in dvue.plugins group:")
+
+        if ep_count > 0:
+            for ep in group:
+                click.echo(f"    • {ep.name:25} = {ep.value}")
+        else:
+            click.echo("    (none)")
+
+    except Exception as e:
+        click.echo(f"✗ Failed to query entry points: {e}")
+        if verbose:
+            import traceback
+
+            traceback.print_exc()
+
+    # Step 2: Load plugins via registry
+    click.echo("\n[2] Plugin Loading")
+    click.echo("-" * 70)
+    try:
+        loaded = ReaderRegistry.load_plugins_from_entry_points()
+        if loaded:
+            click.echo(f"✓ Loaded {len(loaded)} plugin(s):")
+            for name in loaded:
+                click.echo(f"    • {name}")
+        else:
+            click.echo("✓ No plugins to load (dvue.plugins group is empty)")
+
+    except Exception as e:
+        click.echo(f"✗ Failed to load plugins: {e}")
+        if verbose:
+            import traceback
+
+            traceback.print_exc()
+
+    # Step 3: Check registered readers
+    click.echo("\n[3] Registered Readers & Extensions")
+    click.echo("-" * 70)
+    try:
+        readers = ReaderRegistry.get_registered_readers()
+        extensions = ReaderRegistry.get_registered_extensions()
+
+        click.echo(f"✓ {len(readers)} reader(s) registered, {len(extensions)} extension(s) mapped:")
+
+        if readers:
+            for ref_type in sorted(readers.keys()):
+                reader_cls = readers[ref_type]
+                exts_for_type = [e for e, c in extensions.items() if c is reader_cls]
+                if exts_for_type:
+                    ext_str = ", ".join(sorted(exts_for_type))
+                    click.echo(
+                        f"    • {ref_type:25} → {reader_cls.__name__:30} ({ext_str})"
+                    )
+                else:
+                    click.echo(
+                        f"    • {ref_type:25} → {reader_cls.__name__:30} (no file ext)"
+                    )
+        else:
+            click.echo("    (none)")
+
+    except Exception as e:
+        click.echo(f"✗ Failed to query registered readers: {e}")
+        if verbose:
+            import traceback
+
+            traceback.print_exc()
+
+    # Step 4: Environment info
+    click.echo("\n[4] Environment Info")
+    click.echo("-" * 70)
+    try:
+        import dvue
+
+        click.echo(f"✓ dvue version:  {dvue.__version__}")
+        click.echo(f"  Python:        {sys.version.split()[0]}")
+        click.echo(f"  Executable:    {sys.executable}")
+
+    except Exception as e:
+        click.echo(f"✗ Failed to get version info: {e}")
+
+    # Summary
+    click.echo("\n" + "=" * 70)
+    if extensions:
+        click.echo(
+            "✓ dvue is ready! Extensions are mapped. Files should load correctly."
+        )
+    else:
+        click.echo(
+            "⚠ WARNING: No file extensions are registered. "
+            "Files may not load. Run with -v for details."
+        )
+    click.echo("=" * 70)
+
+
 main.add_command(show_version)
 main.add_command(list_plugins)
+main.add_command(diagnose)
 
 
 # ---------------------------------------------------------------------------
