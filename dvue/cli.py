@@ -253,6 +253,14 @@ def ui_command(files, plugins, port, desktop):
         dvue ui file.h5 file.dss                     # pre-load files
         dvue ui --plugin my_custom.readers file.xyz # load custom module
 
+    Optional per-file reader override syntax::
+
+        dvue ui dsm2_dss:my_dsm2.dss dss:not_dsm2.dss
+
+    In ``ref_type:path``, the ``ref_type`` value is a reader key registered in
+    ``ReaderRegistry`` (shown by ``dvue list-plugins`` or ``dvue diagnose``).
+    This bypasses extension-based dispatch for that specific file only.
+
     With entry points configured, extensions are available immediately without
     needing ``--plugin`` flags::
 

@@ -367,26 +367,56 @@ class RegistryUIManager(TimeSeriesDataUIManager):
     def add_source_files(self, *paths: str) -> List[str]:
         """Scan *paths* via the registry and add all resulting refs to the catalog.
 
-        Only paths whose extension is registered with
-        :class:`~dvue.registry.ReaderRegistry` are accepted; others are logged
-        and skipped.  Duplicate refs (same pk) are silently dropped.
+        Supports optional per-file reader override using ``ref_type:path``.
+        Example: ``dsm2_dss:my_file.dss`` forces the ``dsm2_dss`` reader for
+        that file, bypassing extension dispatch. Without this prefix,
+        extension-based dispatch is used.
+
+        Paths whose extension (or forced ``ref_type``) is not registered are
+        logged and skipped. Duplicate refs (same pk) are silently dropped.
 
         Returns a list of paths from which at least one new ref was added.
         """
         added_paths = []
-        for path in paths:
-            if not ReaderRegistry.can_handle(path):
+        for source_spec in paths:
+            forced_ref_type, path = ReaderRegistry.parse_source_spec(source_spec)
+
+            # Helpful typo warning for explicit override syntax. We only warn
+            # when the left token looks like a ref_type (identifier-like), and
+            # avoid false positives for Windows drive paths (e.g., C:\...).
+            if forced_ref_type is None and ":" in source_spec and "://" not in source_spec:
+                maybe_ref_type, rest = source_spec.split(":", 1)
+                looks_like_drive_path = (
+                    len(maybe_ref_type) == 1
+                    and maybe_ref_type.isalpha()
+                    and rest.startswith(("\\", "/"))
+                )
+                if maybe_ref_type.isidentifier() and not looks_like_drive_path:
+                    known = ", ".join(sorted(ReaderRegistry.get_registered_readers().keys()))
+                    logger.warning(
+                        "%s: unknown reader override prefix %r in %r; "
+                        "treating as plain path. Known ref_type values: %s",
+                        type(self).__name__,
+                        maybe_ref_type,
+                        source_spec,
+                        known or "(none)",
+                    )
+
+            if not ReaderRegistry.can_handle(path, ref_type=forced_ref_type):
                 logger.warning(
                     "%s: no registered reader for %s, skipping",
                     type(self).__name__,
-                    path,
+                    source_spec,
                 )
                 continue
             try:
-                refs = ReaderRegistry.scan(path)
+                refs = ReaderRegistry.scan(path, ref_type=forced_ref_type)
             except Exception as exc:
                 logger.error(
-                    "%s: cannot scan %s: %s", type(self).__name__, path, exc
+                    "%s: cannot scan %s: %s",
+                    type(self).__name__,
+                    source_spec,
+                    exc,
                 )
                 continue
 
@@ -406,9 +436,12 @@ class RegistryUIManager(TimeSeriesDataUIManager):
             if n_added > 0:
                 self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
                 self.on_file_added(path, refs)
-                added_paths.append(path)
+                added_paths.append(source_spec)
                 logger.info(
-                    "%s: added %d refs from %s", type(self).__name__, n_added, path
+                    "%s: added %d refs from %s",
+                    type(self).__name__,
+                    n_added,
+                    source_spec,
                 )
 
         return added_paths

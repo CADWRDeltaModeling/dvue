@@ -136,16 +136,41 @@ class ReaderRegistry:
     # ---------------------------------------------------------------------------
 
     @classmethod
-    def scan(cls, path: str) -> List["DataReference"]:
+    def has_ref_type(cls, ref_type: str) -> bool:
+        """Return ``True`` if *ref_type* has a registered reader class."""
+        return ref_type in cls._registry
+
+    @classmethod
+    def parse_source_spec(cls, source_spec: str) -> Tuple[Optional[str], str]:
+        """Parse optional ``ref_type:path`` source specs.
+
+        If *source_spec* starts with a registered ref_type followed by ``:``,
+        returns ``(ref_type, path)``. Otherwise returns ``(None, source_spec)``.
+
+        This allows explicit per-file reader selection when multiple readers
+        support the same file extension.
+        """
+        if ":" not in source_spec:
+            return None, source_spec
+        maybe_ref_type, path = source_spec.split(":", 1)
+        if maybe_ref_type in cls._registry and path:
+            return maybe_ref_type, path
+        return None, source_spec
+
+    @classmethod
+    def scan(cls, path: str, ref_type: Optional[str] = None) -> List["DataReference"]:
         """Scan *path* by extension and return the :class:`~dvue.catalog.DataReference`\\ s it contains.
 
-        Looks up the reader class via ``_extension_map``, then calls
-        ``reader_class.scan(path)`` (a classmethod on the reader).
+        When *ref_type* is provided, the reader class is looked up directly
+        from that key and extension dispatch is bypassed. Otherwise, the
+        reader class is selected via ``_extension_map``.
 
         Parameters
         ----------
         path:
             Absolute path to the file to scan.
+        ref_type:
+            Optional explicit reader key to force for this file.
 
         Raises
         ------
@@ -154,18 +179,32 @@ class ReaderRegistry:
         NotImplementedError
             If the matched reader class has not implemented ``scan()``.
         """
-        ext = os.path.splitext(path)[1].lower()
-        if ext not in cls._extension_map:
-            raise KeyError(
-                f"No reader registered for extension {ext!r}. "
-                "Call ReaderRegistry.register(..., extensions=[...]) to add support."
-            )
-        reader_class = cls._extension_map[ext]
+        if ref_type is not None:
+            if ref_type not in cls._registry:
+                raise KeyError(
+                    f"No reader registered for ref_type={ref_type!r}. "
+                    "Call ReaderRegistry.register() before using this type."
+                )
+            reader_class = cls._registry[ref_type]
+        else:
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in cls._extension_map:
+                raise KeyError(
+                    f"No reader registered for extension {ext!r}. "
+                    "Call ReaderRegistry.register(..., extensions=[...]) to add support."
+                )
+            reader_class = cls._extension_map[ext]
         return reader_class.scan(path)
 
     @classmethod
-    def can_handle(cls, path: str) -> bool:
-        """Return ``True`` if a reader is registered for this file's extension."""
+    def can_handle(cls, path: str, ref_type: Optional[str] = None) -> bool:
+        """Return ``True`` if a reader can handle this file.
+
+        With *ref_type* provided, checks whether that reader key is registered.
+        Otherwise checks extension-based dispatch.
+        """
+        if ref_type is not None:
+            return ref_type in cls._registry
         ext = os.path.splitext(path)[1].lower()
         return ext in cls._extension_map
 
