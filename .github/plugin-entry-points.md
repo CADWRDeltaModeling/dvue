@@ -136,6 +136,27 @@ Registered readers (3):
   • schism_staout          → SchismReader           (.staout)
 ```
 
+### Per-file reader override
+
+When multiple readers support the same extension, force a reader per file
+using `ref_type:path`:
+
+```bash
+dvue ui dsm2_dss:my_dsm2_output.dss dss:not_dsm2.dss
+```
+
+This bypasses extension dispatch for that file only.
+
+### Diagnose plugin issues
+
+```bash
+dvue diagnose
+dvue diagnose -v
+```
+
+This command reports entry-point discovery, plugin load failures, registered
+reader keys, extension mappings, and environment details.
+
 ### Override or add plugins manually
 
 The `--plugin` flag still works for:
@@ -183,8 +204,8 @@ dvue ui 2>&1 | grep -i plugin
 
 Or run the new diagnostics command:
 ```bash
-dvue list-plugins
-# Shows which plugins loaded and which failed
+dvue diagnose
+# Use -v for detailed tracebacks
 ```
 
 ### Disable a plugin temporarily

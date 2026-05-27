@@ -39,16 +39,24 @@ pip install -e .
 # Launch an empty window — drag-and-drop files onto it
 dvue ui --desktop
 
-# Pre-load files (reader plugins must be imported first via --plugin)
-dvue ui --plugin dsm2ui.dsm2ui run.h5 hist_qual.dss
+# Pre-load files (installed plugins auto-load via entry points)
+dvue ui run.h5 hist_qual.dss
 
-# Multiple reader packages in one session
-dvue ui --plugin dsm2ui.dsm2ui --plugin schismviz.readers output.staout run.h5
+# Multiple reader packages in one session (optional explicit module)
+dvue ui --plugin schismviz.readers output.staout run.h5
+
+# Per-file reader override when multiple readers support same extension
+dvue ui dsm2_dss:my_dsm2.dss dss:not_dsm2.dss
 ```
 
-The `--plugin` flag imports the named module before the UI starts.  Any
-module that calls `ReaderRegistry.register()` at import time registers its
-file readers, making those extensions available in the UI.
+Installed plugins are discovered automatically from the `dvue.plugins`
+entry-point group at startup. The `--plugin` flag is still useful for local
+development modules that are not installed as entry points.
+
+The optional `ref_type:path` syntax lets you force a specific reader for a
+single file when extensions overlap. For example,
+`dsm2_dss:my_dsm2.dss` uses the `dsm2_dss` reader key even if `.dss`
+would otherwise map to another reader.
 
 The `--desktop` flag opens the app in a native OS window (requires
 `pip install pywebview`) instead of a browser tab.
@@ -79,8 +87,17 @@ class MyFormatReader:
 ReaderRegistry.register("my_format", MyFormatReader, extensions=[".myext"])
 ```
 
-Then launch the UI with `--plugin my_package.readers` and any `.myext` file
-you drag onto the window will be opened by `MyFormatReader`.
+Then expose that registration function through a package entry point:
+
+```toml
+[project.entry-points."dvue.plugins"]
+my_package = "my_package.readers:register_readers"
+```
+
+After installation, `.myext` files are available in `dvue ui` automatically
+without requiring `--plugin`.
+
+Use `dvue diagnose` to verify plugin discovery and extension mappings.
 
 ---
 

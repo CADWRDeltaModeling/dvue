@@ -84,7 +84,7 @@ start empty and add files via drag-and-drop.
 
 | Option | Description |
 |---|---|
-| `--plugin MODULE` | Import MODULE before launching (may be repeated). Modules that call `ReaderRegistry.register()` at import time register their file-type readers. |
+| `--plugin MODULE` | Optional explicit module import before launch (may be repeated). Useful for local/dev plugins. Installed entry-point plugins are auto-loaded. |
 | `--port PORT` | TCP port for the Panel server. `0` (default) picks a free port automatically. |
 | `--desktop` | Open in a native OS window via pywebview instead of a browser tab. Requires `pip install pywebview`. |
 
@@ -92,59 +92,68 @@ start empty and add files via drag-and-drop.
 
 ```bash
 # Drag-and-drop DSM2 HDF5 tidefiles and DSS output files
-dvue ui --plugin dsm2ui.dsm2ui --desktop
+dvue ui --desktop
 
 # Pre-load specific files; mix .h5 and .dss freely
-dvue ui --plugin dsm2ui.dsm2ui run.h5 hist_qual.dss hist_hydro.dss
+dvue ui run.h5 hist_qual.dss hist_hydro.dss
 
 # Combined DSM2 input + output viewer from an echo .inp file
-dvue ui --plugin dsm2ui.echo_plugin output/run_hydro_echo.inp --desktop
+dvue ui output/run_hydro_echo.inp --desktop
 
-# Generic DSS file browser (all C-parts, no DSM2 filter)
-dvue ui --plugin dsm2ui.dssui.dss_registry output.dss
+# Per-file reader override when multiple readers support the same extension
+dvue ui dsm2_dss:my_dsm2_output.dss dss:not_dsm2.dss
 
-# DSS browser with station geometry for map display
-dvue ui --plugin dsm2ui.dssui.dss_registry output.dss \
-    --geo-file stations.geojson --geo-id-column STATION_ID
-
-# Multiple plugin packages — each registers its own file extensions
-dvue ui --plugin dsm2ui.dsm2ui --plugin schismviz.readers output.staout run.h5
+# Multiple plugin packages (entry points + optional explicit module)
+dvue ui --plugin schismviz.readers output.staout run.h5
 
 # Browser mode on a fixed port
-dvue ui --plugin dsm2ui.dsm2ui --port 5007 run.h5
+dvue ui --port 5007 run.h5
 ```
 
 ### How the plugin system works
 
 `ReaderRegistry` (in `dvue.registry`) is a class-level dict mapping a
 `ref_type` key and file extension list to a reader class.  Any installed
-package can register its readers at module-import time:
+package can register its readers via setuptools entry points:
 
 ```python
-# inside dsm2ui/dsm2ui.py (runs when --plugin dsm2ui.dsm2ui is passed)
-from dvue.registry import ReaderRegistry
-ReaderRegistry.register("dsm2_hdf5", TidefileReader, extensions=[".h5", ".hdf5"])
-ReaderRegistry.register("dsm2_dss",  DSM2DSSReader,  extensions=[".dss"])
+# pyproject.toml
+[project.entry-points."dvue.plugins"]
+dsm2ui = "dsm2ui.readers:register_readers"
 ```
 
-The `dvue ui` command imports each `--plugin` module *before* constructing
-the manager, so all registered readers are available when the catalog is
-built.  Dropping additional files onto the running window after launch also
-works — the registry resolves the reader from the dropped file's extension.
+At launch, `dvue ui` auto-loads all `dvue.plugins` entry points and calls
+their registration functions. `--plugin MODULE` is still supported for
+development/local modules that are not installed as entry points.
+
+When multiple readers match the same extension, use per-file override syntax:
+
+```bash
+dvue ui dsm2_dss:my_dsm2.dss dss:not_dsm2.dss
+```
+
+`ref_type:path` forces that file to use the specified reader key.
 
 ### Known plugins (dsm2ui)
 
-| `--plugin` module | File types handled | Equivalent CLI shortcut |
+| Entry-point plugin | File types handled | Equivalent CLI shortcut |
 |---|---|---|
-| `dsm2ui.dsm2ui` | `.h5` / `.hdf5` (tidefiles), `.dss` (DSM2 output channels) | `dsm2ui ui output` / `dsm2ui ui tide` |
-| `dsm2ui.echo_plugin` | `.inp` (DSM2 echo files — input BC + output channels) | `dsm2ui ui echo` |
-| `dsm2ui.dssui.dss_registry` | `.dss` (all C-parts, generic browser) | `dsm2ui ui dss` |
+| `dsm2ui` | `.h5` / `.hdf5` (tidefiles), `.dss` (DSM2 output channels), `.inp` (echo files), plus `dss` generic reader key | `dsm2ui ui output` / `dsm2ui ui tide` / `dsm2ui ui echo` / `dsm2ui ui dss` |
 
 > **Extension conflict note:** `dsm2ui.dsm2ui` registers `.dss` for *DSM2 output channels only*
 > (filters to `FLOW`, `STAGE`, `EC`, etc.).  `dsm2ui.dssui.dss_registry` reads *all* C-parts.
-> If both are loaded, the last `register()` call wins and a warning is logged.  Load only the
-> plugin that matches your use-case, or use the dedicated `dsm2ui ui` sub-commands which each
-> load the correct reader automatically.
+> Use explicit per-file override (`dsm2_dss:path.dss` or `dss:path.dss`) when you need both in one session.
+
+### `dvue diagnose`
+
+```bash
+dvue diagnose
+dvue diagnose -v
+```
+
+Shows entry-point discovery, plugin loading results, registered readers,
+extension mappings, and environment details. Use it to troubleshoot
+"no registered reader" and plugin import problems.
 
 ### `dvue show-version`
 
