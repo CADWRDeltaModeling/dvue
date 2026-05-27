@@ -291,6 +291,32 @@ def ui_command(files, plugins, port, desktop):
 
     manager_cls = RegistryUIManager
     effective_crs = None
+
+    # Check auto-loaded entry-point plugin modules for manager/CRS hints.
+    # Explicit --plugin args (checked below) take precedence over these.
+    try:
+        try:
+            from importlib.metadata import entry_points as _ep_fn
+        except ImportError:
+            import importlib_metadata as _im  # type: ignore[import]
+            _ep_fn = _im.entry_points
+        try:
+            _ep_group = _ep_fn(group="dvue.plugins")
+        except TypeError:
+            _ep_group = _ep_fn().get("dvue.plugins", [])
+        for _ep in _ep_group:
+            try:
+                _mod_name = _ep.value.split(":")[0]
+                _mod = importlib.import_module(_mod_name)
+                if hasattr(_mod, "DVueUIManager"):
+                    manager_cls = getattr(_mod, "DVueUIManager")
+                if hasattr(_mod, "DVueUI_CRS"):
+                    effective_crs = getattr(_mod, "DVueUI_CRS")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     for mod in plugin_modules:
         # Optional plugin hook: module-level manager override.
         # Last plugin wins when multiple plugins provide this symbol.
