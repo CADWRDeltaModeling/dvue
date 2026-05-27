@@ -2,9 +2,12 @@ from .utils import get_unique_short_names
 from .dataui import DataUIManager, full_stack
 from .actions import PlotAction
 from datetime import datetime, timedelta
+import logging
 import warnings
 from functools import lru_cache
 import os
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore")
 
@@ -865,9 +868,11 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Coerce time_range bounds to Timestamp so that comparison with a
         # datetime64 index works regardless of whether the values arrived as
         # datetime, date, or string (e.g. after URL query-param deserialization).
-        t0 = pd.Timestamp(time_range[0])
-        t1 = pd.Timestamp(time_range[1])
-        data = data[(data.index >= t0) & (data.index <= t1)]
+        # When time_range is None (no filter set), return all data unchanged.
+        if time_range is not None:
+            t0 = pd.Timestamp(time_range[0])
+            t1 = pd.Timestamp(time_range[1])
+            data = data[(data.index >= t0) & (data.index <= t1)]
 
         # Apply optional data transformations
         if self.fill_gap > 0:
@@ -1361,6 +1366,24 @@ class TimeSeriesPlotAction(PlotAction):
                 )
                 for curve, row in curves_data
             ]
+
+            # With shared_axes=True, HoloViews links axes by dimension name.
+            # Keep x shared, but avoid unintended y-linking across groups
+            # (e.g. different units/ranges) by making each group's value
+            # dimension name unique.
+            if manager.shared_axes:
+                group_vdim = f"value__{str(group_key).replace(' ', '_')}"
+                _renamed = []
+                for curve in styled_curves:
+                    try:
+                        if curve.vdims:
+                            old_vdim = curve.vdims[0].name
+                            curve = curve.redim(**{old_vdim: group_vdim})
+                    except Exception:
+                        pass
+                    _renamed.append(curve)
+                styled_curves = _renamed
+
             overlays.append(
                 hv.Overlay(styled_curves).opts(
                     show_legend=manager.show_legend,
