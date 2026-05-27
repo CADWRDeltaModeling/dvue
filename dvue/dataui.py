@@ -717,6 +717,14 @@ class DataUI(param.Parameterized):
         # check if the dfmap is a geodataframe
         try:
             if isinstance(dfmap, gpd.GeoDataFrame):
+                if dfmap.empty:
+                    # Keep an empty but valid Points element so map widgets still render.
+                    self._map_features = gv.Points(
+                        pd.DataFrame(columns=["__x__", "__y__"]),
+                        kdims=["__x__", "__y__"],
+                        crs=crs,
+                    )
+                    return self._map_features
                 geom_type = str.lower(str(dfmap.geometry.iloc[0].geom_type))
                 if "point" in geom_type:
                     # Passing a GeoDataFrame directly to gv.Points fails in newer
@@ -743,7 +751,11 @@ class DataUI(param.Parameterized):
                     raise ValueError("Unknown geometry type " + geom_type)
         except Exception as e:
             logger.error(f"Error building map of features: {e}")
-            self._map_features = gv.Points(dfmap, crs=crs)
+            self._map_features = gv.Points(
+                pd.DataFrame(columns=["__x__", "__y__"]),
+                kdims=["__x__", "__y__"],
+                crs=crs,
+            )
         if show_color_by:
             if color_dict is not None:
                 # Use pre-computed color column — Bokeh 3.9+ accepts a plain field
