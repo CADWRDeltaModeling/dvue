@@ -364,6 +364,12 @@ class DataUIManager(DataProvider):
         ),
     )
 
+    # View-layer hint: cartopy CRS for the map panel.  Set as an instance
+    # attribute in subclass ``__init__`` (e.g. ``self.crs = ccrs.UTM(10)``).
+    # When ``None`` (default), ``serve_session_app`` / ``serve_desktop_app``
+    # will try to read it from the manager before falling back to no map.
+    crs = None
+
     @classmethod
     def help(cls):
         """

@@ -459,3 +459,191 @@ Curve labels are `station/variable` when multiple variables are selected, or jus
 - When `normalize_ref()` cannot determine a `station` value, set it to a non-empty
   fallback (e.g. the `source` basename) so the auto-derived catalog name is stable.
 
+---
+
+## 14. CLI Launch Pattern — Manager CRS and the `dvue ui --plugin` Command
+
+### Manager-declared CRS
+
+Every `DataUIManager` subclass has a `crs = None` class attribute.  Override it as
+an **instance attribute** in `__init__` to declare the map projection:
+
+```python
+import cartopy.crs as ccrs
+
+class MyUIManager(RegistryUIManager):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.crs = ccrs.epsg("26910")   # NAD83 UTM 10N — California Delta
+```
+
+`serve_session_app` and `serve_desktop_app` probe the manager's `crs` and
+`station_id_column` automatically when the **caller** does not supply them, so
+the serve calls in CLI commands can be written without those arguments:
+
+```python
+def build_manager():
+    return MyUIManager()
+
+# ✅ CRS is probed automatically from MyUIManager().crs
+_serve(build_manager, title="My App", port=port)
+
+# ❌ Repeating the same information — fragile if CRS ever changes
+_serve(build_manager, title="My App", port=port, crs=ccrs.epsg("26910"))
+```
+
+Caller-provided values always win — the probe only fills in `None` gaps.  This lets
+integration tests override CRS without modifying the manager class.
+
+### Thin CLI wrapper recipe
+
+```python
+import click
+from dvue.session_persistence import serve_desktop_app, serve_session_app
+
+@click.command("mytool")
+@click.argument("files", nargs=-1, required=False)
+@click.option("--port", default=5006)
+@click.option("--desktop", is_flag=True, default=False)
+def show_my_ui(files, port, desktop):
+    import panel as pn; pn.extension()
+
+    def build_manager():
+        mgr = MyUIManager()
+        if files:
+            mgr.add_source_files(list(files))
+        return mgr
+
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(build_manager, title="My Tool", port=port)
+```
+
+Register it in `dvue.cli` via `dvue ui --plugin mypackage.mymodule`:
+
+```bash
+dvue ui --plugin mypackage.mymodule path/to/data.ext --desktop
+```
+
+The `dvue ui` command imports the plugin module (which calls `ReaderRegistry.register()`
+at module level) then runs `serve_session_app` / `serve_desktop_app` with drag-and-drop
+support.
+
+---
+
+## 15. Geo Loading — `load_geo_dataframe` and `add_geo_source`
+
+### `dvue.utils.load_geo_dataframe`
+
+```python
+from dvue.utils import load_geo_dataframe
+
+gdf = load_geo_dataframe(
+    path,           # .geojson / .json / .shp / .gpkg / .csv
+    lat_col="lat",  # CSV only: latitude column (WGS84)
+    lon_col="lon",  # CSV only: longitude column (WGS84)
+    id_col=None,    # informational; used by callers for join key tracking
+    crs=None,       # override auto-detected CRS
+)
+```
+
+Auto-detection for CSV files (in priority order):
+
+| Columns present | Auto-detected CRS |
+|-----------------|-------------------|
+| `lat` / `lon` (or user-specified) | EPSG:4326 (WGS84) |
+| `utm_easting` / `utm_northing` | EPSG:26910 (NAD83 UTM 10N) |
+| `easting` / `northing` | EPSG:26910 |
+
+GeoJSON/shapefile/GeoPackage formats are passed directly to `geopandas.read_file`.
+
+### `RegistryUIManager.add_geo_source`
+
+```python
+class MyUIManager(RegistryUIManager):
+    def on_file_added(self, path, refs):
+        # Auto-load geometry when the first data file is added
+        if not getattr(self, "_geo_loaded", False):
+            self.add_geo_source(
+                "/path/to/stations.geojson",
+                id_column="STATION_ID",  # column in geo file
+                station_column="station",  # column in catalog to join on
+            )
+            self._geo_loaded = True
+```
+
+After `add_geo_source`:
+
+- `get_data_catalog()` returns a `GeoDataFrame` with a `geometry` column.
+- Map display in `DataUI` automatically picks up geometry when `station_id_column`
+  matches the join column.
+- If `self.crs` is `None` and the loaded geo file has a CRS, `self.crs` is set
+  automatically from the file's EPSG code via `cartopy.crs.epsg()`.
+- The geo merge is re-applied automatically whenever the catalog grows (e.g. when
+  additional files are dropped after the initial load).
+
+### Geo merge rules
+
+- The merge is a **left join** from catalog to geo data on `station_column`.
+  Catalog rows without a matching geo entry retain `NaN` geometry.
+- Duplicate `id_column` values in the geo file are deduplicated before the merge
+  (first occurrence wins).
+- If `geometry` already exists in the catalog DataFrame (from a previous `add_geo_source`
+  call), it is stripped before re-merging to avoid pandas column conflicts.
+
+---
+
+## 16. Multi-`ref_type` Scanning — One Scanner, Several Loaders
+
+A single scanner class (registered for an extension) can return refs of **mixed
+`ref_type` values** — each `ref_type` can resolve to a different loader.
+
+### Pattern
+
+```python
+class _BCRef(DataReference):
+    ref_type = "bc_flow"      # → BCFlowLoader
+
+class _OutputRef(DataReference):
+    ref_type = "dss_output"   # → DSM2DSSReader (already registered)
+
+class EchoScanner:
+    def __init__(self, source): self._source = source
+
+    @classmethod
+    def scan(cls, path):
+        refs = []
+        ...
+        # Input boundary ref — uses BCFlowLoader
+        refs.append(_BCRef(source=path, FILE=dss_file, PATH=dss_path, SIGN=sign, ...))
+        # Output channel ref — reuses DSM2DSSReader (source = DSS file)
+        refs.append(_OutputRef(source=dss_file, NAME=name, VARIABLE=var, ...))
+        return refs
+
+# Scanner registered for .inp — loaders registered for each ref_type
+ReaderRegistry.register(EchoScanner, ref_type="echo_inp", extensions=[".inp"])
+ReaderRegistry.register(BCFlowLoader, ref_type="bc_flow")
+# DSM2DSSReader is already registered for ref_type="dsm2_dss" elsewhere
+```
+
+### Key points
+
+- `ref.source` is the path passed to the **loader**, not necessarily the scan path.
+  When output refs point at a DSS file, set `source=dss_file` so the loader opens
+  the right file.
+- The `ReaderRegistry` caches loaders by `(ref_type, source)`, so multiple refs from
+  the same DSS file share one reader instance.
+- `RegistryUIManager._dvue_catalog` accepts mixed ref types in the same catalog.
+  Use a `primary_key` that includes a `category` or `TABLE` column to keep input and
+  output refs uniquely keyed:
+
+  ```python
+  self._dvue_catalog = DataCatalog(
+      primary_key=["category", "TABLE", "station", "variable"]
+  )
+  ```
+
+- Conflict warning: registering two reader classes for the **same extension** triggers
+  a `WARNING` log message at register time (last-write-wins).  To avoid the conflict,
+  do not register an extension entry for the "generic" reader — instead bypass the
+  extension map in `add_source_files()` and call `YourReader.scan(path)` directly.
+

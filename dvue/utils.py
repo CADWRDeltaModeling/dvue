@@ -85,3 +85,84 @@ def interpret_file_relative_to(base_dir, fpath):
         full_path = fpath
     logger.debug(f"full_path: {full_path}")
     return full_path
+
+
+def load_geo_dataframe(
+    path,
+    lat_col="lat",
+    lon_col="lon",
+    id_col=None,
+    crs=None,
+):
+    """Load geographic station data from a CSV, GeoJSON, shapefile, or GeoPackage.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to load.  Supported formats:
+
+        * ``.geojson`` / ``.json`` / ``.shp`` / ``.gpkg`` — passed directly to
+          :func:`geopandas.read_file`.
+        * ``.csv`` — coordinate columns are auto-detected in priority order:
+
+          1. *lat_col* / *lon_col* (default ``"lat"`` / ``"lon"``): WGS84
+          2. ``"utm_easting"`` / ``"utm_northing"``: EPSG:26910 (NAD83 UTM 10N)
+          3. ``"easting"`` / ``"northing"``: EPSG:26910
+
+    lat_col : str
+        CSV column name for latitude (WGS84).  Default ``"lat"``.
+    lon_col : str
+        CSV column name for longitude (WGS84).  Default ``"lon"``.
+    id_col : str, optional
+        Not used for loading; included for API symmetry with callers that also
+        declare the join column alongside the path.
+    crs : cartopy CRS or pyproj CRS string, optional
+        Override the auto-detected CRS.  Passed to
+        :meth:`geopandas.GeoDataFrame.to_crs` for vector files, or used as
+        the declared CRS for CSV points.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+
+    Raises
+    ------
+    ValueError
+        If the file extension is not supported, or a CSV has no recognisable
+        coordinate columns.
+    """
+    import geopandas as gpd
+    import pandas as pd
+
+    path = str(path)
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext in (".geojson", ".json", ".shp", ".gpkg"):
+        gdf = gpd.read_file(path)
+        if crs is not None:
+            gdf = gdf.to_crs(crs)
+        return gdf
+
+    if ext == ".csv":
+        df = pd.read_csv(path)
+        if lat_col in df.columns and lon_col in df.columns:
+            geometry = gpd.points_from_xy(df[lon_col], df[lat_col])
+            file_crs = crs or "EPSG:4326"
+        elif "utm_easting" in df.columns and "utm_northing" in df.columns:
+            geometry = gpd.points_from_xy(df["utm_easting"], df["utm_northing"])
+            file_crs = crs or "EPSG:26910"
+        elif "easting" in df.columns and "northing" in df.columns:
+            geometry = gpd.points_from_xy(df["easting"], df["northing"])
+            file_crs = crs or "EPSG:26910"
+        else:
+            raise ValueError(
+                f"CSV {path!r} has no recognisable coordinate columns. "
+                f"Expected {lat_col!r}/{lon_col!r}, 'utm_easting'/'utm_northing', "
+                "or 'easting'/'northing'."
+            )
+        return gpd.GeoDataFrame(df, geometry=geometry, crs=file_crs)
+
+    raise ValueError(
+        f"Unsupported file type for geo loading: {ext!r}. "
+        "Supported: .csv, .geojson, .json, .shp, .gpkg"
+    )

@@ -257,6 +257,18 @@ def serve_session_app(
         def _save_state(user_id: str, state: dict) -> None:
             pass
 
+    # Probe manager once for view-layer hints (crs, station_id_column) when
+    # the caller did not provide them.  Caller-provided values always win.
+    _effective_crs = crs
+    _effective_sic = station_id_column
+    if _effective_crs is None or _effective_sic is None:
+        _probe = build_manager_fn()
+        if _effective_crs is None:
+            _effective_crs = getattr(_probe, "crs", None)
+        if _effective_sic is None:
+            _effective_sic = getattr(_probe, "station_id_column", None)
+        del _probe
+
     # In-memory registry: user_id → {"mgr": ..., "ui": ..., "template": ...}
     _registry: dict = {}
 
@@ -281,10 +293,10 @@ def serve_session_app(
             restore(mgr, saved)
 
         dataui_kwargs: dict = {}
-        if crs is not None:
-            dataui_kwargs["crs"] = crs
-        if station_id_column is not None:
-            dataui_kwargs["station_id_column"] = station_id_column
+        if _effective_crs is not None:
+            dataui_kwargs["crs"] = _effective_crs
+        if _effective_sic is not None:
+            dataui_kwargs["station_id_column"] = _effective_sic
 
         ui = DataUI(mgr, **dataui_kwargs)
         tmpl = ui.create_view(title=title)
@@ -616,6 +628,18 @@ def serve_desktop_app(
         def _save_state(user_id: str, state: dict) -> None:
             pass
 
+    # Probe manager once for view-layer hints (crs, station_id_column) when
+    # the caller did not provide them.  Caller-provided values always win.
+    _effective_crs = crs
+    _effective_sic = station_id_column
+    if _effective_crs is None or _effective_sic is None:
+        _probe = build_manager_fn()
+        if _effective_crs is None:
+            _effective_crs = getattr(_probe, "crs", None)
+        if _effective_sic is None:
+            _effective_sic = getattr(_probe, "station_id_column", None)
+        del _probe
+
     _registry: dict = {}
 
     def make_app():
@@ -636,10 +660,10 @@ def serve_desktop_app(
             restore(mgr, saved)
 
         dataui_kwargs: dict = {}
-        if crs is not None:
-            dataui_kwargs["crs"] = crs
-        if station_id_column is not None:
-            dataui_kwargs["station_id_column"] = station_id_column
+        if _effective_crs is not None:
+            dataui_kwargs["crs"] = _effective_crs
+        if _effective_sic is not None:
+            dataui_kwargs["station_id_column"] = _effective_sic
 
         ui = DataUI(mgr, **dataui_kwargs)
         tmpl = ui.create_view(title=title)

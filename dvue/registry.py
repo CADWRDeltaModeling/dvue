@@ -85,6 +85,16 @@ class ReaderRegistry:
         cls._registry[ref_type] = reader_class
         if extensions:
             for ext in extensions:
+                existing = cls._extension_map.get(ext.lower())
+                if existing is not None and existing is not reader_class:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "ReaderRegistry: extension %r was mapped to %s; "
+                        "overwriting with %s (last-write-wins).",
+                        ext,
+                        existing.__name__,
+                        reader_class.__name__,
+                    )
                 cls._extension_map[ext.lower()] = reader_class
 
     # ---------------------------------------------------------------------------

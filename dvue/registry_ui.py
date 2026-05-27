@@ -197,6 +197,116 @@ class RegistryUIManager(TimeSeriesDataUIManager):
         """
 
     # ------------------------------------------------------------------
+    # Geo / map integration
+    # ------------------------------------------------------------------
+
+    def add_geo_source(
+        self,
+        path: str,
+        id_column: str,
+        station_column: str = "station",
+    ) -> None:
+        """Load geographic data and merge it into the live catalog display DataFrame.
+
+        After this call, :meth:`get_data_catalog` returns a
+        :class:`geopandas.GeoDataFrame` with a ``geometry`` column.
+        If the source file's CRS can be resolved and ``self.crs`` is ``None``,
+        ``self.crs`` is also set from the file's CRS.
+
+        The merge is re-applied automatically whenever the catalog grows (e.g.
+        when additional files are dropped onto the window after the initial load).
+
+        Parameters
+        ----------
+        path :
+            Path to a CSV, GeoJSON, shapefile, or GeoPackage.  See
+            :func:`dvue.utils.load_geo_dataframe` for format details.
+        id_column :
+            Column in the geo file that contains station identifiers matching
+            *station_column* values in the catalog.
+        station_column :
+            Catalog column to join on.  Default ``"station"``.
+        """
+        from dvue.utils import load_geo_dataframe
+
+        try:
+            geo_df = load_geo_dataframe(path)
+        except Exception as exc:
+            logger.warning(
+                "%s: add_geo_source: could not load %r: %s",
+                type(self).__name__,
+                path,
+                exc,
+            )
+            return
+
+        self._geo_source_df = geo_df
+        self._geo_id_column = id_column
+        self._geo_station_column = station_column
+
+        self._apply_geo_merge()
+
+        # Auto-set crs from geo file CRS when not yet declared.
+        if self.crs is None and getattr(geo_df, "crs", None) is not None:
+            try:
+                import cartopy.crs as ccrs
+                epsg = geo_df.crs.to_epsg()
+                if epsg:
+                    self.crs = ccrs.epsg(str(epsg))
+            except Exception:
+                pass
+
+    def _apply_geo_merge(self) -> None:
+        """(Re-)merge stored geo data into ``_display_dfcat``.
+
+        Called by :meth:`add_geo_source` and by :meth:`get_data_catalog` when
+        the catalog grows after a geo source has been registered.
+        """
+        import geopandas as gpd
+        import pandas as pd
+
+        geo_df = getattr(self, "_geo_source_df", None)
+        if geo_df is None:
+            return
+
+        id_col = self._geo_id_column
+        station_col = self._geo_station_column
+        df = self._display_dfcat
+
+        if id_col not in geo_df.columns:
+            logger.warning(
+                "%s: _apply_geo_merge: id_column %r not in geo file columns",
+                type(self).__name__,
+                id_col,
+            )
+            return
+        if station_col not in df.columns:
+            return
+
+        # Build a slim geo lookup: id → geometry (+ any extra columns).
+        extra_geo_cols = [
+            c for c in geo_df.columns if c not in (id_col, "geometry")
+        ]
+        geo_subset = (
+            geo_df[[id_col, "geometry"] + extra_geo_cols]
+            .rename(columns={id_col: station_col})
+            .drop_duplicates(subset=[station_col])
+        )
+
+        # Strip old geometry column to avoid conflicts on re-merge.
+        if "geometry" in df.columns:
+            df = pd.DataFrame(df.drop(columns=["geometry"]))
+
+        merged = df.merge(geo_subset, on=station_col, how="left")
+
+        if "geometry" in merged.columns:
+            self._display_dfcat = gpd.GeoDataFrame(
+                merged, geometry="geometry", crs=geo_df.crs
+            )
+        else:
+            self._display_dfcat = merged
+
+    # ------------------------------------------------------------------
     # Catalog / DataReference interface
     # ------------------------------------------------------------------
 
@@ -207,6 +317,7 @@ class RegistryUIManager(TimeSeriesDataUIManager):
     def get_data_catalog(self):
         if len(self._dvue_catalog) != len(self._display_dfcat):
             self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+            self._apply_geo_merge()
         return self._display_dfcat
 
     def get_data_reference(self, row):
