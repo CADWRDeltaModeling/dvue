@@ -97,6 +97,16 @@ dvue ui --plugin dsm2ui.dsm2ui --desktop
 # Pre-load specific files; mix .h5 and .dss freely
 dvue ui --plugin dsm2ui.dsm2ui run.h5 hist_qual.dss hist_hydro.dss
 
+# Combined DSM2 input + output viewer from an echo .inp file
+dvue ui --plugin dsm2ui.echo_plugin output/run_hydro_echo.inp --desktop
+
+# Generic DSS file browser (all C-parts, no DSM2 filter)
+dvue ui --plugin dsm2ui.dssui.dss_registry output.dss
+
+# DSS browser with station geometry for map display
+dvue ui --plugin dsm2ui.dssui.dss_registry output.dss \
+    --geo-file stations.geojson --geo-id-column STATION_ID
+
 # Multiple plugin packages — each registers its own file extensions
 dvue ui --plugin dsm2ui.dsm2ui --plugin schismviz.readers output.staout run.h5
 
@@ -121,6 +131,20 @@ The `dvue ui` command imports each `--plugin` module *before* constructing
 the manager, so all registered readers are available when the catalog is
 built.  Dropping additional files onto the running window after launch also
 works — the registry resolves the reader from the dropped file's extension.
+
+### Known plugins (dsm2ui)
+
+| `--plugin` module | File types handled | Equivalent CLI shortcut |
+|---|---|---|
+| `dsm2ui.dsm2ui` | `.h5` / `.hdf5` (tidefiles), `.dss` (DSM2 output channels) | `dsm2ui ui output` / `dsm2ui ui tide` |
+| `dsm2ui.echo_plugin` | `.inp` (DSM2 echo files — input BC + output channels) | `dsm2ui ui echo` |
+| `dsm2ui.dssui.dss_registry` | `.dss` (all C-parts, generic browser) | `dsm2ui ui dss` |
+
+> **Extension conflict note:** `dsm2ui.dsm2ui` registers `.dss` for *DSM2 output channels only*
+> (filters to `FLOW`, `STAGE`, `EC`, etc.).  `dsm2ui.dssui.dss_registry` reads *all* C-parts.
+> If both are loaded, the last `register()` call wins and a warning is logged.  Load only the
+> plugin that matches your use-case, or use the dedicated `dsm2ui ui` sub-commands which each
+> load the correct reader automatically.
 
 ### `dvue show-version`
 

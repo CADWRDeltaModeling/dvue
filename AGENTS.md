@@ -17,9 +17,6 @@ Use this file when working in the `dvue/` workspace root.
 3. Run examples:
    - `panel serve examples/ex_basic_tsdataui.py --show`
    - `panel serve examples/ex_tsdataui.py --show`
-4. Launch the generic file-viewer CLI (requires reader plugins to be installed):
-   - `dvue ui --plugin dsm2ui.dsm2ui --desktop`  ← DSM2 HDF5 + DSS files
-   - `dvue ui --plugin <pkg.module> [files...]`   ← any registered format
 
 ## Key Design Rules
 
