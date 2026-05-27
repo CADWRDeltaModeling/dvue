@@ -174,6 +174,82 @@ class ReaderRegistry:
     # ---------------------------------------------------------------------------
 
     @classmethod
+    def load_plugins_from_entry_points(cls) -> List[str]:
+        """Auto-discover and load all plugins from setuptools entry points.
+
+        Searches for entry point group ``"dvue.plugins"``. Each entry point
+        should reference a callable (typically a function) that registers
+        readers when invoked. Entry points are loaded in iteration order
+        (deterministic, insertion-order).
+
+        Failures in individual plugins are logged as warnings but do not
+        halt discovery of remaining plugins.
+
+        Returns
+        -------
+        List[str]
+            Names of successfully loaded plugins, in order.
+
+        Notes
+        -----
+        Entry points are typically declared in ``pyproject.toml``::
+
+            [project.entry-points."dvue.plugins"]
+            my_plugin = "my_package.readers:register_readers"
+
+        The ``register_readers`` callable receives no arguments and should
+        call :meth:`register` to add its readers to the registry::
+
+            def register_readers():
+                ReaderRegistry.register("my_format", MyReader, extensions=[".myext"])
+        """
+        import logging
+        try:
+            from importlib.metadata import entry_points
+        except ImportError:
+            import importlib_metadata as importlib_metadata_
+            entry_points = importlib_metadata_.entry_points
+
+        logger = logging.getLogger(__name__)
+        loaded = []
+
+        try:
+            # Python 3.10+: entry_points(group=...) returns an EntryPoints object
+            try:
+                group = entry_points(group="dvue.plugins")
+            except TypeError:
+                # Python 3.9 and earlier: entry_points() returns a dict
+                eps = entry_points()
+                group = eps.get("dvue.plugins", [])
+        except Exception as e:
+            logger.warning(f"Failed to query entry points: {e}")
+            return []
+
+        for ep in group:
+            try:
+                register_fn = ep.load()
+                register_fn()
+                logger.info(f"✓ Loaded dvue plugin: {ep.name}")
+                loaded.append(ep.name)
+            except Exception as e:
+                logger.warning(
+                    f"✗ Failed to load dvue plugin {ep.name!r} ({ep.value}): {e}",
+                    exc_info=False,
+                )
+
+        return loaded
+
+    @classmethod
+    def get_registered_readers(cls) -> Dict[str, Type["DataReferenceReader"]]:
+        """Return a shallow copy of the registered ref_type → reader class mapping."""
+        return dict(cls._registry)
+
+    @classmethod
+    def get_registered_extensions(cls) -> Dict[str, Type["DataReferenceReader"]]:
+        """Return a shallow copy of the registered extension → reader class mapping."""
+        return dict(cls._extension_map)
+
+    @classmethod
     def clear_instance_cache(
         cls,
         ref_type: Optional[str] = None,

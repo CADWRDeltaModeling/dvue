@@ -19,7 +19,43 @@ def show_version():
     click.echo(dvue.__version__)
 
 
+@main.command(name="list-plugins")
+def list_plugins():
+    """List all available dvue plugins (from entry points and registry).
+
+    Displays plugins discovered via setuptools entry points (``dvue.plugins``
+    group) and any readers currently registered in the :class:`~dvue.registry.ReaderRegistry`.
+    """
+    from dvue.registry import ReaderRegistry
+
+    # Auto-load plugins from entry points
+    loaded = ReaderRegistry.load_plugins_from_entry_points()
+
+    if loaded:
+        click.echo("Loaded plugins (from entry points):")
+        for name in loaded:
+            click.echo(f"  • {name}")
+        click.echo()
+
+    # Show registered readers
+    readers = ReaderRegistry.get_registered_readers()
+    extensions = ReaderRegistry.get_registered_extensions()
+
+    if readers:
+        click.echo(f"Registered readers ({len(readers)}):")
+        for ref_type, reader_cls in sorted(readers.items()):
+            exts_for_type = [e for e, c in extensions.items() if c is reader_cls]
+            if exts_for_type:
+                ext_str = ", ".join(sorted(exts_for_type))
+                click.echo(f"  • {ref_type:25} → {reader_cls.__name__:30} ({ext_str})")
+            else:
+                click.echo(f"  • {ref_type:25} → {reader_cls.__name__:30} (no extensions)")
+    else:
+        click.echo("No readers registered.")
+
+
 main.add_command(show_version)
+main.add_command(list_plugins)
 
 
 # ---------------------------------------------------------------------------
@@ -34,11 +70,11 @@ main.add_command(show_version)
     multiple=True,
     metavar="MODULE",
     help=(
-        "Python module to import before launching the UI.  Importing a module "
-        "that calls ReaderRegistry.register() at module level registers its "
-        "readers so that the corresponding file extensions are supported.  "
-        "May be specified multiple times.  Example: "
-        "--plugin dsm2ui.dsm2ui --plugin schismviz.readers"
+        "Python module to import before launching the UI (optional). "
+        "Modules that call ReaderRegistry.register() at import time register readers. "
+        "Note: plugins from entry points (dvue.plugins group) are loaded automatically. "
+        "Use this flag for development or to load local/custom modules. "
+        "May be specified multiple times."
     ),
 )
 @click.option(
@@ -60,23 +96,41 @@ def ui_command(files, plugins, port, desktop):
     Launches :class:`~dvue.registry_ui.RegistryUIManager` with FILES
     pre-loaded.  Omit FILES to start empty and add files via drag-and-drop.
 
-    Reader plugins are loaded by passing ``--plugin MODULE``.  Any module
-    that calls ``ReaderRegistry.register()`` at import time is a valid
-    plugin.  Install the package first, then reference its reader module::
+    **Plugin Discovery**
 
-        dvue ui --plugin dsm2ui.dsm2ui run.h5 hist_qual.dss
-        dvue ui --plugin schismviz.readers output.staout
-        dvue ui --plugin dsm2ui.dsm2ui --plugin schismviz.readers --desktop
-        dvue ui           # empty start, drag-and-drop files in
+    Plugins are loaded in this order:
 
-    \b
-    Supported extensions are determined entirely by what has been registered
-    via --plugin imports.  Without any --plugin the catalog starts empty and
-    only accepts files whose readers were registered by other installed
-    packages at import time.
+    1. **Entry points** — all plugins registered in the ``dvue.plugins`` entry
+       point group are auto-discovered and loaded automatically. This happens
+       without any CLI flags required.
+    2. **Explicit --plugin flags** — modules specified via ``--plugin MODULE``
+       are imported in order.  These may override extension mappings from
+       entry-point plugins (last-write-wins).
+
+    **Examples**
+
+    Drag-and-drop any file whose extension is registered by an installed plugin::
+
+        dvue ui                                      # empty start
+        dvue ui file.h5 file.dss                     # pre-load files
+        dvue ui --plugin my_custom.readers file.xyz # load custom module
+
+    With entry points configured, extensions are available immediately without
+    needing ``--plugin`` flags::
+
+        # If dsm2ui is installed with entry point, .h5/.dss readers auto-load
+        dvue ui run.h5 hist_qual.dss
+
+    See :meth:`dvue.registry.ReaderRegistry.load_plugins_from_entry_points` for
+    details on the entry point discovery mechanism.
     """
     import importlib
+    from dvue.registry import ReaderRegistry
 
+    # Auto-load plugins from entry points (dvue.plugins group)
+    auto_loaded = ReaderRegistry.load_plugins_from_entry_points()
+
+    # Then load any explicit --plugin CLI args
     plugin_modules = []
     for module_name in plugins:
         try:
