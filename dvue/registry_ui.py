@@ -181,11 +181,16 @@ class RegistryUIManager(TimeSeriesDataUIManager):
     def on_file_added(self, path: str, refs: List["DataReference"]) -> None:
         """Hook called after a file's refs have been successfully added.
 
-        Override to perform file-level side effects such as expanding
-        ``self.time_range``, loading geometry from a companion file, or
-        registering the source in an external index.
+        Default implementation: expands ``self.time_range`` to cover the
+        data extent of any newly added refs.  Readers declare their data's
+        time extent by storing ``time_extent_start`` and ``time_extent_end``
+        attributes (ISO-8601 strings or any ``pd.Timestamp``-coercible value)
+        on each :class:`~dvue.catalog.DataReference`.
 
-        The default is a no-op.
+        Subclasses that need additional side-effects (loading geometry,
+        registering external indices, etc.) should call
+        ``super().on_file_added(path, refs)`` so that time_range expansion
+        still happens.
 
         Parameters
         ----------
@@ -195,6 +200,37 @@ class RegistryUIManager(TimeSeriesDataUIManager):
             All refs returned by ``ReaderRegistry.scan(path)`` for this file
             (including any that were skipped due to pk collisions).
         """
+        starts = []
+        ends = []
+        seen: set = set()
+        for ref in refs:
+            s = ref._attributes.get("time_extent_start")
+            e = ref._attributes.get("time_extent_end")
+            key = (s, e)
+            if key in seen or not s:
+                continue
+            seen.add(key)
+            try:
+                starts.append(pd.Timestamp(s))
+            except Exception:
+                pass
+            if e:
+                try:
+                    ends.append(pd.Timestamp(e))
+                except Exception:
+                    pass
+        if not starts:
+            return
+        new_start = min(starts)
+        new_end = max(ends) if ends else new_start + pd.Timedelta(days=366)
+        current = self.time_range
+        if current is None:
+            self.time_range = (new_start, new_end)
+        else:
+            self.time_range = (
+                min(current[0], new_start),
+                max(current[1], new_end),
+            )
 
     # ------------------------------------------------------------------
     # Geo / map integration

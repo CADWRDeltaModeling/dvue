@@ -77,9 +77,10 @@ def ui_command(files, plugins, port, desktop):
     """
     import importlib
 
+    plugin_modules = []
     for module_name in plugins:
         try:
-            importlib.import_module(module_name)
+            plugin_modules.append(importlib.import_module(module_name))
         except ImportError as exc:
             raise click.ClickException(
                 f"Could not import plugin module {module_name!r}: {exc}"
@@ -88,13 +89,24 @@ def ui_command(files, plugins, port, desktop):
     from dvue.registry_ui import RegistryUIManager
     from dvue.session_persistence import serve_session_app, serve_desktop_app
 
+    manager_cls = RegistryUIManager
+    effective_crs = None
+    for mod in plugin_modules:
+        # Optional plugin hook: module-level manager override.
+        # Last plugin wins when multiple plugins provide this symbol.
+        if hasattr(mod, "DVueUIManager"):
+            manager_cls = getattr(mod, "DVueUIManager")
+        # Optional plugin hook: module-level map CRS override.
+        if hasattr(mod, "DVueUI_CRS"):
+            effective_crs = getattr(mod, "DVueUI_CRS")
+
     file_list = list(files)
 
     def build_manager():
-        return RegistryUIManager(files=file_list)
+        return manager_cls(files=file_list)
 
     _serve = serve_desktop_app if desktop else serve_session_app
-    _serve(build_manager, title="dvue UI", port=port)
+    _serve(build_manager, title="dvue UI", port=port, crs=effective_crs)
 
 
 if __name__ == "__main__":
