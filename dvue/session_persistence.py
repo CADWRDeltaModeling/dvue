@@ -96,8 +96,22 @@ def install_session_handler(cookie_name: str = "dvue_user_id") -> None:
                     self.request.cookies[self._COOKIE_NAME] = user_id
                 await super().get(*args, **kwargs)
 
-        per_app_patterns[0] = (r"/?", _SessionAwareDocHandler)
-        _handler_installed = True
+        # Locate DocHandler by class rather than by fixed index.
+        # Older Bokeh/Panel placed DocHandler at index 0; newer Panel
+        # rewrites per_app_patterns so that WSHandler is at index 0 and
+        # DocHandler moves to the last position.  Patching index 0 in the
+        # new layout overwrote WSHandler, causing BokehTornado to raise
+        # "Couldn't find websocket path".
+        for _i, _p in enumerate(per_app_patterns):
+            if _p[1] is DocHandler:
+                per_app_patterns[_i] = (_p[0], _SessionAwareDocHandler)
+                _handler_installed = True
+                break
+        else:
+            logger.warning(
+                "dvue.session_persistence: DocHandler not found in "
+                "per_app_patterns; session persistence will be disabled."
+            )
     except Exception:
         logger.warning(
             "dvue.session_persistence: could not install session cookie handler; "
