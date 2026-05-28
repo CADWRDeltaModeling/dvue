@@ -149,11 +149,15 @@ class ReaderRegistry:
 
         This allows explicit per-file reader selection when multiple readers
         support the same file extension.
+
+        An empty *path* (e.g. ``"cdec:"``) is allowed when the ref_type is
+        registered; the reader's ``scan()`` is responsible for supplying a
+        sensible default (e.g. falling back to a well-known API base URL).
         """
         if ":" not in source_spec:
             return None, source_spec
         maybe_ref_type, path = source_spec.split(":", 1)
-        if maybe_ref_type in cls._registry and path:
+        if maybe_ref_type in cls._registry:
             return maybe_ref_type, path
         return None, source_spec
 
