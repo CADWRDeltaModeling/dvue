@@ -40,6 +40,9 @@ requirements:
 test:
   imports:
     - dvue
+    - dvue.registry
+    - dvue.registry_ui
+    - dvue.session_persistence
   requires:
     - python
   commands:
