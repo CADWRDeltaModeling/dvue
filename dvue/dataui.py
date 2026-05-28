@@ -646,6 +646,11 @@ class DataUI(param.Parameterized):
     map_default_span = param.Number(default=15000, doc="Default span for map zoom in meters")
     map_non_selection_alpha = param.Number(default=0.2, doc="Non selection alpha")
     map_point_size = param.Number(default=10, doc="Point size for map")
+    map_filters_table = param.Boolean(
+        default=True,
+        doc="When enabled, map selections filter the table rows instead of highlighting them. Table selections do not affect the map.",
+    )
+    _table_selection_for_map = param.List(default=[], precedence=-1)
 
     query = param.String(
         default="",
@@ -672,6 +677,7 @@ class DataUI(param.Parameterized):
         if self.param.map_marker_category.objects:
             self.map_marker_category = self.param.map_marker_category.objects[0]
         self._dfmapcat = self._get_map_catalog()
+        self._map_filter_station_ids = None
 
         if isinstance(self._dfcat, gpd.GeoDataFrame):
             self._tmap = gv.tile_sources.CartoLight()
@@ -842,43 +848,54 @@ class DataUI(param.Parameterized):
         map_default_span,
         map_non_selection_alpha,
         map_point_size,
+        map_filters_table=False,
     ):
         """Update the map features based on the selection in the table or filters or query. Also updates if the color or marker by columns are changed"""
         query = query.strip()
         dfs = self._get_map_catalog()
-        # select only those rows in dfs that have station_id_column in self.display_table.current_view
-        if (
-            self._station_id_column
-            and self._station_id_column in self.display_table.current_view.columns
-        ):
-            current_view = dfs[
-                dfs[self._station_id_column].isin(
-                    self.display_table.current_view[self._station_id_column]
-                )
-            ]
-            # if current_view is a geodataframe, keep only valid geometries
+        if map_filters_table:
+            # In filter mode the map is decoupled from the table: always show the
+            # full map catalog (not restricted to display_table.current_view) and
+            # never highlight features based on table selection.  _table_selection_for_map
+            # is never updated while this mode is active, so selection is always [].
+            current_view = dfs
             if isinstance(current_view, gpd.GeoDataFrame):
                 current_view = current_view.loc[current_view.is_valid]
-            current_table_selected = self._dfcat.iloc[selection]
-            current_selected = current_view[
-                current_view[self._station_id_column].isin(
-                    current_table_selected[self._station_id_column]
-                )
-            ]
+            current_selection = []
         else:
-            current_view = dfs.loc[self.display_table.current_view.index]
-            if isinstance(current_view, gpd.GeoDataFrame):
-                current_view = current_view.loc[current_view.is_valid]
-            current_table_selected = self._dfcat.iloc[selection]
-            current_selected = current_table_selected
-        # Filter out -1 entries: math refs with NaN geometry are absent from
-        # current_view (filtered by .is_valid above) so get_indexer returns -1
-        # for them. Passing -1 to Bokeh's selected= is interpreted as "last row"
-        # (Python-style negative index), selecting the wrong geo point on the map.
-        current_selection = [
-            i for i in current_view.index.get_indexer(current_selected.index).tolist()
-            if i >= 0
-        ]
+            # select only those rows in dfs that have station_id_column in self.display_table.current_view
+            if (
+                self._station_id_column
+                and self._station_id_column in self.display_table.current_view.columns
+            ):
+                current_view = dfs[
+                    dfs[self._station_id_column].isin(
+                        self.display_table.current_view[self._station_id_column]
+                    )
+                ]
+                # if current_view is a geodataframe, keep only valid geometries
+                if isinstance(current_view, gpd.GeoDataFrame):
+                    current_view = current_view.loc[current_view.is_valid]
+                current_table_selected = self._dfcat.iloc[selection]
+                current_selected = current_view[
+                    current_view[self._station_id_column].isin(
+                        current_table_selected[self._station_id_column]
+                    )
+                ]
+            else:
+                current_view = dfs.loc[self.display_table.current_view.index]
+                if isinstance(current_view, gpd.GeoDataFrame):
+                    current_view = current_view.loc[current_view.is_valid]
+                current_table_selected = self._dfcat.iloc[selection]
+                current_selected = current_table_selected
+            # Filter out -1 entries: math refs with NaN geometry are absent from
+            # current_view (filtered by .is_valid above) so get_indexer returns -1
+            # for them. Passing -1 to Bokeh's selected= is interpreted as "last row"
+            # (Python-style negative index), selecting the wrong geo point on the map.
+            current_selection = [
+                i for i in current_view.index.get_indexer(current_selected.index).tolist()
+                if i >= 0
+            ]
         try:
             if len(query) > 0:
                 current_view = current_view.query(query)
@@ -921,10 +938,92 @@ class DataUI(param.Parameterized):
             )
         return self._map_features
 
+    # ------------------------------------------------------------------
+    # Map-filter-table helpers
+    # ------------------------------------------------------------------
+
+    def _get_table_df_for_display(self, df):
+        """Convert *df* (possibly a GeoDataFrame) to a plain DataFrame with the
+        same columns as the current Tabulator widget, ready for assignment to
+        ``display_table.value``."""
+        try:
+            tbl_df = pd.DataFrame(df) if isinstance(df, gpd.GeoDataFrame) else df
+        except Exception:
+            tbl_df = df
+        tbl_cols = self.display_table.value.columns
+        return tbl_df.reindex(columns=tbl_cols)
+
+    def _refresh_table_with_map_filter(self):
+        """Restrict the Tabulator to rows matching ``_map_filter_station_ids``."""
+        ids = self._map_filter_station_ids
+        if ids is None:
+            return
+        idcol = self._station_id_column
+        if idcol and idcol in self._dfcat.columns:
+            filtered = self._dfcat[self._dfcat[idcol].isin(ids)]
+        else:
+            # ids is a set of index labels when there is no station_id_column
+            filtered = self._dfcat.loc[self._dfcat.index.isin(ids)]
+        tbl_df = self._get_table_df_for_display(filtered)
+        self.display_table.param.update(value=tbl_df, selection=[])
+
+    def _clear_map_filter(self):
+        """Remove the active map filter and restore the full catalog in the table."""
+        if self._map_filter_station_ids is None:
+            return
+        self._map_filter_station_ids = None
+        tbl_df = self._get_table_df_for_display(self._dfcat)
+        self.display_table.param.update(value=tbl_df, selection=[])
+
+    def _on_table_selection_changed(self, event):
+        """Gate table-selection → map sync: only propagate when filter mode is off."""
+        if not self.map_filters_table:
+            self._table_selection_for_map = list(event.new)
+
+    def _on_map_filter_mode_changed(self, event):
+        """Restore normal table and re-sync map selection when filter mode is toggled off."""
+        if not event.new:
+            self._clear_map_filter()
+            # Re-sync proxy param with current table selection so map highlights
+            # immediately reflect any rows selected while filter mode was active.
+            self._table_selection_for_map = list(self.display_table.selection)
+
+    def _apply_map_filter(self, index):
+        """Apply a filter to the table based on the *index* of selected map features.
+
+        Called instead of the normal ``select_data_catalog`` path when
+        ``map_filters_table`` is True.
+        """
+        # Empty selection — clear any active filter
+        if not index:
+            self._clear_map_filter()
+            return
+        map_df = self._map_features.dframe()
+        n_map = len(map_df)
+        index = [i for i in index if 0 <= i < n_map]
+        if not index:
+            self._clear_map_filter()
+            return
+        idcol = self._station_id_column
+        if idcol and idcol in self._dfcat.columns:
+            self._map_filter_station_ids = set(map_df.iloc[index][idcol].tolist())
+        else:
+            # Use the index labels of the matching rows in _dfcat
+            dfs = map_df.iloc[index]
+            merged_indices = self._dfcat.reset_index().merge(dfs)["index"].to_list()
+            self._map_filter_station_ids = set(merged_indices)
+        self._refresh_table_with_map_filter()
+
     def select_data_catalog(self, index=[]):
         """Select the rows in the table that correspond to the selected features in the map"""
         if index is None or (len(index) == 1 and index[0] == -1):
             return
+
+        # In filter mode: filter the table instead of selecting rows
+        if self.map_filters_table:
+            self._apply_map_filter(index)
+            return
+
         idcol = self._station_id_column
         table = self.display_table
 
@@ -1512,6 +1611,10 @@ class DataUI(param.Parameterized):
         """
         if not hasattr(self, "display_table"):
             return
+        # Clear any active map filter so it does not persist into the new view.
+        if getattr(self, "_map_filter_station_ids", None) is not None:
+            self._map_filter_station_ids = None
+            notifications.info("Map filter cleared — catalog view changed.")
         filtered = self._views_manager.filter_dataframe(self._dfcat_full)
         self._dfcat = filtered
         # Normalise to plain DataFrame (Tabulator can't JSON-serialise geometry)
@@ -1712,6 +1815,7 @@ class DataUI(param.Parameterized):
                 self.param.map_non_selection_alpha,
                 self.param.map_point_size,
                 self.param.query,
+                self.param.map_filters_table,
             ]
             if _extra_map_widgets is not None:
                 _map_option_items.append(_extra_map_widgets)
@@ -1740,11 +1844,15 @@ class DataUI(param.Parameterized):
                     "map_default_span",
                     "map_non_selection_alpha",
                     "map_point_size",
+                    "map_filters_table",
+                    "_table_selection_for_map",
                 ],
             )
+            # selection is intentionally excluded: table row clicks are gated
+            # through _table_selection_for_map so filter mode can suppress them.
             _table_stream = streams.Params(
                 parameterized=self.display_table,
-                parameters=["filters", "selection"],
+                parameters=["filters"],
             )
 
             def _map_callback(
@@ -1756,8 +1864,9 @@ class DataUI(param.Parameterized):
                 map_default_span,
                 map_non_selection_alpha,
                 map_point_size,
+                map_filters_table,
+                _table_selection_for_map,
                 filters,
-                selection,
             ):
                 return self.update_map_features(
                     show_color_by=show_map_colors,
@@ -1766,15 +1875,17 @@ class DataUI(param.Parameterized):
                     marker_by=map_marker_category,
                     query=query,
                     filters=filters,
-                    selection=selection,
+                    selection=_table_selection_for_map,
                     map_default_span=map_default_span,
                     map_non_selection_alpha=map_non_selection_alpha,
                     map_point_size=map_point_size,
+                    map_filters_table=map_filters_table,
                 )
 
             self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream, _table_stream])
             self._station_select.source = self._map_function
             self._station_select.param.watch_values(self.select_data_catalog, "index")
+            self.display_table.param.watch(self._on_table_selection_changed, "selection")
             map_tooltip = pn.widgets.TooltipIcon(
                 value="""Map of geographical features. Click on a feature to see data available in the table. <br/>
                 See <a href="https://docs.bokeh.org/en/latest/docs/user_guide/interaction/tools.html">Bokeh Tools</a> for toolbar operation"""
@@ -1842,6 +1953,8 @@ class DataUI(param.Parameterized):
             )
         # Wire view switching → table refresh.
         self._views_manager.param.watch(self._refresh_table_from_view, "active_view")
+        # Clear map filter when filter mode is toggled off.
+        self.param.watch(self._on_map_filter_mode_changed, "map_filters_table")
         # Let actions inject their sidebar tabs now that _sidebar_tabs exists.
         self._setup_action_sidebars()
         # Append the view-navigation widget to the right end of the action
@@ -2006,11 +2119,13 @@ class DataUI(param.Parameterized):
                     "map_default_span",
                     "map_non_selection_alpha",
                     "map_point_size",
+                    "map_filters_table",
+                    "_table_selection_for_map",
                 ],
             )
             _table_stream = streams.Params(
                 parameterized=self.display_table,
-                parameters=["filters", "selection"],
+                parameters=["filters"],
             )
 
             def _map_callback(
@@ -2018,15 +2133,17 @@ class DataUI(param.Parameterized):
                 show_map_markers, map_marker_category,
                 query, map_default_span,
                 map_non_selection_alpha, map_point_size,
-                filters, selection,
+                map_filters_table, _table_selection_for_map,
+                filters,
             ):
                 return self.update_map_features(
                     show_color_by=show_map_colors, color_by=map_color_category,
                     show_marker_by=show_map_markers, marker_by=map_marker_category,
-                    query=query, filters=filters, selection=selection,
+                    query=query, filters=filters, selection=_table_selection_for_map,
                     map_default_span=map_default_span,
                     map_non_selection_alpha=map_non_selection_alpha,
                     map_point_size=map_point_size,
+                    map_filters_table=map_filters_table,
                 )
 
             self._map_function = hv.DynamicMap(
