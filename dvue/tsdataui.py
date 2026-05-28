@@ -330,6 +330,19 @@ class TimeSeriesDataUIManager(DataUIManager):
     def get_table_filters(self):
         raise NotImplementedError("Method get_table_filters not implemented")
 
+    def _get_table_column_width_map(self) -> dict:
+        """Hook for subclasses to declare column widths.
+
+        The default ``get_table_schema()`` implementation calls this method
+        to seed the ``column_widths`` in the schema.  Subclasses that override
+        ``get_table_schema()`` directly do not need to implement this hook.
+        Subclasses that only want to declare widths without overriding the full
+        schema may override this method instead.
+
+        Returns an empty dict by default (no widths declared).
+        """
+        return {}
+
     def is_irregular(self, r):
         raise NotImplementedError("Method is_irregular not implemented")
 
