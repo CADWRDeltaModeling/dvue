@@ -169,15 +169,21 @@ class TimeSeriesDataUIManager(DataUIManager):
         default=True,
         doc="Show the 'Clear Cache' button in the action bar and transform panel. Set to False to hide it.",
     )
+
     def __init__(self, **params):
         self._cached_catalog = None
         # Populate _cached_catalog for subclasses that don't expose data_catalog.
         # Managers with a data_catalog property always rebuild fresh in get_data_catalog().
         if self.data_catalog is None:
             self._cached_catalog = self.get_data_catalog()
-        self.change_color_cycle()
-        self.time_range = self.get_time_range(self.get_data_catalog())
         super().__init__(**params)
+
+        self.change_color_cycle()
+
+        # Only derive a default time range when the caller did not provide one.
+        if self.time_range is None:
+            self.time_range = self.get_time_range(self.get_data_catalog())
+
         table_columns = list(self.get_table_columns())
         # Add blank (None) option at the start
         columns_with_blank = [None] + table_columns
@@ -777,7 +783,75 @@ class TimeSeriesDataUIManager(DataUIManager):
 
     # display related support for tables
     def get_table_columns(self):
-        return list(self.get_table_column_width_map().keys())
+        df = self.get_data_catalog()
+        schema = self.get_table_schema(df)
+        return self._resolve_table_columns_from_schema(df, schema)
+
+    def get_table_schema(self, df: pd.DataFrame | None = None) -> dict:
+        """Return the formal table schema for time-series managers.
+
+        This default implementation preserves legacy behavior built from
+        ``_get_table_column_width_map()`` and ``get_table_filters()`` while
+        exposing the schema contract for subclasses.
+        """
+        if df is None:
+            df = self.get_data_catalog()
+
+        column_width_map = dict(self._get_table_column_width_map())
+        # Keep longstanding defaults unless a subclass sets these explicitly.
+        column_width_map.setdefault("source", "10%")
+        if "source_num" in (df.columns if hasattr(df, "columns") else []):
+            column_width_map.setdefault("source_num", "5%")
+        column_width_map.setdefault("ref_type", "8%")
+        self.adjust_column_width(column_width_map)
+
+        optional_columns = []
+        cat = getattr(self, "data_catalog", None)
+        if cat is not None and self._has_math_refs():
+            if "name" not in column_width_map and "name" in df.columns:
+                optional_columns.append("name")
+            for col in df.columns:
+                if col not in column_width_map and col not in ("geometry", "source"):
+                    optional_columns.append(col)
+
+        hidden_by_default = []
+        if "ref_type" in df.columns and not self._has_mixed_ref_types(df):
+            hidden_by_default.append("ref_type")
+
+        return {
+            "required_columns": list(column_width_map.keys()),
+            "optional_columns": optional_columns,
+            "hidden_by_default": hidden_by_default,
+            "drop_if_all_null": False,
+            "column_widths": column_width_map,
+            "filters": self.get_table_filters(),
+        }
+
+    @staticmethod
+    def _is_effectively_empty_column(series: "pd.Series") -> bool:
+        if series.isna().all():
+            return True
+        non_na = series.dropna()
+        if non_na.empty:
+            return True
+        as_text = non_na.astype(str).str.strip().str.lower()
+        return as_text.isin({"", "nan", "none", "null"}).all()
+
+    def _resolve_table_columns_from_schema(self, df: pd.DataFrame, schema: dict) -> list[str]:
+        required = list(schema.get("required_columns", []))
+        optional = list(schema.get("optional_columns", []))
+        drop_if_all_null = bool(schema.get("drop_if_all_null", False))
+
+        columns = []
+        seen = set()
+        for col in required + optional:
+            if col in seen or col not in df.columns:
+                continue
+            if drop_if_all_null and col in optional and self._is_effectively_empty_column(df[col]):
+                continue
+            columns.append(col)
+            seen.add(col)
+        return columns
 
     def get_table_width_sum(self, column_width_map):
         width = 0
@@ -793,35 +867,12 @@ class TimeSeriesDataUIManager(DataUIManager):
         return column_width_map
 
     def get_table_column_width_map(self):
-        column_width_map = self._get_table_column_width_map()
-        if "source" in column_width_map or True:  # source column always exists
-            column_width_map["source"] = "10%"
-            df = self.get_data_catalog()
-            if "source_num" in (df.columns if hasattr(df, 'columns') else []):
-                column_width_map["source_num"] = "5%"
-            self.adjust_column_width(column_width_map)
-        # Always include ref_type so it is present in the Tabulator data slice
-        # (required for hidden-but-filterable behaviour).  Width is small since
-        # the column is hidden by default when all refs share the same type.
-        column_width_map["ref_type"] = "8%"
-        # Append any extra attributes that exist on math refs (e.g. "tag",
-        # "expression") but are not yet in the fixed column map.  These come
-        # from TransformToCatalogAction or the Math Ref editor and must be
-        # visible in the table without requiring every subclass to pre-declare
-        # them.  They are placed after the fixed columns so the table layout
-        # remains stable; a narrow default width is used.
-        cat = getattr(self, "data_catalog", None)
-        if cat is not None and self._has_math_refs():
-            df = cat.to_dataframe()
-            # Show the catalog key ('name') as a visible column so users can
-            # see what their transform/math refs are called.  Subclasses that
-            # explicitly include 'name' in _get_table_column_width_map() retain
-            # full control over placement and width.
-            if "name" not in column_width_map:
-                column_width_map["name"] = "15%"
-            for col in df.columns:
-                if col not in column_width_map and col not in ("geometry", "source"):
-                    column_width_map[col] = "10%"
+        df = self.get_data_catalog()
+        schema = self.get_table_schema(df)
+        column_width_map = dict(schema.get("column_widths", {}))
+        for col in self._resolve_table_columns_from_schema(df, schema):
+            if col not in column_width_map:
+                column_width_map[col] = "10%"
         return column_width_map
 
     @staticmethod

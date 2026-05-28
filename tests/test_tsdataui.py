@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+import warnings
 
 from dvue.catalog import DataCatalog, DataReference, InMemoryDataReferenceReader
 from dvue.tsdataui import TimeSeriesDataUIManager
@@ -139,6 +140,54 @@ class TestMultipleSources:
         df = mgr.get_data_catalog()
         missing = set(mgr.get_table_columns()) - set(df.columns)
         assert missing == set(), f"Columns {missing} not in catalog DataFrame"
+
+
+class TestInitializationWarnings:
+    def test_stub_manager_init_has_no_param_pending_warning(self):
+        cat = _build_catalog(["file_a.dss"])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _StubManager(cat)
+
+        assert not any("ParamPendingDeprecationWarning" in str(w.message) for w in caught)
+
+
+class _SchemaStubManager(_StubManager):
+    def get_table_schema(self, df=None):
+        if df is None:
+            df = self.get_data_catalog()
+        return {
+            "required_columns": ["B", "C"],
+            "optional_columns": ["E", "all_null"],
+            "hidden_by_default": [],
+            "drop_if_all_null": True,
+            "column_widths": {
+                "B": "20%",
+                "C": "20%",
+                "E": "15%",
+            },
+            "filters": {},
+        }
+
+
+class TestFormalTableSchema:
+    def test_table_columns_follow_schema_order(self):
+        cat = _build_catalog(["file_a.dss"])
+        mgr = _SchemaStubManager(cat)
+        df = mgr.get_data_catalog().copy()
+        df["all_null"] = pd.NA
+        mgr.get_data_catalog = lambda: df
+
+        assert mgr.get_table_columns() == ["B", "C", "E"]
+
+    def test_table_widths_include_resolved_schema_columns(self):
+        cat = _build_catalog(["file_a.dss"])
+        mgr = _SchemaStubManager(cat)
+        widths = mgr.get_table_column_width_map()
+
+        assert widths["B"] == "20%"
+        assert widths["C"] == "20%"
+        assert widths["E"] == "15%"
 
 
 # ---------------------------------------------------------------------------

@@ -466,19 +466,125 @@ class RegistryUIManager(TimeSeriesDataUIManager):
     def get_time_range(self, dfcat):
         return self.time_range
 
-    def _get_table_column_width_map(self):
+    def _get_dynamic_table_df(self):
+        try:
+            return self.get_data_catalog()
+        except Exception:
+            return self._display_dfcat
+
+    def _is_effectively_empty_column(self, series: pd.Series) -> bool:
+        if series.isna().all():
+            return True
+        non_na = series.dropna()
+        if non_na.empty:
+            return True
+        # Treat blank strings and common textual null spellings as empty.
+        as_text = non_na.astype(str).str.strip().str.lower()
+        return as_text.isin({"", "nan", "none", "null"}).all()
+
+    def get_table_schema(self, df: pd.DataFrame | None = None) -> dict:
+        if df is None:
+            df = self._get_dynamic_table_df()
+
+        required = ["station", "variable", "ref_type"]
+        excluded = {"geometry", "source", "source_num", *required}
+        optional = [c for c in df.columns if c not in excluded]
+
         return {
-            "station": "20%",
-            "variable": "15%",
-            "ref_type": "12%",
+            "required_columns": required,
+            "optional_columns": optional,
+            "hidden_by_default": ["ref_type"],
+            "drop_if_all_null": True,
+            "column_widths": {
+                "station": "20%",
+                "variable": "15%",
+                "ref_type": "12%",
+            },
+            "filters": {
+                "station": {"type": "input", "func": "like", "placeholder": "Enter match"},
+                "variable": {"type": "input", "func": "like", "placeholder": "Enter match"},
+                "ref_type": {"type": "input", "func": "like", "placeholder": "Enter match"},
+            },
         }
 
+    def _resolve_table_columns_from_schema(self, df: pd.DataFrame, schema: dict) -> list[str]:
+        required = list(schema.get("required_columns", []))
+        optional = list(schema.get("optional_columns", []))
+        drop_if_all_null = bool(schema.get("drop_if_all_null", False))
+
+        columns = []
+        seen = set()
+        for col in required + optional:
+            if col in seen or col not in df.columns:
+                continue
+            if drop_if_all_null and col in optional and self._is_effectively_empty_column(df[col]):
+                continue
+            columns.append(col)
+            seen.add(col)
+        return columns
+
+    def get_dynamic_table_columns(self, df: pd.DataFrame) -> list[str]:
+        """Return dynamic metadata columns to expose in the table.
+
+        Subclasses should override this method to provide explicit column
+        ownership (ordering, inclusion/exclusion).  The default keeps any
+        non-empty metadata columns from the current catalog DataFrame.
+        """
+        schema = self.get_table_schema(df)
+        resolved = self._resolve_table_columns_from_schema(df, schema)
+        required = set(schema.get("required_columns", []))
+        return [c for c in resolved if c not in required]
+
+    def get_dynamic_column_width(self, col: str, series: pd.Series) -> str:
+        """Return a default width for a dynamic metadata column.
+
+        Subclasses may override to provide domain-specific sizing.
+        """
+        dtype = series.dtype
+        if pd.api.types.is_bool_dtype(dtype):
+            return "7%"
+        if pd.api.types.is_numeric_dtype(dtype):
+            return "8%"
+        return "10%"
+
+    def _iter_dynamic_table_columns(self):
+        df = self._get_dynamic_table_df()
+        if not hasattr(df, "columns"):
+            return []
+        return self.get_dynamic_table_columns(df)
+
+    def _get_table_column_width_map(self):
+        df = self._get_dynamic_table_df()
+        schema = self.get_table_schema(df)
+        column_widths = dict(schema.get("column_widths", {}))
+
+        for col in self._resolve_table_columns_from_schema(df, schema):
+            if col not in column_widths:
+                series = df[col] if hasattr(df, "columns") and col in df.columns else pd.Series(dtype=object)
+                column_widths[col] = self.get_dynamic_column_width(col, series)
+        return column_widths
+
     def get_table_filters(self):
-        return {
-            "station": {"type": "input", "func": "like", "placeholder": "Enter match"},
-            "variable": {"type": "input", "func": "like", "placeholder": "Enter match"},
-            "ref_type": {"type": "input", "func": "like", "placeholder": "Enter match"},
-        }
+        df = self._get_dynamic_table_df()
+        schema = self.get_table_schema(df)
+        filters = dict(schema.get("filters", {}))
+        # Keep filters aligned with dynamically visible columns.
+        for col in self._resolve_table_columns_from_schema(df, schema):
+            if col in ("geometry",):
+                continue
+            if col not in filters:
+                filters[col] = {
+                    "type": "input",
+                    "func": "like",
+                    "placeholder": "Enter match",
+                }
+        return filters
+
+    def get_hidden_table_columns(self, df: pd.DataFrame | None = None) -> list[str]:
+        if df is None:
+            df = self._get_dynamic_table_df()
+        schema = self.get_table_schema(df)
+        return [c for c in schema.get("hidden_by_default", []) if c in df.columns]
 
     def is_irregular(self, r):
         return False

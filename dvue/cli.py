@@ -241,9 +241,16 @@ def ui_command(files, plugins, port, desktop):
     1. **Entry points** — all plugins registered in the ``dvue.plugins`` entry
        point group are auto-discovered and loaded automatically. This happens
        without any CLI flags required.
-    2. **Explicit --plugin flags** — modules specified via ``--plugin MODULE``
-       are imported in order.  These may override extension mappings from
-       entry-point plugins (last-write-wins).
+     2. **Explicit --plugin flags** — modules specified via ``--plugin MODULE``
+         are imported in order.  These may override extension mappings from
+         entry-point plugins (last-write-wins).
+
+     **Manager selection**
+
+     ``dvue ui`` always defaults to
+     :class:`~dvue.registry_ui.RegistryUIManager` for predictable behavior.
+     A plugin can override the manager only when provided explicitly via
+     ``--plugin`` and exporting ``DVueUIManager``.
 
     **Examples**
 
@@ -292,34 +299,13 @@ def ui_command(files, plugins, port, desktop):
     manager_cls = RegistryUIManager
     effective_crs = None
 
-    # Check auto-loaded entry-point plugin modules for manager/CRS hints.
-    # Explicit --plugin args (checked below) take precedence over these.
-    try:
-        try:
-            from importlib.metadata import entry_points as _ep_fn
-        except ImportError:
-            import importlib_metadata as _im  # type: ignore[import]
-            _ep_fn = _im.entry_points
-        try:
-            _ep_group = _ep_fn(group="dvue.plugins")
-        except TypeError:
-            _ep_group = _ep_fn().get("dvue.plugins", [])
-        for _ep in _ep_group:
-            try:
-                _mod_name = _ep.value.split(":")[0]
-                _mod = importlib.import_module(_mod_name)
-                if hasattr(_mod, "DVueUIManager"):
-                    manager_cls = getattr(_mod, "DVueUIManager")
-                if hasattr(_mod, "DVueUI_CRS"):
-                    effective_crs = getattr(_mod, "DVueUI_CRS")
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Entry-point plugins register readers only.
+    # Manager/CRS overrides must be explicit via --plugin to keep
+    # dvue ui behavior deterministic across environments.
 
     for mod in plugin_modules:
         # Optional plugin hook: module-level manager override.
-        # Last plugin wins when multiple plugins provide this symbol.
+        # Last explicit --plugin wins when multiple plugins provide this symbol.
         if hasattr(mod, "DVueUIManager"):
             manager_cls = getattr(mod, "DVueUIManager")
         # Optional plugin hook: module-level map CRS override.

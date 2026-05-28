@@ -402,6 +402,34 @@ class DataUIManager(DataProvider):
         """
         return list(self.get_table_column_width_map().keys())
 
+    def get_table_schema(self, df: pd.DataFrame | None = None) -> dict:
+        """Return a formal table schema contract.
+
+        Subclasses can override this to explicitly declare column ownership.
+        Supported keys:
+        - ``required_columns``: ordered columns always shown when present
+        - ``optional_columns``: ordered candidate columns
+        - ``hidden_by_default``: columns hidden at startup
+        - ``drop_if_all_null``: whether optional all-null columns are dropped
+        - ``column_widths``: explicit width map (``{"col": "10%"}``)
+        - ``filters``: explicit filter config map
+
+        The default implementation preserves existing behavior by deriving
+        widths/filters from legacy hooks.
+        """
+        return {
+            "required_columns": self.get_table_columns(),
+            "optional_columns": [],
+            "hidden_by_default": [],
+            "drop_if_all_null": False,
+            "column_widths": self.get_table_column_width_map(),
+            "filters": self.get_table_filters(),
+        }
+
+    def get_hidden_table_columns(self, df: pd.DataFrame | None = None) -> list[str]:
+        """Return columns that should be hidden when the table first renders."""
+        return []
+
     def get_table_column_width_map(self) -> dict:
         """
         Return a dictionary mapping column names to width strings (e.g., '10%').
@@ -1118,11 +1146,12 @@ class DataUI(param.Parameterized):
             dfs = dfs.astype(_dtype_convert)
         # Determine which columns to hide initially.  ref_type is hidden when
         # all rows share the same type (homogeneous catalog).
-        initial_hidden = []
+        initial_hidden = list(self._dataui_manager.get_hidden_table_columns(dfs) or [])
         if "ref_type" in dfs.columns:
             from dvue.tsdataui import TimeSeriesDataUIManager
             if not TimeSeriesDataUIManager._has_mixed_ref_types(dfs):
-                initial_hidden = ["ref_type"]
+                if "ref_type" not in initial_hidden:
+                    initial_hidden.append("ref_type")
         self.display_table = pn.widgets.Tabulator(
             dfs,
             disabled=True,
