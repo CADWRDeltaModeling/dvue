@@ -328,7 +328,13 @@ class TimeSeriesDataUIManager(DataUIManager):
         raise NotImplementedError("Method get_time_range not implemented")
 
     def get_table_filters(self):
-        raise NotImplementedError("Method get_table_filters not implemented")
+        """Return filter specs for table columns.
+
+        The default proxies to ``get_table_schema()["filters"]``.
+        Legacy subclasses that override this method directly still work;
+        subclasses that override ``get_table_schema()`` get filters from there.
+        """
+        return dict(self.get_table_schema().get("filters", {}))
 
     def _get_table_column_width_map(self) -> dict:
         """Hook for subclasses to declare column widths.
@@ -837,7 +843,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             "hidden_by_default": hidden_by_default,
             "drop_if_all_null": False,
             "column_widths": column_width_map,
-            "filters": self.get_table_filters(),
+            "filters": {},  # not populated in default; subclasses provide via get_table_schema()
         }
 
     @staticmethod

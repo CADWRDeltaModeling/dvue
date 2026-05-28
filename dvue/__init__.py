@@ -40,6 +40,7 @@ from .readers import (
 from .session_persistence import make_reset_session_button, SessionManager
 from .registry import ReaderRegistry
 from .registry_ui import RegistryUIManager, RegistryPlotAction
+from .views import ViewDefinition, ViewsManager
 
 __all__ = [
     # UI layer
@@ -80,4 +81,7 @@ __all__ = [
     "ReaderRegistry",
     "RegistryUIManager",
     "RegistryPlotAction",
+    # Catalog views
+    "ViewDefinition",
+    "ViewsManager",
 ]

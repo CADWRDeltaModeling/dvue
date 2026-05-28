@@ -43,6 +43,7 @@ import logging
 import urllib.parse
 from .utils import full_stack
 from .catalog import DataCatalog, DataReference, CatalogView  # noqa: F401 – exposed for subclasses
+from .views import ViewsManager, create_views_tab
 
 # ---------------------------------------------------------------------------
 # Standard DWR disclaimer — import and assign to disclaimer_text on any
@@ -414,16 +415,18 @@ class DataUIManager(DataProvider):
         - ``column_widths``: explicit width map (``{"col": "10%"}``)
         - ``filters``: explicit filter config map
 
-        The default implementation preserves existing behavior by deriving
-        widths/filters from legacy hooks.
+        The default returns an empty schema.  Subclasses should override this
+        directly to declare column ownership.  Legacy subclasses that override
+        ``get_table_column_width_map()`` and ``get_table_filters()`` still work
+        because those public methods are called directly by the framework.
         """
         return {
-            "required_columns": self.get_table_columns(),
+            "required_columns": [],
             "optional_columns": [],
             "hidden_by_default": [],
             "drop_if_all_null": False,
-            "column_widths": self.get_table_column_width_map(),
-            "filters": self.get_table_filters(),
+            "column_widths": {},
+            "filters": {},
         }
 
     def get_hidden_table_columns(self, df: pd.DataFrame | None = None) -> list[str]:
@@ -431,22 +434,22 @@ class DataUIManager(DataProvider):
         return []
 
     def get_table_column_width_map(self) -> dict:
-        """
-        Return a dictionary mapping column names to width strings (e.g., '10%').
+        """Return a dict mapping column names to width strings (e.g. ``'10%'``).
 
-        You must override this in your subclass.
+        The default proxies to ``get_table_schema()["column_widths"]``.
+        Legacy subclasses that override this method directly still work
+        because Python's MRO will call the override, not this base.
         """
-        raise NotImplementedError(
-            "You must implement get_table_column_width_map() in your subclass."
-        )
+        return dict(self.get_table_schema().get("column_widths", {}))
 
     def get_table_filters(self) -> dict:
-        """
-        Return a dictionary specifying filter widgets for each column.
+        """Return a dict specifying filter widgets for each column.
 
-        You must override this in your subclass.
+        The default proxies to ``get_table_schema()["filters"]``.
+        Legacy subclasses that override this method directly still work
+        because Python's MRO will call the override, not this base.
         """
-        raise NotImplementedError("You must implement get_table_filters() in your subclass.")
+        return dict(self.get_table_schema().get("filters", {}))
 
     @lru_cache(maxsize=128)
     def get_no_selection_message(self) -> str:
@@ -659,7 +662,9 @@ class DataUI(param.Parameterized):
         super().__init__(**kwargs)
         self._dataui_manager = dataui_manager
         self._dataui_manager._dataui = self  # insert a reference to self in the dataui_manager for progress bar updates for example
-        self._dfcat = self._dataui_manager.get_data_catalog()
+        self._dfcat_full = self._dataui_manager.get_data_catalog()
+        self._dfcat = self._dfcat_full
+        self._views_manager = ViewsManager()
         self.param.map_color_category.objects = self._dataui_manager.get_map_color_columns() or []
         if self.param.map_color_category.objects:
             self.map_color_category = self.param.map_color_category.objects[0]
@@ -1498,6 +1503,28 @@ class DataUI(param.Parameterized):
                         "Action sidebar setup failed for %r: %s", action.get("name"), exc
                     )
 
+    def _refresh_table_from_view(self, event=None) -> None:
+        """Update the Tabulator to show only rows matching the active view.
+
+        Called when :attr:`ViewsManager.active_view` changes or when a view
+        definition is modified (Apply button in the Views tab).  Resets the
+        table selection so stale positional indices don't carry over.
+        """
+        if not hasattr(self, "display_table"):
+            return
+        filtered = self._views_manager.filter_dataframe(self._dfcat_full)
+        self._dfcat = filtered
+        # Normalise to plain DataFrame (Tabulator can't JSON-serialise geometry)
+        try:
+            import geopandas as gpd
+            tbl_df = pd.DataFrame(filtered) if isinstance(filtered, gpd.GeoDataFrame) else filtered
+        except ImportError:
+            tbl_df = filtered
+        # Reindex to exactly the columns the Tabulator was initialised with
+        tbl_cols = self.display_table.value.columns
+        tbl_df = tbl_df.reindex(columns=tbl_cols)
+        self.display_table.param.update(value=tbl_df, selection=[])
+
     def show_in_display_panel(self, title, content):
         """Add *content* as a closable tab in the display panel.
 
@@ -1778,7 +1805,7 @@ class DataUI(param.Parameterized):
                 sizing_mode="stretch_width",
             )
 
-            # Build a flat tab list: Time / Transform / Plot / Map / Table
+            # Build a flat tab list: Time / Transform / Plot / Map / Table / Views
             _ctrl = self._dataui_manager.get_widgets()
             if isinstance(_ctrl, dict) and _ctrl:
                 _ctrl_tabs = list(_ctrl.items())
@@ -1788,6 +1815,7 @@ class DataUI(param.Parameterized):
                 _ctrl_tabs = []
             _ctrl_tabs.append(("Map", map_view))
             _ctrl_tabs.append(("Table", table_options))
+            _ctrl_tabs.append(("Views", create_views_tab(self)))
             self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
             sidebar_view = pn.Column(
                 self._sidebar_tabs,
@@ -1804,6 +1832,7 @@ class DataUI(param.Parameterized):
             else:
                 _ctrl_tabs = []
             _ctrl_tabs.append(("Table", table_options))
+            _ctrl_tabs.append(("Views", create_views_tab(self)))
             self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
             sidebar_view = pn.Column(
                 self._sidebar_tabs,
@@ -1811,6 +1840,8 @@ class DataUI(param.Parameterized):
                 self._status_label,
                 sizing_mode="stretch_both",
             )
+        # Wire view switching → table refresh.
+        self._views_manager.param.watch(self._refresh_table_from_view, "active_view")
         # Let actions inject their sidebar tabs now that _sidebar_tabs exists.
         self._setup_action_sidebars()
         # Append the view-navigation widget to the right end of the action

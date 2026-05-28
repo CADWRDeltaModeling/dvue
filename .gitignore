@@ -66,3 +66,5 @@ src/dvue/_version.py
 .DS_Store
 dvue/_version.py
 .vscode/settings.json
+junit.xml
+cache.db
