@@ -119,6 +119,33 @@ class DataReferenceReader(abc.ABC):
         )
 
     @classmethod
+    def catalog_crs(cls) -> Optional[str]:
+        """Return the EPSG string for the CRS of geometry produced by :meth:`scan`.
+
+        The default returns ``None`` (no geometry / CRS unknown).  Override in
+        subclasses that embed georeferenced geometry in the refs they produce
+        via :meth:`scan` so that :class:`~dvue.registry_ui.RegistryUIManager`
+        can wire the CRS automatically into both the
+        :class:`~dvue.catalog.DataCatalog` and the map view.
+
+        Returns
+        -------
+        str or None
+            An EPSG authority string such as ``"EPSG:4326"`` or
+            ``"EPSG:32610"``, or ``None`` when geometry is absent.
+
+        Example
+        -------
+        ::
+
+            class MyReader(DataReferenceReader):
+                @classmethod
+                def catalog_crs(cls) -> str:
+                    return "EPSG:4326"
+        """
+        return None
+
+    @classmethod
     def fqcn(cls) -> str:
         """Return the fully qualified class name (``\"module.ClassName\"")."""
         return f"{cls.__module__}.{cls.__qualname__}"

@@ -28,6 +28,7 @@ Customisation hooks
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, List
 
 import pandas as pd
@@ -434,6 +435,34 @@ class RegistryUIManager(TimeSeriesDataUIManager):
 
             n_added = len(self._dvue_catalog) - n_before
             if n_added > 0:
+                # Apply reader-declared CRS to catalog and manager when not yet set.
+                # This lets readers that embed geometry in refs (e.g. CDEC) declare
+                # their EPSG string once via catalog_crs() and have it propagate
+                # automatically to the map rendering layer.
+                reader_class = ReaderRegistry._registry.get(
+                    forced_ref_type
+                    or ReaderRegistry._extension_map.get(
+                        os.path.splitext(path)[1].lower()
+                    )
+                )
+                if reader_class is not None:
+                    reader_crs_str = reader_class.catalog_crs()
+                    if reader_crs_str and self._dvue_catalog._crs is None:
+                        self._dvue_catalog._crs = reader_crs_str
+                    if reader_crs_str and self.crs is None:
+                        try:
+                            import cartopy.crs as _ccrs
+                            from pyproj import CRS as _CRS
+                            epsg = _CRS.from_user_input(reader_crs_str).to_epsg()
+                            if epsg:
+                                self.crs = _ccrs.epsg(str(epsg))
+                        except Exception as _crs_exc:
+                            logger.debug(
+                                "%s: could not convert %r to cartopy CRS: %s",
+                                type(self).__name__,
+                                reader_crs_str,
+                                _crs_exc,
+                            )
                 self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
                 self.on_file_added(path, refs)
                 added_paths.append(source_spec)
