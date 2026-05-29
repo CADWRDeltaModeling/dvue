@@ -81,7 +81,20 @@ class PlotAction:
 
         # Capture doc + selection snapshot before entering the thread.
         doc = pn.state.curdoc
-        dfselected = dataui._dfcat.iloc[dataui.display_table.selection].copy()
+        # Resolve the selected rows from the *full* catalog (_dfcat) so that
+        # all catalog columns (including 'name', 'FILE', etc.) are available
+        # to get_data_reference().  display_table.selected_dataframe only
+        # contains the columns in display_table.value, which is limited to
+        # get_table_columns() — it omits hidden catalog metadata columns.
+        #
+        # current_view.iloc[selection] correctly resolves filter-relative
+        # row indices (fixing the earlier bug where _dfcat.iloc[selection]
+        # used unfiltered indices against a filtered selection).  We then
+        # use .loc[...index...] on _dfcat to retrieve the full rows.
+        _selection = dataui.display_table.selection
+        _current_view = dataui.display_table.current_view
+        _sel_index = _current_view.iloc[_selection].index
+        dfselected = dataui._dfcat.loc[_sel_index].copy()
         manager = dataui._dataui_manager
         total = len(dfselected)
 
@@ -239,7 +252,7 @@ class DownloadDataAction:
             return None
 
         doc = pn.state.curdoc
-        dfselected = dataui._dfcat.iloc[dataui.display_table.selection].copy()
+        dfselected = dataui.display_table.selected_dataframe.copy()
         total = len(dfselected)
 
         dataui._display_panel.loading = True
@@ -573,7 +586,7 @@ class TransformToCatalogAction:
 
         from .math_reference import MathDataReference
 
-        selected_rows = dataui._dfcat.iloc[dataui.display_table.selection]
+        selected_rows = dataui.display_table.selected_dataframe
         added_names = []
         id_col = self._get_id_column(manager, catalog)
 
@@ -923,7 +936,7 @@ class SourceCompareAction:
                 )
             return
 
-        dfselected = dataui._dfcat.iloc[dataui.display_table.selection].copy()
+        dfselected = dataui.display_table.selected_dataframe.copy()
         if "name" not in dfselected.columns:
             dfselected = dfselected.reset_index()
 

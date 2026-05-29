@@ -1047,17 +1047,17 @@ class TimeSeriesDataUIManager(DataUIManager):
         style_maps = {"color": None, "line": None, "marker": None}
 
         # Color map
-        if self.color_cycle_column:
+        if self.color_cycle_column and self.color_cycle_column in df.columns:
             color_values = df[self.color_cycle_column].unique()
             style_maps["color"] = self.get_color_style_mapping(color_values)
 
         # Line style map
-        if self.dashed_line_cycle_column:
+        if self.dashed_line_cycle_column and self.dashed_line_cycle_column in df.columns:
             line_style_values = df[self.dashed_line_cycle_column].unique()
             style_maps["line"] = self.get_line_style_mapping(line_style_values)
 
         # Marker map
-        if self.marker_cycle_column:
+        if self.marker_cycle_column and self.marker_cycle_column in df.columns:
             marker_values = df[self.marker_cycle_column].unique()
             style_maps["marker"] = self.get_marker_style_mapping(marker_values)
 

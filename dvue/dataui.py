@@ -758,6 +758,7 @@ class DataUI(param.Parameterized):
             if isinstance(dfmap, gpd.GeoDataFrame):
                 if dfmap.empty:
                     # Keep an empty but valid Points element so map widgets still render.
+                    self._map_source_df = pd.DataFrame(columns=["__x__", "__y__"])
                     self._map_features = gv.Points(
                         pd.DataFrame(columns=["__x__", "__y__"]),
                         kdims=["__x__", "__y__"],
@@ -799,14 +800,18 @@ class DataUI(param.Parameterized):
                     ]
                     dfpts = dfpts[scalar_cols]
                     self._map_features = gv.Points(dfpts, kdims=["__x__", "__y__"], crs=_pts_crs)
+                    self._map_source_df = dfpts  # one row per feature
                 elif "linestring" in geom_type:
                     self._map_features = gv.Path(dfmap, crs=crs)
+                    self._map_source_df = pd.DataFrame(dfmap.drop(columns=["geometry"]))  # one row per path
                 elif "polygon" in geom_type:
                     self._map_features = gv.Polygons(dfmap, crs=crs)
+                    self._map_source_df = pd.DataFrame(dfmap.drop(columns=["geometry"]))  # one row per polygon
                 else:  # pragma: no cover
                     raise ValueError("Unknown geometry type " + geom_type)
         except Exception as e:
             logger.error(f"Error building map of features: {e}")
+            self._map_source_df = pd.DataFrame(columns=["__x__", "__y__"])
             self._map_features = gv.Points(
                 pd.DataFrame(columns=["__x__", "__y__"]),
                 kdims=["__x__", "__y__"],
@@ -816,15 +821,42 @@ class DataUI(param.Parameterized):
             if color_dict is not None:
                 # Use pre-computed color column — Bokeh 3.9+ accepts a plain field
                 # reference; dim().categorize() is rejected by strict DataSpec validation.
-                self._map_features = self._map_features.opts(color=_COLOR_COL)
+                if isinstance(self._map_features, gv.Points):
+                    self._map_features = self._map_features.opts(color=_COLOR_COL)
+                elif isinstance(self._map_features, gv.Path):
+                    self._map_features = self._map_features.opts(line_color=_COLOR_COL)
+                elif isinstance(self._map_features, gv.Polygons):
+                    self._map_features = self._map_features.opts(fill_color=_COLOR_COL)
+                else:
+                    self._map_features = self._map_features.opts(color=_COLOR_COL)
             else:
                 # Named colormap string (e.g. "Category10", "Viridis") — HoloViews
                 # routes this through a proper Bokeh ColorMapper, which is accepted.
-                self._map_features = self._map_features.opts(
-                    color=dim(color_by), cmap=column_color
-                )
+                if isinstance(self._map_features, gv.Points):
+                    self._map_features = self._map_features.opts(
+                        color=dim(color_by), cmap=column_color
+                    )
+                elif isinstance(self._map_features, gv.Path):
+                    self._map_features = self._map_features.opts(
+                        line_color=dim(color_by), cmap=column_color
+                    )
+                elif isinstance(self._map_features, gv.Polygons):
+                    self._map_features = self._map_features.opts(
+                        fill_color=dim(color_by), cmap=column_color
+                    )
+                else:
+                    self._map_features = self._map_features.opts(
+                        color=dim(color_by), cmap=column_color
+                    )
         else:
-            self._map_features = self._map_features.opts(color="blue")
+            if isinstance(self._map_features, gv.Points):
+                self._map_features = self._map_features.opts(color="blue")
+            elif isinstance(self._map_features, gv.Path):
+                self._map_features = self._map_features.opts(line_color="blue")
+            elif isinstance(self._map_features, gv.Polygons):
+                self._map_features = self._map_features.opts(fill_color="blue")
+            else:
+                self._map_features = self._map_features.opts(color="blue")
         if isinstance(self._map_features, gv.Points):
             self._map_features = self._map_features.opts(
                 opts.Points(
@@ -1046,7 +1078,12 @@ class DataUI(param.Parameterized):
 
         # Guard against stale indices from Selection1D when the map has been redrawn
         # with fewer features (e.g. after a filter change or catalog rebuild).
-        map_df = self._map_features.dframe()
+        # Use the stored source DataFrame (one row per feature) rather than .dframe(),
+        # which returns vertex-level rows for gv.Path (many rows per feature) and
+        # would map Selection1D path-indices to the wrong catalog rows.
+        map_df = getattr(self, "_map_source_df", None)
+        if map_df is None:
+            map_df = self._map_features.dframe()
         n_map = len(map_df)
         index = [i for i in index if 0 <= i < n_map]
         if not index:
