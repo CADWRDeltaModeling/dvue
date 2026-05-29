@@ -769,9 +769,26 @@ class DataUI(param.Parameterized):
                     # Passing a GeoDataFrame directly to gv.Points fails in newer
                     # geoviews versions (GeomDictInterface "non-flat" error during
                     # projection).  Extract explicit x/y columns to work around it.
-                    dfpts = dfmap.copy()
-                    dfpts["__x__"] = dfmap.geometry.x
-                    dfpts["__y__"] = dfmap.geometry.y
+                    #
+                    # Pre-project geographic (lat/lon, e.g. EPSG:4326) data to Web
+                    # Mercator so GeoViews does not need to re-project at render time.
+                    # This avoids two problems:
+                    #   1. The ~28 km northing offset that arises when cartopy maps
+                    #      PlateCarree (WGS84 ellipsoid) to spherical Web Mercator.
+                    #   2. AttributeError: 'Geodetic' has no 'y_limits' in
+                    #      geoviews.util.project_extents.
+                    _dfmap_pts = dfmap
+                    _pts_crs = crs
+                    if (
+                        isinstance(dfmap, gpd.GeoDataFrame)
+                        and dfmap.crs is not None
+                        and dfmap.crs.is_geographic
+                    ):
+                        _dfmap_pts = dfmap.to_crs("EPSG:3857")
+                        _pts_crs = ccrs.GOOGLE_MERCATOR
+                    dfpts = _dfmap_pts.copy()
+                    dfpts["__x__"] = _dfmap_pts.geometry.x
+                    dfpts["__y__"] = _dfmap_pts.geometry.y
                     dfpts = dfpts.drop(columns=["geometry"])
                     # Drop columns containing non-scalar objects (e.g. reader instances
                     # stored in the 'source' attribute) that pandas cannot sort/compare.
@@ -781,7 +798,7 @@ class DataUI(param.Parameterized):
                         or dfpts[c].map(lambda v: isinstance(v, (str, type(None)))).all()
                     ]
                     dfpts = dfpts[scalar_cols]
-                    self._map_features = gv.Points(dfpts, kdims=["__x__", "__y__"], crs=crs)
+                    self._map_features = gv.Points(dfpts, kdims=["__x__", "__y__"], crs=_pts_crs)
                 elif "linestring" in geom_type:
                     self._map_features = gv.Path(dfmap, crs=crs)
                 elif "polygon" in geom_type:
