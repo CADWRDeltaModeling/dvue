@@ -120,7 +120,7 @@ class TimeSeriesDataUIManager(DataUIManager):
     )
     regular_curve_connection = param.Selector(
         objects=["linear", "steps-pre", "steps-post", "steps-mid"],
-        default="steps-post",
+        default="linear",
         doc="Curve connection method for regular period type data",
     )
     sensible_range_yaxis = param.Boolean(
