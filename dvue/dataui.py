@@ -660,6 +660,14 @@ class DataUI(param.Parameterized):
         default=False,
         doc="Use regex for table filtering instead of 'like' functionality",
     )
+    map_filters_table = param.Boolean(
+        default=True,
+        doc="When enabled, map clicks filter the table rows instead of highlighting them. The map is unaffected by table changes in this mode.",
+    )
+    # --- Proxy params: only updated when map_filters_table=False so the map
+    # DynamicMap is decoupled from table events while filter mode is active. ---
+    _map_sel_proxy = param.List(default=[], precedence=-1)
+    _map_filter_proxy = param.Integer(default=0, precedence=-1)
 
     def __init__(self, dataui_manager, crs=ccrs.PlateCarree(), station_id_column=None, **kwargs):
         self._crs = crs
@@ -678,6 +686,7 @@ class DataUI(param.Parameterized):
             self.map_marker_category = self.param.map_marker_category.objects[0]
         self._dfmapcat = self._get_map_catalog()
         self._map_filter_station_ids = None
+        self._dfcat_before_map_filter = None
 
         if isinstance(self._dfcat, gpd.GeoDataFrame):
             self._tmap = gv.tile_sources.CartoLight()
@@ -892,12 +901,11 @@ class DataUI(param.Parameterized):
         show_marker_by,
         marker_by,
         query,
-        filters,
         selection,
         map_default_span,
         map_non_selection_alpha,
         map_point_size,
-        map_filters_table=False,
+        filters=None,  # not read directly; kept for call-site compatibility
     ):
         """Update the map features based on the selection in the table or filters or query. Also updates if the color or marker by columns are changed"""
         query = query.strip()
@@ -1068,7 +1076,8 @@ class DataUI(param.Parameterized):
         if index is None or (len(index) == 1 and index[0] == -1):
             return
 
-        # In filter mode: filter the table instead of selecting rows
+        # In filter mode: filter the table to selected map features instead of
+        # highlighting rows.  The map itself is not rebuilt.
         if self.map_filters_table:
             self._apply_map_filter(index)
             return
@@ -1133,6 +1142,77 @@ class DataUI(param.Parameterized):
             selected_indices = sorted(set(non_geo_positions + geo_selected_indices))
         # with param.discard_events(table.param.selection):
         table.param.update(selection=selected_indices)
+
+    # ------------------------------------------------------------------
+    # Map-filter-table helpers
+    # ------------------------------------------------------------------
+
+    def _get_table_df_for_display(self, df):
+        """Return *df* as a plain DataFrame with the Tabulator's current column set."""
+        try:
+            tbl_df = pd.DataFrame(df) if isinstance(df, gpd.GeoDataFrame) else df
+        except Exception:
+            tbl_df = df
+        return tbl_df.reindex(columns=self.display_table.value.columns)
+
+    def _refresh_table_with_map_filter(self):
+        """Restrict the catalog and table to rows matching ``_map_filter_station_ids``."""
+        ids = self._map_filter_station_ids
+        if ids is None:
+            return
+        # Save the pre-filter catalog once so we can restore it on clear.
+        if self._dfcat_before_map_filter is None:
+            self._dfcat_before_map_filter = self._dfcat
+        full = self._dfcat_before_map_filter
+        idcol = self._station_id_column
+        if idcol and idcol in full.columns:
+            filtered = full[full[idcol].isin(ids)]
+        else:
+            filtered = full.loc[full.index.isin(ids)]
+        # Keep _dfcat in sync with display_table.value so _dfcat.iloc[selection]
+        # in actions always refers to the correct rows.
+        self._dfcat = filtered
+        self.display_table.param.update(value=self._get_table_df_for_display(filtered), selection=[])
+
+    def _clear_map_filter(self):
+        """Restore the pre-filter catalog and table."""
+        if self._map_filter_station_ids is None:
+            return
+        self._map_filter_station_ids = None
+        if self._dfcat_before_map_filter is not None:
+            self._dfcat = self._dfcat_before_map_filter
+            self._dfcat_before_map_filter = None
+        self.display_table.param.update(value=self._get_table_df_for_display(self._dfcat), selection=[])
+
+    def _apply_map_filter(self, index):
+        """Filter the table to map features at *index*; clear filter on empty click."""
+        if not index:
+            self._clear_map_filter()
+            return
+        map_df = self._map_features.dframe()
+        n_map = len(map_df)
+        index = [i for i in index if 0 <= i < n_map]
+        if not index:
+            self._clear_map_filter()
+            return
+        # Use the pre-filter catalog as the source of truth so successive clicks
+        # always filter from the full (view-filtered) catalog, not a sub-filter.
+        src = self._dfcat_before_map_filter if self._dfcat_before_map_filter is not None else self._dfcat
+        idcol = self._station_id_column
+        if idcol and idcol in src.columns:
+            self._map_filter_station_ids = set(map_df.iloc[index][idcol].tolist())
+        else:
+            dfs = map_df.iloc[index]
+            merged_indices = src.reset_index().merge(dfs)["index"].to_list()
+            self._map_filter_station_ids = set(merged_indices)
+        self._refresh_table_with_map_filter()
+
+    def _on_map_filter_mode_changed(self, event):
+        """Restore normal table when filter mode is toggled off."""
+        if not event.new:  # switched OFF
+            self._clear_map_filter()
+            # Re-sync proxy so map highlights reflect current table selection immediately.
+            self._map_sel_proxy = list(self.display_table.selection)
 
     def create_data_actions(self, actions):
         action_buttons = []
@@ -1665,10 +1745,9 @@ class DataUI(param.Parameterized):
         """
         if not hasattr(self, "display_table"):
             return
-        # Clear any active map filter so it does not persist into the new view.
-        if getattr(self, "_map_filter_station_ids", None) is not None:
-            self._map_filter_station_ids = None
-            notifications.info("Map filter cleared — catalog view changed.")
+        # Discard any active map filter — the view is being replaced.
+        self._map_filter_station_ids = None
+        self._dfcat_before_map_filter = None
         filtered = self._views_manager.filter_dataframe(self._dfcat_full)
         self._dfcat = filtered
         # Normalise to plain DataFrame (Tabulator can't JSON-serialise geometry)
@@ -1870,6 +1949,7 @@ class DataUI(param.Parameterized):
                 self.param.map_point_size,
                 self.param.query,
                 self.param.map_filters_table,
+                self.param.map_filters_table,
             ]
             if _extra_map_widgets is not None:
                 _map_option_items.append(_extra_map_widgets)
@@ -1898,16 +1978,14 @@ class DataUI(param.Parameterized):
                     "map_default_span",
                     "map_non_selection_alpha",
                     "map_point_size",
-                    "map_filters_table",
-                    "_table_selection_for_map",
+                    "_map_sel_proxy",
+                    "_map_filter_proxy",
                 ],
             )
-            # selection is intentionally excluded: table row clicks are gated
-            # through _table_selection_for_map so filter mode can suppress them.
-            _table_stream = streams.Params(
-                parameterized=self.display_table,
-                parameters=["filters"],
-            )
+            # _table_stream is replaced by proxy params above.
+            # The proxies are only updated when map_filters_table=False, so the
+            # DynamicMap never rebuilds (and never fires a spurious Selection1D)
+            # while the map-filter mode is active.
 
             def _map_callback(
                 show_map_colors,
@@ -1918,9 +1996,8 @@ class DataUI(param.Parameterized):
                 map_default_span,
                 map_non_selection_alpha,
                 map_point_size,
-                map_filters_table,
-                _table_selection_for_map,
-                filters,
+                _map_sel_proxy,
+                _map_filter_proxy,
             ):
                 return self.update_map_features(
                     show_color_by=show_map_colors,
@@ -1928,18 +2005,29 @@ class DataUI(param.Parameterized):
                     show_marker_by=show_map_markers,
                     marker_by=map_marker_category,
                     query=query,
-                    filters=filters,
-                    selection=_table_selection_for_map,
+                    selection=_map_sel_proxy,
                     map_default_span=map_default_span,
                     map_non_selection_alpha=map_non_selection_alpha,
                     map_point_size=map_point_size,
                     map_filters_table=map_filters_table,
                 )
 
-            self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream, _table_stream])
+            self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream])
             self._station_select.source = self._map_function
             self._station_select.param.watch_values(self.select_data_catalog, "index")
-            self.display_table.param.watch(self._on_table_selection_changed, "selection")
+
+            # Wire table events → proxies (gated by map_filters_table mode)
+            def _on_tbl_selection(event):
+                if not self.map_filters_table:
+                    self._map_sel_proxy = list(event.new)
+
+            def _on_tbl_filters(event):
+                if not self.map_filters_table:
+                    self._map_filter_proxy += 1
+
+            self.display_table.param.watch(_on_tbl_selection, "selection")
+            self.display_table.param.watch(_on_tbl_filters, "filters")
+            self.param.watch(self._on_map_filter_mode_changed, "map_filters_table")
             map_tooltip = pn.widgets.TooltipIcon(
                 value="""Map of geographical features. Click on a feature to see data available in the table. <br/>
                 See <a href="https://docs.bokeh.org/en/latest/docs/user_guide/interaction/tools.html">Bokeh Tools</a> for toolbar operation"""
@@ -2173,13 +2261,9 @@ class DataUI(param.Parameterized):
                     "map_default_span",
                     "map_non_selection_alpha",
                     "map_point_size",
-                    "map_filters_table",
-                    "_table_selection_for_map",
+                    "_map_sel_proxy",
+                    "_map_filter_proxy",
                 ],
-            )
-            _table_stream = streams.Params(
-                parameterized=self.display_table,
-                parameters=["filters"],
             )
 
             def _map_callback(
@@ -2187,13 +2271,12 @@ class DataUI(param.Parameterized):
                 show_map_markers, map_marker_category,
                 query, map_default_span,
                 map_non_selection_alpha, map_point_size,
-                map_filters_table, _table_selection_for_map,
-                filters,
+                _map_sel_proxy, _map_filter_proxy,
             ):
                 return self.update_map_features(
                     show_color_by=show_map_colors, color_by=map_color_category,
                     show_marker_by=show_map_markers, marker_by=map_marker_category,
-                    query=query, filters=filters, selection=_table_selection_for_map,
+                    query=query, selection=_map_sel_proxy,
                     map_default_span=map_default_span,
                     map_non_selection_alpha=map_non_selection_alpha,
                     map_point_size=map_point_size,
@@ -2201,10 +2284,23 @@ class DataUI(param.Parameterized):
                 )
 
             self._map_function = hv.DynamicMap(
-                _map_callback, streams=[_self_stream, _table_stream]
+                _map_callback, streams=[_self_stream]
             )
             self._station_select.source = self._map_function
             self._station_select.param.watch_values(self.select_data_catalog, "index")
+
+            # Wire table events → proxies (gated by map_filters_table mode)
+            def _on_tbl_selection(event):
+                if not self.map_filters_table:
+                    self._map_sel_proxy = list(event.new)
+
+            def _on_tbl_filters(event):
+                if not self.map_filters_table:
+                    self._map_filter_proxy += 1
+
+            self.display_table.param.watch(_on_tbl_selection, "selection")
+            self.display_table.param.watch(_on_tbl_filters, "filters")
+            self.param.watch(self._on_map_filter_mode_changed, "map_filters_table")
 
             # Touch-friendly map — tap only, no lasso/box
             map_card = pn.Card(
@@ -2226,6 +2322,7 @@ class DataUI(param.Parameterized):
                         self.param.map_color_category,
                         self.param.map_point_size,
                         self.param.query,
+                        self.param.map_filters_table,
                     ),
                     title="Map Options",
                     collapsed=True,
