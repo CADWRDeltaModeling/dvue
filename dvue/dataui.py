@@ -646,11 +646,6 @@ class DataUI(param.Parameterized):
     map_default_span = param.Number(default=15000, doc="Default span for map zoom in meters")
     map_non_selection_alpha = param.Number(default=0.2, doc="Non selection alpha")
     map_point_size = param.Number(default=10, doc="Point size for map")
-    map_filters_table = param.Boolean(
-        default=True,
-        doc="When enabled, map selections filter the table rows instead of highlighting them. Table selections do not affect the map.",
-    )
-    _table_selection_for_map = param.List(default=[], precedence=-1)
 
     query = param.String(
         default="",
@@ -910,11 +905,10 @@ class DataUI(param.Parameterized):
         """Update the map features based on the selection in the table or filters or query. Also updates if the color or marker by columns are changed"""
         query = query.strip()
         dfs = self._get_map_catalog()
-        if map_filters_table:
+        if self.map_filters_table:
             # In filter mode the map is decoupled from the table: always show the
             # full map catalog (not restricted to display_table.current_view) and
-            # never highlight features based on table selection.  _table_selection_for_map
-            # is never updated while this mode is active, so selection is always [].
+            # never highlight features based on table selection while this mode is active.
             current_view = dfs
             if isinstance(current_view, gpd.GeoDataFrame):
                 current_view = current_view.loc[current_view.is_valid]
@@ -1032,18 +1026,13 @@ class DataUI(param.Parameterized):
         tbl_df = self._get_table_df_for_display(self._dfcat)
         self.display_table.param.update(value=tbl_df, selection=[])
 
-    def _on_table_selection_changed(self, event):
-        """Gate table-selection → map sync: only propagate when filter mode is off."""
-        if not self.map_filters_table:
-            self._table_selection_for_map = list(event.new)
-
     def _on_map_filter_mode_changed(self, event):
         """Restore normal table and re-sync map selection when filter mode is toggled off."""
         if not event.new:
             self._clear_map_filter()
             # Re-sync proxy param with current table selection so map highlights
             # immediately reflect any rows selected while filter mode was active.
-            self._table_selection_for_map = list(self.display_table.selection)
+            self._map_sel_proxy = list(self.display_table.selection)
 
     def _apply_map_filter(self, index):
         """Apply a filter to the table based on the *index* of selected map features.
@@ -1949,7 +1938,6 @@ class DataUI(param.Parameterized):
                 self.param.map_point_size,
                 self.param.query,
                 self.param.map_filters_table,
-                self.param.map_filters_table,
             ]
             if _extra_map_widgets is not None:
                 _map_option_items.append(_extra_map_widgets)
@@ -2009,7 +1997,6 @@ class DataUI(param.Parameterized):
                     map_default_span=map_default_span,
                     map_non_selection_alpha=map_non_selection_alpha,
                     map_point_size=map_point_size,
-                    map_filters_table=map_filters_table,
                 )
 
             self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream])
@@ -2280,7 +2267,6 @@ class DataUI(param.Parameterized):
                     map_default_span=map_default_span,
                     map_non_selection_alpha=map_non_selection_alpha,
                     map_point_size=map_point_size,
-                    map_filters_table=map_filters_table,
                 )
 
             self._map_function = hv.DynamicMap(

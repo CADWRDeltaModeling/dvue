@@ -87,13 +87,14 @@ class PlotAction:
         # contains the columns in display_table.value, which is limited to
         # get_table_columns() — it omits hidden catalog metadata columns.
         #
-        # current_view.iloc[selection] correctly resolves filter-relative
-        # row indices (fixing the earlier bug where _dfcat.iloc[selection]
-        # used unfiltered indices against a filtered selection).  We then
-        # use .loc[...index...] on _dfcat to retrieve the full rows.
+        # display_table.selection contains positional indices into
+        # display_table.value (Panel maps Bokeh ColumnDataSource row numbers
+        # back to value positions via _map_indexes).  Using current_view.iloc
+        # is wrong when header filters are active because current_view is a
+        # subset of value with different positional indices.
+        # display_table.value.iloc[selection] is always correct.
         _selection = dataui.display_table.selection
-        _current_view = dataui.display_table.current_view
-        _sel_index = _current_view.iloc[_selection].index
+        _sel_index = dataui.display_table.value.iloc[_selection].index
         dfselected = dataui._dfcat.loc[_sel_index].copy()
         manager = dataui._dataui_manager
         total = len(dfselected)
