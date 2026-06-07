@@ -85,6 +85,9 @@ class _StubManager(TimeSeriesDataUIManager):
     def get_time_range(self, dfcat):
         return (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-12-31"))
 
+    def build_station_name(self, r):
+        return str(r.get("B", r.get("name", "unknown")))
+
 
 # ---------------------------------------------------------------------------
 # Tests — single source (no source_num)
@@ -847,3 +850,248 @@ class TestRefKeyNaNSuppression:
         assert len(refs) == 2
         for ref in refs:
             assert ref.name in ("A_flow", "B_EC")
+
+
+# ---------------------------------------------------------------------------
+# Tests — TimeSeriesPlotAction.render()
+# ---------------------------------------------------------------------------
+
+def _make_ts(n=24, freq="1h", start="2020-01-01", value_start=0.0):
+    """Return a single-column DataFrame with a regular DatetimeIndex."""
+    idx = pd.date_range(start=start, periods=n, freq=freq)
+    return pd.DataFrame({"value": [value_start + i for i in range(n)]}, index=idx, dtype="float64")
+
+
+class _PlotActionManager(_StubManager):
+    """Manager stub that returns fixed data and supports render()."""
+
+    def __init__(self, catalog, data_map, **kwargs):
+        self._data_map = data_map  # name -> DataFrame
+        super().__init__(catalog, **kwargs)
+
+    def is_irregular(self, r):
+        return False
+
+    def build_station_name(self, r):
+        return str(r.get("station", r.get("name", "unknown")))
+
+    def get_data_reference(self, row):
+        return self._test_catalog.get(row["name"])
+
+
+def _build_plot_catalog(names, unit="cfs"):
+    """Build a minimal catalog with station/variable attributes."""
+    reader_map = {}
+    cat = DataCatalog(primary_key=["station", "variable"])
+    for name in names:
+        station, variable = name.split("/")
+        data = _make_ts()
+        reader = InMemoryDataReferenceReader(data)
+        cat.add(DataReference(
+            reader=reader,
+            name=f"{station}_{variable}",
+            station=station,
+            variable=variable,
+            unit=unit,
+        ))
+    return cat
+
+
+def _get_curve_plot_kwargs(curve):
+    """Return the plot-group kwargs applied to a HoloViews Curve element."""
+    from holoviews import Store
+    plot_opts = Store.lookup_options("bokeh", curve, "plot")
+    return plot_opts.kwargs if plot_opts is not None else {}
+
+
+def _render_action(names, shared_axes=True, unit="cfs"):
+    """Build a manager + action, run render(), return the HoloViews Layout."""
+    import holoviews as hv
+    from dvue.tsdataui import TimeSeriesPlotAction
+
+    cat = _build_plot_catalog(names, unit=unit)
+    data_map = {}
+    for ref in cat.list():
+        data_map[ref.name] = ref.getData()
+
+    mgr = _PlotActionManager(cat, data_map)
+    mgr.shared_axes = shared_axes
+    mgr.time_range = (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02"))
+
+    df = mgr.get_data_catalog()
+    action = TimeSeriesPlotAction()
+    refs_and_data = list(action.get_refs_and_data(df, mgr))
+    return action.render(df, refs_and_data, mgr)
+
+
+class TestPlotActionRender:
+    """Smoke and correctness tests for TimeSeriesPlotAction.render()."""
+
+    def test_returns_layout(self):
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        assert isinstance(result, hv.Layout)
+
+    def test_single_curve_overlay(self):
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        assert len(result) == 1
+        assert isinstance(result[0], hv.Overlay)
+
+    def test_two_curves_same_unit_one_overlay(self):
+        """Two curves with the same unit go into a single overlay."""
+        result = _render_action(["STA_A/flow", "STA_B/flow"])
+        assert len(result) == 1
+
+    def test_two_units_two_overlays(self):
+        """Curves with different units are split into separate overlays."""
+        import holoviews as hv
+        from dvue.tsdataui import TimeSeriesPlotAction
+
+        cat_a = DataCatalog(primary_key=["station", "variable"])
+        for station, variable, unit in [("STA_A", "flow", "cfs"), ("STA_B", "ec", "us/cm")]:
+            data = _make_ts()
+            reader = InMemoryDataReferenceReader(data)
+            cat_a.add(DataReference(
+                reader=reader,
+                name=f"{station}_{variable}",
+                station=station, variable=variable, unit=unit,
+            ))
+
+        mgr = _PlotActionManager(cat_a, {})
+        mgr.time_range = (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02"))
+        df = mgr.get_data_catalog()
+        action = TimeSeriesPlotAction()
+        refs_and_data = list(action.get_refs_and_data(df, mgr))
+        result = action.render(df, refs_and_data, mgr)
+        assert len(result) == 2
+
+    def test_curve_label_matches_station(self):
+        """Curve label should contain the station name."""
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        assert "STA_A" in curve.label
+
+    def test_vdim_is_sanitized(self):
+        """The curve's vdim name must be a valid Bokeh identifier (no slashes/spaces)."""
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        vdim_name = curve.vdims[0].name
+        assert "/" not in vdim_name
+        assert " " not in vdim_name
+
+    def test_kdim_is_time(self):
+        """The curve's kdim must be named 'Time' for datetime hover formatting."""
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        assert curve.kdims[0].name == "Time"
+
+    def test_opts_do_not_mix_formats_error(self):
+        """render() must not raise ValueError from mixing opts formats."""
+        # This is the regression test for the bug where opts.Curve(...)
+        # was mixed with keyword opts in the same .opts() call.
+        try:
+            _render_action(["STA_A/flow"])
+        except ValueError as e:
+            pytest.fail(f"opts format mixing error: {e}")
+
+    def test_empty_selection_returns_div(self):
+        """When no data is available, render() should return an hv.Div."""
+        import holoviews as hv
+        from dvue.tsdataui import TimeSeriesPlotAction
+
+        cat = _build_plot_catalog(["STA_A/flow"])
+        mgr = _PlotActionManager(cat, {})
+        mgr.time_range = (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02"))
+        df = mgr.get_data_catalog().iloc[0:0]  # empty selection
+        action = TimeSeriesPlotAction()
+        result = action.render(df, [], mgr)
+        assert isinstance(result, hv.Div)
+
+    def test_shared_axes_off_no_crash(self):
+        """shared_axes=False must not crash render()."""
+        _render_action(["STA_A/flow", "STA_B/flow"], shared_axes=False)
+
+    def test_sanitize_vdim_helper(self):
+        from dvue.tsdataui import _sanitize_vdim
+        assert _sanitize_vdim("STA_A/flow") == "STA_A_flow"
+        assert _sanitize_vdim("value (cfs)") == "value_cfs"
+        assert _sanitize_vdim("123abc") == "v_123abc"
+        assert _sanitize_vdim("") == "value"
+        assert _sanitize_vdim("a/b/c") == "a_b_c"
+
+    def test_hover_value_label_uses_name_not_unit(self):
+        """The hover value row must show the curve name ($name), not the unit group key.
+
+        Previously the label was str(group_key) which showed the unit (e.g. 'cfs')
+        instead of the legend label.  $name is a Bokeh special field that resolves
+        to the glyph renderer name = the curve label = the legend text.
+        """
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"], unit="cfs")
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        applied = _get_curve_plot_kwargs(curve)
+        tooltips = applied.get("hover_tooltips", [])
+        value_templates = [v for _, v in tooltips]
+        # $name must appear in the value template (resolves to legend label in Bokeh)
+        assert any("$name" in str(v) for v in value_templates), (
+            f"Expected '$name' in a hover value template, got: {tooltips}. "
+            "Using the unit (group_key) as the label shows 'cfs:' instead of the legend name."
+        )
+        # The unit string should NOT appear as a tuple label (first element)
+        labels = [lbl for lbl, _ in tooltips]
+        assert "cfs" not in labels, (
+            f"Unit 'cfs' appeared as hover label — should use $name in value instead: {tooltips}"
+        )
+
+    def test_hover_uses_tuple_format_not_html_string(self):
+        """hover_tooltips must be a list of tuples, NOT an HTML string.
+
+        An HTML string with @Time{%F %H:%M} is treated by Bokeh as a
+        numeral.js format (% = percent) unless hover_formatters is also
+        applied — but HoloViews does NOT reliably wire hover_formatters
+        to HTML-string tooltips.  The tuple format is required.
+        """
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        applied = _get_curve_plot_kwargs(curve)
+        tooltips = applied.get("hover_tooltips")
+        assert tooltips is not None, "hover_tooltips not set on curve"
+        assert isinstance(tooltips, list), (
+            f"hover_tooltips must be list-of-tuples, got {type(tooltips).__name__!r}. "
+            "An HTML string breaks datetime formatting in Bokeh hover."
+        )
+
+    def test_hover_has_datetime_formatter(self):
+        """hover_formatters must map @Time to 'datetime'."""
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        applied = _get_curve_plot_kwargs(curve)
+        formatters = applied.get("hover_formatters")
+        assert formatters is not None, "hover_formatters not set on curve"
+        assert formatters.get("@Time") == "datetime", (
+            f"Expected @Time formatter='datetime', got {formatters!r}"
+        )
+
+    def test_hover_time_column_reference_correct(self):
+        """hover_tooltips must reference @Time (the index column name)."""
+        import holoviews as hv
+        result = _render_action(["STA_A/flow"])
+        overlay = result[0]
+        curve = next(el for el in overlay if isinstance(el, hv.Curve))
+        applied = _get_curve_plot_kwargs(curve)
+        tooltips = applied.get("hover_tooltips", [])
+        time_refs = [v for _, v in tooltips if "@Time" in str(v)]
+        assert time_refs, f"No @Time reference found in hover_tooltips: {tooltips}"
+

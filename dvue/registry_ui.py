@@ -88,13 +88,15 @@ class RegistryPlotAction(TimeSeriesPlotAction):
                 parts.append(self.format_variable(variable))
             crvlabel = f'{file_index_label}{"/".join(parts)}'
         ylabel = self.format_variable(variable) + (f" ({unit})" if unit else "")
-        crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
+        from dvue.tsdataui import _sanitize_vdim
+        ts = data.iloc[:, [0]].copy()
+        ts.index.name = "Time"
+        crv = hv.Curve(ts, label=crvlabel).redim(value=_sanitize_vdim(crvlabel))
         return crv.opts(
             xlabel="Time",
             ylabel=ylabel,
             responsive=True,
             active_tools=["wheel_zoom"],
-            tools=["hover"],
         )
 
     def append_to_title_map(self, title_map, group_key, row):
@@ -464,6 +466,12 @@ class RegistryUIManager(TimeSeriesDataUIManager):
                                 _crs_exc,
                             )
                 self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+                # Re-apply geo merge so that geometry is preserved on the
+                # second and subsequent file adds (the plain-DataFrame
+                # rebuild above overwrites any GeoDataFrame set by an
+                # earlier on_file_added call).  No-op when _geo_source_df
+                # is not yet set (first file).
+                self._apply_geo_merge()
                 self.on_file_added(path, refs)
                 added_paths.append(source_spec)
                 logger.info(

@@ -511,6 +511,16 @@ class DataUIManager(DataProvider):
         """
         return None
 
+    def get_background_map_layer(self):
+        """Return an optional GeoViews element to display as a non-interactive
+        background layer on the map, beneath the catalog-linked features.
+
+        Override in a subclass to show a static backdrop (e.g. channel network,
+        coastline) when the catalog has no geometry of its own.  Return ``None``
+        (default) to add nothing.
+        """
+        return None
+
     def get_sidebar_disclaimer(self):
         """Return a Panel pane with disclaimer content for the modal dialog,
         or ``None`` (default) to add nothing.
@@ -685,6 +695,9 @@ class DataUI(param.Parameterized):
 
         if isinstance(self._dfcat, gpd.GeoDataFrame):
             self._tmap = gv.tile_sources.CartoLight()
+            _bg_layer = self._dataui_manager.get_background_map_layer()
+            if _bg_layer is not None:
+                self._tmap = self._tmap * _bg_layer
             self.build_map_of_features(self._dfmapcat, crs=self._crs)
             if hasattr(self, "_station_select"):
                 self._station_select.source = self._map_features
@@ -699,12 +712,13 @@ class DataUI(param.Parameterized):
             and self._station_id_column in self._dfcat.columns
         ):
             dfx = self._dfcat.groupby(self._station_id_column).first().reset_index()
+            # groupby().first().reset_index() loses GeoDataFrame type — re-wrap.
+            if not isinstance(dfx, gpd.GeoDataFrame) and isinstance(self._dfcat, gpd.GeoDataFrame):
+                if "geometry" in dfx.columns:
+                    dfx = gpd.GeoDataFrame(dfx, geometry="geometry", crs=self._dfcat.crs)
             if isinstance(dfx, gpd.GeoDataFrame):
                 dfx = dfx.dropna(subset=["geometry"])
                 dfx = dfx.set_crs(self._dfcat.crs)
-            else:
-                pass
-                # dfx = dfx.dropna(subset=["Latitude", "Longitude"])  # FIXME: ?
         else:
             dfx = self._dfcat
         return dfx
@@ -767,7 +781,7 @@ class DataUI(param.Parameterized):
                         pd.DataFrame(columns=["__x__", "__y__"]),
                         kdims=["__x__", "__y__"],
                         crs=crs,
-                    )
+                    ).opts(active_tools=["wheel_zoom"], responsive=True)
                     return self._map_features
                 geom_type = str.lower(str(dfmap.geometry.iloc[0].geom_type))
                 if "point" in geom_type:

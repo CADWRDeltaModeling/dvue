@@ -39,6 +39,22 @@ def unique_preserve_order(seq):
     return [x for x in seq if not (x in seen or seen.add(x))]
 
 
+import re as _re
+
+
+def _sanitize_vdim(label: str) -> str:
+    """Return a Bokeh-safe dimension name from a curve label.
+
+    Replaces every run of non-alphanumeric characters with a single
+    underscore so the name is valid as a Bokeh ColumnDataSource column.
+    """
+    s = _re.sub(r'[^A-Za-z0-9]+', '_', str(label)).strip('_')
+    if not s:
+        return "value"
+    if s[0].isdigit():
+        s = f"v_{s}"
+    return s
+
 def get_color_dataframe(stations, color_cycle=hv.Cycle()):
     """
     Create a dataframe with station names and colors
@@ -122,6 +138,11 @@ class TimeSeriesDataUIManager(DataUIManager):
         objects=["linear", "steps-pre", "steps-post", "steps-mid"],
         default="linear",
         doc="Curve connection method for regular period type data",
+    )
+    period_curve_connection = param.Selector(
+        objects=["steps-post", "steps-pre", "steps-mid", "linear"],
+        default="steps-post",
+        doc="Curve connection method for PeriodIndex (period-typed) data",
     )
     sensible_range_yaxis = param.Boolean(
         default=False,
@@ -448,6 +469,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             pn.WidgetBox(
                 self.param.irregular_curve_connection,
                 self.param.regular_curve_connection,
+                self.param.period_curve_connection,
             ),
             pn.WidgetBox(
                 pn.pane.Markdown("**Group and Style Options:**"),
@@ -738,6 +760,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         "legend_position": "lp",
         "regular_curve_connection": "rcc",
         "irregular_curve_connection": "icc",
+        "period_curve_connection": "pcc",
         "sensible_range_yaxis": "sry",
         "color_cycle_name": "ccn",
         "shared_axes": "sa",
@@ -1254,10 +1277,12 @@ class TimeSeriesPlotAction(PlotAction):
         label = label or "value"
         if file_index:
             label = f"{label} [{file_index}]"
-        return hv.Curve(data.iloc[:, [0]], label=label).opts(
+        safe_vdim = _sanitize_vdim(label)
+        ts = data.iloc[:, [0]].copy()
+        ts.index.name = "Time"
+        return hv.Curve(ts, label=label).redim(value=safe_vdim).opts(
             responsive=True,
             active_tools=["wheel_zoom"],
-            tools=["hover"],
         )
 
     def append_to_title_map(self, title_map, group_key, row):
@@ -1276,6 +1301,34 @@ class TimeSeriesPlotAction(PlotAction):
         is a structured object rather than a plain string.
         """
         return str(title_info)
+
+    @staticmethod
+    def _get_connection(data: "pd.DataFrame", orig_is_period: bool, manager) -> str:
+        """Determine the curve interpolation style from the data's index.
+
+        Parameters
+        ----------
+        data :
+            Processed time series (PeriodIndex already converted to DatetimeIndex
+            by ``_process_curve_data``).
+        orig_is_period :
+            ``True`` when the *original* index (before processing) was a
+            ``pd.PeriodIndex``.
+        manager :
+            Provides ``regular_curve_connection``, ``irregular_curve_connection``,
+            and optionally ``period_curve_connection``.
+        """
+        if orig_is_period:
+            return getattr(manager, "period_curve_connection", manager.irregular_curve_connection)
+        idx = data.index
+        if isinstance(idx, pd.DatetimeIndex):
+            freq = idx.freq
+            if freq is None and len(idx) >= 3:
+                freq = pd.infer_freq(idx)
+            if freq is not None:
+                return manager.regular_curve_connection
+            return manager.irregular_curve_connection
+        return manager.regular_curve_connection
 
     # ------------------------------------------------------------------
     # Pipeline helpers
@@ -1371,6 +1424,11 @@ class TimeSeriesPlotAction(PlotAction):
                      else row.get("unit", ""))
                 ).lower()
 
+                # Detect PeriodIndex before _process_curve_data converts it to DatetimeIndex
+                _orig_is_period = isinstance(data.index, pd.PeriodIndex) or (
+                    len(data.index) > 0 and isinstance(data.index[0], pd.Period)
+                )
+
                 data = manager._process_curve_data(data, row, time_range)
 
                 if data is None or len(data) == 0:
@@ -1383,15 +1441,8 @@ class TimeSeriesPlotAction(PlotAction):
                     else ""
                 )
                 curve = self.create_curve(data, row, unit, file_index=file_index)
-                # Apply curve connection (interpolation) from manager params
-                try:
-                    connection = (
-                        manager.irregular_curve_connection
-                        if manager.is_irregular(row)
-                        else manager.regular_curve_connection
-                    )
-                except NotImplementedError:
-                    connection = manager.regular_curve_connection
+                # Determine curve connection from data index characteristics
+                connection = self._get_connection(data, _orig_is_period, manager)
                 curve = curve.opts(opts.Curve(interpolation=connection))
                 station_name = manager.build_station_name(row)
 
@@ -1437,12 +1488,13 @@ class TimeSeriesPlotAction(PlotAction):
                 for curve, row in curves_data
             ]
 
-            # With shared_axes=True, HoloViews links axes by dimension name.
-            # Keep x shared, but avoid unintended y-linking across groups
-            # (e.g. different units/ranges) by making each group's value
-            # dimension name unique.
+            # With shared_axes=True, rename all curves in this overlay to the
+            # same group_vdim so HoloViews doesn't cross-link y-axes between
+            # overlays that have different units.  axiswise=True on the Layout
+            # keeps each subplot's y-range independent.
+            # group_vdim is also used by the hover tooltip to reference the value column.
+            group_vdim = f"value__{str(group_key).replace(' ', '_')}"
             if manager.shared_axes:
-                group_vdim = f"value__{str(group_key).replace(' ', '_')}"
                 _renamed = []
                 for curve in styled_curves:
                     try:
@@ -1453,9 +1505,39 @@ class TimeSeriesPlotAction(PlotAction):
                         pass
                     _renamed.append(curve)
                 styled_curves = _renamed
+                value_col = group_vdim
+            else:
+                # shared_axes off — each curve has its own vdim; pick the first
+                # curve's vdim as the hover column (all share the same unit group).
+                first_curve = next(
+                    (el for el in styled_curves if isinstance(el, hv.Curve)),
+                    styled_curves[0] if styled_curves else None,
+                )
+                value_col = (
+                    first_curve.vdims[0].name
+                    if first_curve is not None and first_curve.vdims
+                    else "value"
+                )
+
+            # Use list-of-tuples hover_tooltips — this format reliably
+            # combines with hover_formatters for datetime column formatting.
+            # HTML-string tooltips do NOT reliably respect hover_formatters
+            # (Bokeh treats {%F %H:%M} as numeral.js %-percent format).
+            # $name in the VALUE position is a Bokeh special field that
+            # resolves to the glyph renderer name, which HoloViews sets to
+            # the curve's label — i.e. the same text shown in the legend.
+            hover_tooltips = [
+                ("Time", "@Time{%F %H:%M}"),
+                ("", f"$name: @{{{value_col}}}{{0,0.000}}"),
+            ]
 
             overlays.append(
-                hv.Overlay(styled_curves).opts(
+                hv.Overlay(styled_curves)
+                .opts(opts.Curve(
+                    hover_tooltips=hover_tooltips,
+                    hover_formatters={"@Time": "datetime"},
+                ))
+                .opts(
                     show_legend=manager.show_legend,
                     show_grid=manager.show_gridlines,
                     legend_position=manager.legend_position,
