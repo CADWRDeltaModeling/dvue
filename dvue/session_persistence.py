@@ -319,30 +319,7 @@ def serve_session_app(
         if user_id:
             _registry[user_id] = {"mgr": mgr, "ui": ui, "template": tmpl}
 
-        sel = saved.get("selection", [])
-
         def _on_load():
-            # Replay saved selection → re-trigger Plot action.  Only
-            # meaningful after a server restart when diskcache had a saved
-            # selection; fresh users have no saved state.
-            if sel and hasattr(ui, "display_table") and hasattr(ui, "_registered_actions"):
-                plot_cb = next(
-                    (
-                        a["callback"]
-                        for a in ui._registered_actions
-                        if a.get("name") == "Plot"
-                    ),
-                    None,
-                )
-                if plot_cb:
-                    n_rows = len(ui.display_table.value) if ui.display_table.value is not None else 0
-                    valid_sel = [i for i in sel if i < n_rows]
-                    if valid_sel:
-                        ui.display_table.selection = valid_sel
-                    pn.state.curdoc.add_next_tick_callback(
-                        lambda: plot_cb(None, ui)
-                    )
-
             # Wire live-persistence watchers so any param change is
             # immediately flushed to diskcache (only when persist=True).
             if persist:
@@ -690,30 +667,10 @@ def serve_desktop_app(
         if user_id:
             _registry[user_id] = {"mgr": mgr, "ui": ui, "template": tmpl}
 
-        sel = saved.get("selection", [])
-
         def _on_load():
             # Capture the running Tornado IOLoop so the pywebview GUI thread can
             # schedule confirmation callbacks via IOLoop.add_callback (thread-safe).
             _app_state["ioloop"] = _tornado_ioloop.IOLoop.current()
-
-            if sel and hasattr(ui, "display_table") and hasattr(ui, "_registered_actions"):
-                plot_cb = next(
-                    (
-                        a["callback"]
-                        for a in ui._registered_actions
-                        if a.get("name") == "Plot"
-                    ),
-                    None,
-                )
-                if plot_cb:
-                    n_rows = len(ui.display_table.value) if ui.display_table.value is not None else 0
-                    valid_sel = [i for i in sel if i < n_rows]
-                    if valid_sel:
-                        ui.display_table.selection = valid_sel
-                    pn.state.curdoc.add_next_tick_callback(
-                        lambda: plot_cb(None, ui)
-                    )
 
             if persist:
                 def _do_save(event=None):

@@ -1538,7 +1538,11 @@ class DataUI(param.Parameterized):
         if not loc:
             return
 
-        # --- Restore on load ---
+        # --- Restore on load (one-shot) ---
+        # Apply any selection encoded in the URL, then immediately clear it
+        # so that the next server startup begins with no stale selection.
+        # The watcher below is registered *after* this block, so the clear
+        # is not overwritten by the change event from the initial restore.
         query_params = loc.query_params or {}
         sel_str = query_params.get("sel", "")
         if sel_str:
@@ -1547,6 +1551,9 @@ class DataUI(param.Parameterized):
                 indices = self._dfcat.index[self._dfcat["name"].isin(names)].tolist()
                 if indices and hasattr(self, "display_table"):
                     self.display_table.selection = indices
+            # Clear from URL before the watcher is registered so the next
+            # startup does not auto-select rows from a stale browser URL.
+            loc.update_query(sel="")
 
         # --- Watch for changes and update URL ---
         def _on_selection_change(event):
