@@ -587,7 +587,12 @@ class TransformToCatalogAction:
 
         from .math_reference import MathDataReference
 
-        selected_rows = dataui.display_table.selected_dataframe
+        # Resolve selected rows from _dfcat (all catalog columns) via selection
+        # indices into display_table.value.  Using selected_dataframe would omit
+        # hidden metadata columns that get_data_reference() needs.
+        _selection = dataui.display_table.selection
+        _sel_index = dataui.display_table.value.iloc[_selection].index
+        selected_rows = dataui._dfcat.loc[_sel_index]
         added_names = []
         id_col = self._get_id_column(manager, catalog)
 

@@ -655,6 +655,7 @@ class TestTransformToCatalogAttributeInheritance:
         fake_dataui = MagicMock()
         fake_dataui._dataui_manager = mgr
         fake_dataui.display_table.selection = [0]
+        fake_dataui.display_table.value = dfcat
         fake_dataui._dfcat = dfcat
 
         with patch("panel.state") as mock_state:
@@ -707,6 +708,7 @@ class TestTransformToCatalogAttributeInheritance:
         fake_dataui = MagicMock()
         fake_dataui._dataui_manager = mgr
         fake_dataui.display_table.selection = [0]
+        fake_dataui.display_table.value = dfcat
         fake_dataui._dfcat = dfcat
 
         with patch("panel.state") as mock_state:
