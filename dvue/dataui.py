@@ -569,6 +569,7 @@ class DataUIManager(DataProvider):
             icon="chart-line",
             action_type="display",
             callback=plot_action.callback,
+            selection_required=True,
         )
         tabulate_button = dict(
             name="Tabulate",
@@ -576,6 +577,7 @@ class DataUIManager(DataProvider):
             icon="table",
             action_type="display",
             callback=tabulate_action.callback,
+            selection_required=True,
         )
         # Combine Download Data + Download Catalog into a single MenuButton.
         download_menu_button = dict(
@@ -583,6 +585,7 @@ class DataUIManager(DataProvider):
             button_type="success",
             icon="download",
             action_type="download_menu",
+            selection_required=True,
             items=[
                 dict(label="Download Data",    filename="data.csv",    callback=download_action.callback),
                 dict(label="Download Catalog", filename="catalog.csv", callback=download_catalog.callback),
@@ -1218,6 +1221,7 @@ class DataUI(param.Parameterized):
             self._map_sel_proxy = list(self.display_table.selection)
 
     def create_data_actions(self, actions):
+        self._selection_required_buttons = []
         action_buttons = []
         for action in actions:
             if action["action_type"] == "download_menu":
@@ -1257,7 +1261,10 @@ class DataUI(param.Parameterized):
                     icon=action.get("icon", "download"),
                     height=32,
                     margin=(0, 4, 0, 0),
+                    disabled=action.get("selection_required", False),
                 )
+                if action.get("selection_required", False):
+                    self._selection_required_buttons.append(menu_btn)
 
                 def _on_dl_menu(event):
                     cfg = _item_map.get(event.new)
@@ -1320,7 +1327,10 @@ class DataUI(param.Parameterized):
                     name=action["name"],
                     button_type=action["button_type"],
                     icon=action["icon"],
+                    disabled=action.get("selection_required", False),
                 )
+                if action.get("selection_required", False):
+                    self._selection_required_buttons.append(button)
 
                 # For regular buttons, we can use a function factory to create a proper closure
                 def create_click_handler(current_action):
@@ -1340,6 +1350,18 @@ class DataUI(param.Parameterized):
 
         await asyncio.sleep(0.5)
         self.hide_progress()
+
+    def _setup_selection_btn_watcher(self):
+        """Enable/disable selection-required buttons based on display_table.selection."""
+        if not getattr(self, "_selection_required_buttons", None):
+            return
+
+        def _on_selection_change(event):
+            has_selection = bool(event.new)
+            for btn in self._selection_required_buttons:
+                btn.disabled = not has_selection
+
+        self.display_table.param.watch(_on_selection_change, "selection")
 
     @param.depends("use_regex_filter", watch=True)
     def update_data_table_filters(self):
@@ -1417,6 +1439,7 @@ class DataUI(param.Parameterized):
 
         if actions:
             action_buttons = self.create_data_actions(actions)
+            self._setup_selection_btn_watcher()
             # Insert a thin vertical separator between the primary Plot button
             # and the secondary actions (Download, Math Ref, etc.).
             if len(action_buttons) > 1:
@@ -2201,6 +2224,7 @@ class DataUI(param.Parameterized):
         actions = self._dataui_manager.get_mobile_actions()
         if actions:
             action_buttons = self.create_data_actions(actions)
+            self._setup_selection_btn_watcher()
             self._action_panel.extend(action_buttons)
 
         # Advanced options toggle
