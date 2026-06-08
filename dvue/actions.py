@@ -588,8 +588,10 @@ class TransformToCatalogAction:
         # Tidal filter next — operates on raw (gap-filled) sub-daily data.
         # Resampling and rolling are applied to the filtered result.
         if getattr(manager, "do_tidal_filter", False):
-            expr = f"cosine_lanczos({expr}, '40h')"
-            tags.append("tf")
+            period = getattr(manager, "tidal_filter_period", "40H").strip() or "40H"
+            expr = f"cosine_lanczos({expr}, '{period}')"
+            tag_period = period.upper()
+            tags.append(f"tf{tag_period}" if tag_period != "40H" else "tf")
 
         period = getattr(manager, "resample_period", "").strip()
         if period:

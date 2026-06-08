@@ -98,6 +98,11 @@ class TimeSeriesDataUIManager(DataUIManager):
         default=0, doc="Fill gaps in data upto this limit, only when a positive integer"
     )
     do_tidal_filter = param.Boolean(default=False, doc="Apply tidal filter", constant=not _VTOOLS_AVAILABLE)
+    tidal_filter_period = param.String(
+        default="40H",
+        doc="Cutoff period for the cosine-Lanczos tidal filter (e.g. '40H', '36H'). "
+            "Requires sub-daily input data.",
+    )
     # --- Resampling ---
     resample_period = param.String(
         default="",
@@ -512,6 +517,8 @@ class TimeSeriesDataUIManager(DataUIManager):
         tidal_w = pn.widgets.Checkbox.from_param(
             self.param.do_tidal_filter, name="Tidal filter",
             disabled=not _VTOOLS_AVAILABLE, margin=_M)
+        tidal_period_w = pn.widgets.TextInput.from_param(
+            self.param.tidal_filter_period, name="", placeholder="e.g. 40H", width=60, margin=_M)
         rolling_window_w = pn.widgets.TextInput.from_param(
             self.param.rolling_window, name="", placeholder="e.g. 24H", width=80, margin=_M)
         rolling_agg_w = pn.widgets.Select.from_param(
@@ -539,48 +546,173 @@ class TimeSeriesDataUIManager(DataUIManager):
                 sizing_mode="stretch_width", margin=(0, 0, 0, 0),
             )
 
+        # ── Yellow warning: both smooth ops active ───────────────────────────
+        smooth_warning = pn.pane.HTML(
+            "<div style='background:#fff3cd;border:1px solid #ffc107;border-radius:4px;"
+            "padding:5px 8px;font-size:11px;color:#664d03;margin:2px 0 4px 0'>"
+            "&#9888; Both Tidal Filter and Rolling are active — results may be unexpected."
+            "</div>",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+            visible=False,
+        )
+
+        def _update_smooth_warning(*args):
+            smooth_warning.visible = (
+                getattr(self, "do_tidal_filter", False)
+                and bool(getattr(self, "rolling_window", "").strip())
+            )
+
+        self.param.watch(_update_smooth_warning, ["do_tidal_filter", "rolling_window"])
+
+        # ── Expression preview ───────────────────────────────────────────────
+        expr_preview = pn.pane.HTML("", sizing_mode="stretch_width", margin=(2, 0, 4, 0))
+        expr_section = pn.Column(
+            pn.layout.Divider(margin=(8, 0, 4, 0)),
+            _section("Expression"),
+            expr_preview,
+            sizing_mode="stretch_width",
+            visible=False,
+        )
+
+        _transform_watch_params = [
+            "fill_gap", "do_tidal_filter", "tidal_filter_period", "resample_period", "resample_agg",
+            "rolling_window", "rolling_agg", "do_diff", "diff_periods",
+            "do_cumsum", "scale_factor",
+        ]
+
+        def _is_any_transform_active():
+            return (
+                (getattr(self, "fill_gap", 0) or 0) > 0
+                or getattr(self, "do_tidal_filter", False)
+                or bool(getattr(self, "resample_period", "").strip())
+                or bool(getattr(self, "rolling_window", "").strip())
+                or getattr(self, "do_diff", False)
+                or getattr(self, "do_cumsum", False)
+                or getattr(self, "scale_factor", 1.0) != 1.0
+            )
+
+        def _update_expr_and_btn(*args):
+            from .actions import TransformToCatalogAction
+            expr, _ = TransformToCatalogAction._build_expression_and_tag(self)
+            any_active = _is_any_transform_active()
+            # Expression preview: only when exactly 1 row selected + transforms active
+            dataui = getattr(self, "_dataui", None)
+            sel = []
+            if dataui is not None and hasattr(dataui, "display_table"):
+                sel = dataui.display_table.selection or []
+            show_preview = any_active and len(sel) == 1
+            if show_preview:
+                display_expr = expr[1:] if expr.startswith("x.") else expr
+                expr_preview.object = (
+                    f"<div style='font-family:monospace;font-size:11px;"
+                    f"background:#f4f6f9;padding:5px 8px;border-radius:3px;"
+                    f"border:1px solid #ddd;color:#333;word-break:break-all'>"
+                    f"{display_expr}</div>"
+                )
+            expr_section.visible = show_preview
+            # Disable the save button when no transforms are active
+            btn = getattr(self, "_xform_btn", None)
+            if btn is not None:
+                btn.disabled = not any_active
+
+        self.param.watch(_update_expr_and_btn, _transform_watch_params)
+
+        # ── Build Transform tab ──────────────────────────────────────────────
         transform_widgets = pn.Column(
-            # ── Preprocessing ────────────────────────────────────
-            _section("Preprocessing"),
+            # ── ① Gap Fill ———————————————————————————————————————
+            _section("① Gap Fill"),
             pn.Row(
-                pn.pane.HTML("<span style='font-size:11px;color:#666'>Fill gaps</span>",
-                             align=("start", "center"), margin=(0, 6, 0, 6)),
+                pn.pane.HTML(
+                    "<span style='font-size:11px;color:#666'>Interpolation limit</span>",
+                    align=("start", "center"), margin=(0, 6, 0, 6),
+                ),
                 fill_gap_w,
                 align="center",
             ),
-            # ── Resample / Smooth ─────────────────────────────────
-            _section("Resample / Smooth"),
-            pn.Row(resample_period_w, resample_agg_w,
-                   pn.pane.HTML("<span style='font-size:10px;color:#999;align-self:center'>"
-                                "period · agg</span>", align=("start", "center")),
-                   align="center"),
-            tidal_w,
-            pn.Row(rolling_window_w, rolling_agg_w,
-                   pn.pane.HTML("<span style='font-size:10px;color:#999;align-self:center'>"
-                                "window · agg</span>", align=("start", "center")),
-                   align="center"),
-            # ── Derived / Scale ───────────────────────────────────
-            _section("Derived / Scale"),
-            pn.Row(do_diff_w, diff_n_w, cumsum_w, align="center"),
+            # ── ② Smooth ————————————————————————————————————————
+            _section("② Smooth"),
+            pn.pane.HTML(
+                "<div style='font-size:10px;color:#888;font-style:italic;"
+                "margin:0 0 4px 6px'>Tidal filter runs <b>before</b> Resample"
+                " (requires sub-daily data); Rolling runs <b>after</b>.</div>",
+                sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+            ),
             pn.Row(
-                pn.pane.HTML("<span style='font-size:11px;color:#666'>Scale ×</span>",
-                             align=("start", "center"), margin=(0, 6, 0, 6)),
+                tidal_w,
+                tidal_period_w,
+                pn.pane.HTML(
+                    "<span style='font-size:10px;color:#999;align-self:center'>"
+                    "cutoff</span>",
+                    align=("start", "center"),
+                ),
+                align="center",
+            ),
+            pn.layout.Divider(margin=(4, 0, 4, 0)),
+            pn.Row(
+                rolling_window_w, rolling_agg_w,
+                pn.pane.HTML(
+                    "<span style='font-size:10px;color:#999;align-self:center'>"
+                    "window · agg</span>",
+                    align=("start", "center"),
+                ),
+                align="center",
+            ),
+            smooth_warning,
+            # ── ③ Resample —————————————————————————————————————
+            _section("③ Resample"),
+            pn.Row(
+                resample_period_w, resample_agg_w,
+                pn.pane.HTML(
+                    "<span style='font-size:10px;color:#999;align-self:center'>"
+                    "period · agg</span>",
+                    align=("start", "center"),
+                ),
+                align="center",
+            ),
+            # ── ④ Diff / Cumsum ————————————————————————————————
+            _section("④ Diff / Cumsum"),
+            pn.Row(do_diff_w, diff_n_w, cumsum_w, align="center"),
+            # ── ⑤ Scale —————————————————————————————————————————
+            _section("⑤ Scale"),
+            pn.Row(
+                pn.pane.HTML(
+                    "<span style='font-size:11px;color:#666'>Factor ×</span>",
+                    align=("start", "center"), margin=(0, 6, 0, 6),
+                ),
                 scale_w,
                 align="center",
             ),
-            # ── Display ───────────────────────────────────────────
-            _section("Display"),
-            pn.Row(sensible_w, pct_range_w,
-                   align="center", sizing_mode="stretch_width"),
-            # ── Transform → Ref ───────────────────────────────────
+            # ── Expression preview + Save ──────────────────────────────────
+            expr_section,
             *self._make_transform_ref_widgets(),
-            # ── Actions ───────────────────────────────────────────
-            *([] if not self.show_clear_cache else [pn.layout.Divider(margin=(8, 0, 4, 0)), clear_cache_btn]),
             sizing_mode="stretch_width",
             margin=(4, 8, 4, 4),
         )
+
+        # Initialise button disabled state now that _xform_btn has been created.
+        _update_expr_and_btn()
+
+        # ── Build Time tab (base time-range + Display + Utilities) ───────────
+        time_tab_content = pn.Column(
+            control_widgets,
+            pn.layout.Divider(margin=(8, 0, 4, 0)),
+            _section("Display"),
+            pn.Row(sensible_w, pct_range_w,
+                   align="center", sizing_mode="stretch_width"),
+            *(
+                [
+                    pn.layout.Divider(margin=(8, 0, 4, 0)),
+                    _section("Utilities"),
+                    clear_cache_btn,
+                ]
+                if self.show_clear_cache else []
+            ),
+            sizing_mode="stretch_width",
+        )
+
         widget_tabs = {
-            "Time": control_widgets,
+            "Time": time_tab_content,
             "Transform": transform_widgets,
             "Plot": plot_widgets,
         }
@@ -609,7 +741,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             compare_action = SourceCompareAction()
             menu_btn = pn.widgets.MenuButton(
                 name="Add to Catalog",
-                items=["Transform → Ref", "Source Compare"],
+                items=["Transform → MathRef", "Source Compare"],
                 button_type="success",
                 icon="arrows-collapse",
                 sizing_mode="stretch_width",
@@ -619,18 +751,19 @@ class TimeSeriesDataUIManager(DataUIManager):
                     _dataui = getattr(self, "_dataui", None)
                     if _dataui is None:
                         return
-                    if event.new == "Transform → Ref":
+                    if event.new == "Transform → MathRef":
                         _xa.callback(event, _dataui)
                     elif event.new == "Source Compare":
                         _ca.callback(event, _dataui)
                 return _on_click
             menu_btn.on_click(_make_menu_handler(xform_action, compare_action))
+            self._xform_btn = menu_btn
             items.append(menu_btn)
         else:
             from .actions import TransformToCatalogAction
             xform_action = TransformToCatalogAction()
             xform_btn = pn.widgets.Button(
-                name="Transform → Ref",
+                name="Transform → MathRef",
                 button_type="success",
                 icon="transform",
                 sizing_mode="stretch_width",
@@ -642,6 +775,7 @@ class TimeSeriesDataUIManager(DataUIManager):
                         _xa.callback(event, _dataui)
                 return _on_click
             xform_btn.on_click(_make_xform_handler(xform_action))
+            self._xform_btn = xform_btn
             items.append(xform_btn)
         return items
 
@@ -1000,7 +1134,7 @@ class TimeSeriesDataUIManager(DataUIManager):
                 )
             else:
                 try:
-                    data = cosine_lanczos(data_for_filter, "40h")
+                    data = cosine_lanczos(data_for_filter, self.tidal_filter_period)
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).warning(
