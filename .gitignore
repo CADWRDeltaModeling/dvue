@@ -69,3 +69,5 @@ dvue/_version.py
 junit.xml
 cache.db
 .cache-ds/
+.session_cache/
+.github/skills/
