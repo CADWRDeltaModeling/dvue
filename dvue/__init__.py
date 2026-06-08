@@ -7,6 +7,7 @@ __version__ = "0.1.0"
 from .dataui import DataProvider, DataUIManager
 from .actions import (
     PlotAction,
+    ReportAction,
     PermalinkAction,
     DownloadDataAction,
     DownloadDataCatalogAction,
@@ -47,6 +48,7 @@ __all__ = [
     "DataProvider",
     "DataUIManager",
     "PlotAction",
+    "ReportAction",
     "PermalinkAction",
     "DownloadDataAction",
     "DownloadDataCatalogAction",

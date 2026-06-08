@@ -459,3 +459,92 @@ Curve labels are `station/variable` when multiple variables are selected, or jus
 - When `normalize_ref()` cannot determine a `station` value, set it to a non-empty
   fallback (e.g. the `source` basename) so the auto-derived catalog name is stable.
 
+## 14. `ReportAction` — Catalog-Level Report Generation
+
+`ReportAction` is the catalog-level sibling of `PlotAction`.  Use it for any action
+that generates output from the **full catalog** rather than from a row selection —
+e.g. data-coverage summaries, gap reports, quality metrics, or any output that would
+be awkward to frame around a user selection.
+
+### When to use `ReportAction` vs `PlotAction`
+
+| Concern | `PlotAction` | `ReportAction` |
+|---|---|---|
+| Requires row selection | Yes (warns + aborts if empty) | No — full catalog always passed |
+| Data loading pipeline | Row-by-row via `get_refs_and_data()` | Report decides what it needs |
+| Override point | `render(df, refs_and_data, manager)` | `generate(catalog_df, manager)` |
+| Button state | Requires selection | Always enabled |
+| Tab label prefix | `str(n)` (default) | `"R{n}"` (default) |
+
+Both classes use the same threaded worker + `set_progress()` + `pn.Tabs` display
+infrastructure.
+
+### Minimal subclass example
+
+```python
+from dvue.actions import ReportAction
+import panel as pn
+
+
+class CoverageReportAction(ReportAction):
+    """Summarise station coverage per variable."""
+
+    def generate(self, catalog_df, manager):
+        # catalog_df is the full _dfcat — all rows, all columns.
+        # manager.get_data_reference(row).getData(time_range=...) can be called
+        # if the report needs to load actual time-series data.
+        summary = (
+            catalog_df.groupby("variable")
+            .agg(
+                stations=("station_id", "nunique"),
+                min_year=("min_year", "min"),
+                max_year=("max_year", "max"),
+            )
+            .reset_index()
+        )
+        return pn.Column(
+            pn.pane.Markdown("## Coverage Report"),
+            pn.widgets.Tabulator(summary, show_index=False, sizing_mode="stretch_both"),
+            sizing_mode="stretch_both",
+        )
+```
+
+### Registering via `get_data_actions`
+
+```python
+class MyManager(TimeSeriesDataUIManager):
+    def get_data_actions(self):
+        actions = super().get_data_actions()
+        report = CoverageReportAction()
+        actions.append(dict(
+            name="Report",
+            button_type="warning",
+            icon="report",
+            action_type="display",
+            callback=report.callback,
+        ))
+        return actions
+```
+
+No changes to `dvue/dataui.py` are needed — `create_data_actions()` is already
+duck-typed: any object with `callback(event, dataui)` is valid.
+
+### Threading contract
+
+`generate()` is called inside a daemon worker thread.  **Do not mutate Panel
+state directly inside `generate()`.**  Any Panel mutations (widget updates,
+`pn.state.curdoc` changes, etc.) must be scheduled via
+`pn.state.curdoc.add_next_tick_callback(...)`.  The final tab append and
+progress-bar update are handled automatically by `callback()`.
+
+The `doc` reference is not passed to `generate()` because `generate()` should
+return a finished Panel object — if it needs the doc for callbacks, capture
+`pn.state.curdoc` at the start of `generate()`.
+
+### Static image exports
+
+Return `pn.pane.Matplotlib(fig)`, `pn.pane.PNG(...)`, or `pn.pane.SVG(...)` from
+`generate()` to display static images inside the report tab.  No special framework
+support is required.
+
+

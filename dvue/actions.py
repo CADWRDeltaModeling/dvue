@@ -241,6 +241,175 @@ class TabulateAction(PlotAction):
         return tab
 
 
+class ReportAction:
+    """Base action for catalog-level report generation.
+
+    Unlike :class:`PlotAction`, a ``ReportAction`` operates on the **full
+    catalog** rather than on a row selection.  It is intended for reports that
+    summarise coverage, statistics, or data quality across all (or many) series
+    — tasks where requiring the user to select rows first would be awkward or
+    misleading.
+
+    Subclasses override :meth:`generate` to build and return any Panel-
+    renderable object (Markdown, HTML, Tabulator, HoloViews plot, Matplotlib
+    figure via ``pn.pane.Matplotlib``, PNG/SVG via ``pn.pane.PNG``/``SVG``, or
+    mixed ``pn.Column``/``pn.Row`` layouts).
+
+    **Threading contract** — :meth:`generate` is called inside a daemon worker
+    thread, exactly like :meth:`PlotAction.render`.  All Panel / Bokeh state
+    mutations (widget updates, ``pn.state.curdoc`` changes, etc.) must be
+    routed through ``doc.add_next_tick_callback()``.  The final ``pn.Tabs``
+    append and progress-bar update are handled automatically by
+    :meth:`callback`.
+
+    Usage::
+
+        class CoverageReportAction(ReportAction):
+            def generate(self, catalog_df, manager):
+                summary = (
+                    catalog_df.groupby("variable")
+                    .agg(
+                        stations=("station_id", "nunique"),
+                        min_year=("min_year", "min"),
+                        max_year=("max_year", "max"),
+                    )
+                    .reset_index()
+                )
+                return pn.Column(
+                    pn.pane.Markdown("## Coverage Report"),
+                    pn.widgets.Tabulator(summary, show_index=False),
+                    sizing_mode="stretch_both",
+                )
+
+    Then register via :meth:`~dvue.DataUIManager.get_data_actions`::
+
+        def get_data_actions(self):
+            actions = super().get_data_actions()
+            report = CoverageReportAction()
+            actions.append(dict(
+                name="Report",
+                button_type="warning",
+                icon="report",
+                action_type="display",
+                callback=report.callback,
+            ))
+            return actions
+    """
+
+    def get_tab_label(self, tab_count: int) -> str:
+        """Return the tab title for the given tab counter.
+
+        Default prefix is ``"R"`` to distinguish report tabs from plot tabs
+        (``"P"`` / numbers) in the same display area.  Override to use a
+        more descriptive label.
+        """
+        return f"R{tab_count}"
+
+    def generate(self, catalog_df, manager):
+        """Build and return a Panel-renderable object from the full catalog.
+
+        Parameters
+        ----------
+        catalog_df : pd.DataFrame
+            The complete catalog DataFrame (all rows, all columns) from
+            ``dataui._dfcat``.  This is the same frame returned by
+            ``manager.get_data_catalog()``, but without an extra round-trip.
+        manager : DataUIManager
+            The data/view manager for this UI.  Use
+            ``manager.get_data_reference(row).getData(time_range=...)`` if the
+            report needs to load actual time-series data.
+
+        Returns
+        -------
+        panel.viewable.Viewable
+            Any Panel-renderable object.
+
+        Raises
+        ------
+        NotImplementedError
+            Subclasses must override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement generate(catalog_df, manager)"
+        )
+
+    def callback(self, event, dataui):
+        """Threaded callback — runs generate() and adds the result as a new tab.
+
+        Unlike :class:`PlotAction`, there is no row-selection guard.  The full
+        catalog (``dataui._dfcat``) is always passed to :meth:`generate`.
+        """
+        doc = pn.state.curdoc
+        catalog_df = dataui._dfcat.copy()
+        manager = dataui._dataui_manager
+
+        dataui._display_panel.loading = True
+        dataui.set_progress(-1, "Generating report…")
+
+        def _worker():
+            try:
+                doc.add_next_tick_callback(
+                    lambda: dataui.set_progress(20, "Generating report…")
+                )
+                report_panel = self.generate(catalog_df, manager)
+
+                def _update_display():
+                    if len(dataui._display_panel.objects) > 0 and isinstance(
+                        dataui._display_panel.objects[0], pn.Tabs
+                    ):
+                        tabs = dataui._display_panel.objects[0]
+                        dataui._tab_count += 1
+                        tabs.append((self.get_tab_label(dataui._tab_count), report_panel))
+                        tabs.active = len(tabs) - 1
+                    else:
+                        dataui._tab_count = 0
+                        dataui._display_panel.objects = [
+                            pn.Tabs(
+                                (self.get_tab_label(dataui._tab_count), report_panel),
+                                closable=True,
+                                sizing_mode="stretch_both",
+                                dynamic=True,
+                            )
+                        ]
+                    dataui.set_progress(100, "Done")
+
+                doc.add_next_tick_callback(_update_display)
+
+            except Exception as e:
+                stack_str = full_stack()
+                logger.error(stack_str)
+                short_msg = f"{type(e).__name__}: {e}"
+
+                def _show_error():
+                    dataui._display_panel.objects = [
+                        pn.pane.Markdown(
+                            f"**Error generating report**\n\n`{short_msg}`\n\n"
+                            "_See the application log for the full traceback._"
+                        )
+                    ]
+                    if pn.state.notifications is not None:
+                        pn.state.notifications.error(short_msg, duration=8000)
+                    else:
+                        logger.error("Could not display notification: %s", short_msg)
+
+                doc.add_next_tick_callback(_show_error)
+
+            finally:
+                doc.add_next_tick_callback(
+                    lambda: (
+                        setattr(dataui._display_panel, "loading", False),
+                        asyncio.create_task(self._hide_progress_after_delay(dataui)),
+                    )
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    async def _hide_progress_after_delay(self, dataui):
+        """Hide the progress bar and status label after a short delay."""
+        await asyncio.sleep(0.5)
+        dataui.hide_progress()
+
+
 class DownloadDataAction:
     def callback(self, event, dataui):
         # Guard: no selection → warn immediately without threading.

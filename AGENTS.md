@@ -44,6 +44,12 @@ Use this file when working in the `dvue/` workspace root.
 - Ensure Panel/HoloViews extensions are initialized consistently when changing startup behavior.
 - When adding catalog attributes used for filtering/grouping, document them and keep table/map selection flow intact.
 - If changing math-reference behavior, update examples and docs linked from `README-mathref.md`.
+- For **row-selection-based** output (plots, tables of selected series), subclass `PlotAction`
+  and override `render(df, refs_and_data, manager)`.
+- For **catalog-level, selection-free** generation (coverage reports, quality summaries, etc.),
+  subclass `ReportAction` and override `generate(catalog_df, manager)`.  No selection guard is
+  applied; the full `_dfcat` is always passed.  `generate()` runs in a daemon thread — route
+  all Panel mutations through `doc.add_next_tick_callback()`.
 
 ## TransformToCatalogAction — naming contract
 
