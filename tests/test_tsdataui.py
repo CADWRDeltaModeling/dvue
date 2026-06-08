@@ -1097,3 +1097,384 @@ class TestPlotActionRender:
         time_refs = [v for _, v in tooltips if "@Time" in str(v)]
         assert time_refs, f"No @Time reference found in hover_tooltips: {tooltips}"
 
+
+# ---------------------------------------------------------------------------
+# Tests — _process_curve_data: time shift
+# ---------------------------------------------------------------------------
+
+
+class TestTimeShiftTransform:
+    def test_time_shift_forward(self):
+        mgr = _manager_with_defaults()
+        mgr.time_shift = "1h"
+        data = _make_hourly_series(5)
+        original_first = data.index[0]
+        result = _run(mgr, data)
+        assert result.index[0] == original_first + pd.Timedelta("1h")
+
+    def test_time_shift_backward(self):
+        mgr = _manager_with_defaults()
+        mgr.time_shift = "-2h"
+        data = _make_hourly_series(5)
+        original_first = data.index[0]
+        result = _run(mgr, data)
+        assert result.index[0] == original_first - pd.Timedelta("2h")
+
+    def test_time_shift_disabled_when_empty(self):
+        mgr = _manager_with_defaults()
+        mgr.time_shift = ""
+        data = _make_daily_series(3)
+        original_idx = list(data.index)
+        result = _run(mgr, data)
+        assert list(result.index) == original_idx
+
+    def test_time_shift_invalid_no_crash(self):
+        mgr = _manager_with_defaults()
+        mgr.time_shift = "NOTVALID"
+        data = _make_daily_series(3)
+        # Should not raise; warning is logged and data is returned unchanged
+        result = _run(mgr, data)
+        assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# Tests — _process_curve_data: clip / screen
+# ---------------------------------------------------------------------------
+
+
+class TestClipTransform:
+    def test_clip_lower(self):
+        mgr = _manager_with_defaults()
+        mgr.clip_lower = 3.0
+        data = _make_daily_series(6)  # values 0–5
+        result = _run(mgr, data)
+        assert result.iloc[:, 0].min() == 3.0
+        assert result.iloc[5, 0] == 5.0
+
+    def test_clip_upper(self):
+        mgr = _manager_with_defaults()
+        mgr.clip_upper = 2.0
+        data = _make_daily_series(6)
+        result = _run(mgr, data)
+        assert result.iloc[:, 0].max() == 2.0
+        assert result.iloc[0, 0] == 0.0
+
+    def test_clip_both(self):
+        mgr = _manager_with_defaults()
+        mgr.clip_lower = 1.0
+        mgr.clip_upper = 3.0
+        data = _make_daily_series(6)
+        result = _run(mgr, data)
+        assert result.iloc[:, 0].min() == 1.0
+        assert result.iloc[:, 0].max() == 3.0
+
+    def test_clip_disabled_when_none(self):
+        mgr = _manager_with_defaults()
+        mgr.clip_lower = None
+        mgr.clip_upper = None
+        data = _make_daily_series(4)
+        result = _run(mgr, data)
+        assert result.iloc[0, 0] == 0.0
+        assert result.iloc[3, 0] == 3.0
+
+
+# ---------------------------------------------------------------------------
+# Tests — _process_curve_data: resample_fill options
+# ---------------------------------------------------------------------------
+
+
+class TestResampleFillTransform:
+    """Tests that ffill / bfill / interpolate fill modes run without error."""
+
+    def _resample_with_fill(self, fill_mode):
+        mgr = _manager_with_defaults()
+        mgr.resample_period = "1D"
+        mgr.resample_agg = "mean"
+        mgr.resample_fill = fill_mode
+        data = _make_hourly_series(72)  # 3 days × 24h — fully covered
+        return _run(mgr, data)
+
+    def test_resample_fill_ffill_no_crash(self):
+        result = self._resample_with_fill("ffill")
+        assert len(result) > 0
+
+    def test_resample_fill_bfill_no_crash(self):
+        result = self._resample_with_fill("bfill")
+        assert len(result) > 0
+
+    def test_resample_fill_interpolate_no_crash(self):
+        result = self._resample_with_fill("interpolate")
+        assert len(result) > 0
+
+    def test_resample_fill_empty_string_is_noop(self):
+        mgr = _manager_with_defaults()
+        mgr.resample_period = "1D"
+        mgr.resample_agg = "mean"
+        mgr.resample_fill = ""
+        data = _make_hourly_series(48)
+        result = _run(mgr, data)
+        assert len(result) == 2  # 48h → 2 daily rows; no extra fill applied
+
+
+# ---------------------------------------------------------------------------
+# Tests — _process_curve_data: rolling min_periods
+# ---------------------------------------------------------------------------
+
+
+class TestRollingMinPeriodsTransform:
+    def test_rolling_min_periods_1_no_leading_nan(self):
+        """Default min_periods=1: time-based window always has ≥1 sample → no NaN at start."""
+        mgr = _manager_with_defaults()
+        mgr.rolling_window = "3h"
+        mgr.rolling_agg = "mean"
+        mgr.rolling_min_periods = 1
+        data = _make_hourly_series(10)
+        result = _run(mgr, data)
+        assert not pd.isna(result.iloc[0, 0])
+
+    def test_rolling_min_periods_3_drops_partial(self):
+        """min_periods=3: rows with fewer than 3 obs in the window become NaN."""
+        mgr = _manager_with_defaults()
+        mgr.rolling_window = "3h"
+        mgr.rolling_agg = "mean"
+        mgr.rolling_min_periods = 3
+        data = _make_hourly_series(10)
+        result = _run(mgr, data)
+        # Index 0 has 1 obs, index 1 has 2 obs — both below min_periods
+        assert pd.isna(result.iloc[0, 0])
+        assert pd.isna(result.iloc[1, 0])
+        # Index 2 has 3 obs [0,1,2] → not NaN
+        assert not pd.isna(result.iloc[2, 0])
+
+
+# ---------------------------------------------------------------------------
+# Tests — _process_curve_data: offset
+# ---------------------------------------------------------------------------
+
+
+class TestOffsetTransform:
+    def test_offset_positive(self):
+        mgr = _manager_with_defaults()
+        mgr.offset_value = 10.0
+        data = _make_daily_series(3)
+        result = _run(mgr, data)
+        for i in range(3):
+            assert abs(result.iloc[i, 0] - (i + 10.0)) < 1e-9
+
+    def test_offset_negative(self):
+        mgr = _manager_with_defaults()
+        mgr.offset_value = -5.0
+        data = _make_daily_series(3)
+        result = _run(mgr, data)
+        assert abs(result.iloc[0, 0] - (-5.0)) < 1e-9
+
+    def test_offset_zero_is_noop(self):
+        mgr = _manager_with_defaults()
+        mgr.offset_value = 0.0
+        data = _make_daily_series(3)
+        result = _run(mgr, data)
+        assert abs(result.iloc[0, 0] - 0.0) < 1e-9
+        assert abs(result.iloc[2, 0] - 2.0) < 1e-9
+
+    def test_offset_applied_after_scale(self):
+        """Result must be x * scale + offset (scale first, then offset)."""
+        mgr = _manager_with_defaults()
+        mgr.scale_factor = 2.0
+        mgr.offset_value = 1.0
+        data = _make_daily_series(3)
+        result = _run(mgr, data)
+        # value[1] = 1 * 2 + 1 = 3
+        assert abs(result.iloc[1, 0] - 3.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Tests — _build_expression_and_tag: new transforms
+# ---------------------------------------------------------------------------
+
+
+class TestTransformToCatalogNewExpressions:
+    """Cover the new transform branches added to _build_expression_and_tag."""
+
+    def _mgr(self, **kwargs):
+        mgr = _manager_with_defaults()
+        for k, v in kwargs.items():
+            setattr(mgr, k, v)
+        return mgr
+
+    def test_time_shift_tag_and_expr(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(time_shift="-1H")
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "shift(freq='-1H')" in expr
+        assert tag == "sh_-1H"
+
+    def test_fill_gap_tag_and_expr(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(fill_gap=5)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "interpolate(limit=5)" in expr
+        assert tag == "fill5"
+
+    def test_clip_lower_only_tag_and_expr(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(clip_lower=0.0)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "clip(lower=0.0, upper=None)" in expr
+        assert tag == "clL0.0"
+
+    def test_clip_upper_only_tag_and_expr(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(clip_upper=100.0)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "clip(lower=None, upper=100.0)" in expr
+        assert tag == "clU100.0"
+
+    def test_clip_both_bounds_tag_and_expr(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(clip_lower=0.0, clip_upper=100.0)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "clip(lower=0.0, upper=100.0)" in expr
+        assert "cl0.0_100.0" in tag
+
+    def test_resample_fill_ffill_tag(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(resample_period="1D", resample_agg="mean", resample_fill="ffill")
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert ".ffill()" in expr
+        assert tag == "1D_mean_ff"
+
+    def test_resample_fill_bfill_tag(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(resample_period="1D", resample_agg="mean", resample_fill="bfill")
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert ".bfill()" in expr
+        assert tag == "1D_mean_bf"
+
+    def test_resample_fill_interpolate_tag(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(resample_period="1D", resample_agg="mean", resample_fill="interpolate")
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert ".interpolate()" in expr
+        assert tag == "1D_mean_itp"
+
+    def test_rolling_with_min_periods_tag(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(rolling_window="24H", rolling_agg="mean", rolling_min_periods=3)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "min_periods=3" in expr
+        assert tag == "r24H_mean_mp3"
+
+    def test_rolling_default_min_periods_no_suffix(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(rolling_window="24H", rolling_agg="mean", rolling_min_periods=1)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "min_periods" not in expr
+        assert tag == "r24H_mean"
+
+    def test_offset_tag_and_expr(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(offset_value=5.0)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert "+ 5.0" in expr
+        assert tag == "o5.0"
+
+    def test_offset_zero_excluded(self):
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(offset_value=0.0)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert tag == ""
+
+    def test_time_shift_and_scale_chained(self):
+        """time_shift appears before scale in both expression and tag order."""
+        from dvue.actions import TransformToCatalogAction
+        mgr = self._mgr(time_shift="1H", scale_factor=2.0)
+        expr, tag = TransformToCatalogAction._build_expression_and_tag(mgr)
+        assert expr.index("shift") < expr.index("* 2.0")
+        assert tag.startswith("sh_1H")
+        assert tag.endswith("x2.0")
+
+
+# ---------------------------------------------------------------------------
+# Tests — DescriptiveStatsAction
+# ---------------------------------------------------------------------------
+
+
+class TestDescriptiveStatsAction:
+    """Tests for DescriptiveStatsAction.render()."""
+
+    def _refs_and_data(self, n_values=10, name="stn_A"):
+        reader = _make_reader()
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(reader=reader, name=name, B="STA_A", C="FLOW"))
+        ref = cat.get(name=name)
+        idx = pd.date_range("2020-01-01", periods=n_values, freq="1D")
+        data = pd.DataFrame({"value": range(n_values)}, index=idx, dtype="float64")
+        row = pd.Series({"name": name, "B": "STA_A", "C": "FLOW"})
+        return [(row, ref, data)]
+
+    def test_render_returns_tabulator(self):
+        import panel as pn
+        from dvue.actions import DescriptiveStatsAction
+        mgr = _manager_with_defaults()
+        result = DescriptiveStatsAction().render(None, self._refs_and_data(10), mgr)
+        assert isinstance(result, pn.widgets.Tabulator)
+
+    def test_render_expected_stat_columns(self):
+        import panel as pn
+        from dvue.actions import DescriptiveStatsAction
+        mgr = _manager_with_defaults()
+        result = DescriptiveStatsAction().render(None, self._refs_and_data(10), mgr)
+        cols = set(result.value.columns)
+        for expected in ("count", "min", "max", "mean", "std", "p50", "sum"):
+            assert expected in cols, f"Missing stats column: {expected}"
+
+    def test_render_correct_count(self):
+        from dvue.actions import DescriptiveStatsAction
+        mgr = _manager_with_defaults()
+        result = DescriptiveStatsAction().render(None, self._refs_and_data(10), mgr)
+        assert result.value.loc["stn_A", "count"] == 10
+
+    def test_render_correct_mean(self):
+        from dvue.actions import DescriptiveStatsAction
+        mgr = _manager_with_defaults()
+        # values 0..9 → mean = 4.5
+        result = DescriptiveStatsAction().render(None, self._refs_and_data(10), mgr)
+        assert abs(result.value.loc["stn_A", "mean"] - 4.5) < 1e-4
+
+    def test_render_empty_refs_returns_markdown(self):
+        import panel as pn
+        from dvue.actions import DescriptiveStatsAction
+        mgr = _manager_with_defaults()
+        result = DescriptiveStatsAction().render(None, [], mgr)
+        assert isinstance(result, pn.pane.Markdown)
+
+    def test_render_none_data_skipped(self):
+        """A (row, ref, None) entry should be skipped without crash."""
+        import panel as pn
+        from dvue.actions import DescriptiveStatsAction
+        reader = _make_reader()
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(reader=reader, name="stn_A", B="STA_A", C="FLOW"))
+        ref = cat.get(name="stn_A")
+        row = pd.Series({"name": "stn_A"})
+        refs_and_data = [(row, ref, None)]
+        mgr = _manager_with_defaults()
+        result = DescriptiveStatsAction().render(None, refs_and_data, mgr)
+        assert isinstance(result, pn.pane.Markdown)
+
+    def test_get_tab_label(self):
+        from dvue.actions import DescriptiveStatsAction
+        action = DescriptiveStatsAction()
+        assert action.get_tab_label(1) == "S1"
+        assert action.get_tab_label(5) == "S5"
+
+    def test_stats_action_registered_before_clear_cache(self):
+        """Stats action must appear in get_data_actions, before Clear Cache."""
+        cat = _build_catalog(["file_a.dss"])
+        mgr = _TransformManager(cat)
+        names = [a["name"] for a in mgr.get_data_actions()]
+        assert "Stats" in names
+        stats_idx = names.index("Stats")
+        clear_idx = names.index("Clear Cache")
+        assert stats_idx < clear_idx
+
