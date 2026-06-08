@@ -286,3 +286,48 @@ class TestYamlRoundTrip:
         yaml_str = "views: []\n"
         mgr.load_from_yaml_str(yaml_str)
         assert mgr.view_names == ["All"]
+
+
+# ---------------------------------------------------------------------------
+# ViewsManager.add_to_view
+# ---------------------------------------------------------------------------
+
+
+class TestAddToView:
+    def test_add_to_view_basic(self, sample_df):
+        mgr = ViewsManager()
+        mgr.add_view(ViewDefinition(name="Manual", names=["a_ec"]))
+        n_added = mgr.add_to_view("Manual", ["b_ec", "c_flow"])
+        vdef = mgr.get_view_def("Manual")
+        assert vdef.names == ["a_ec", "b_ec", "c_flow"]
+        assert n_added == 2
+
+    def test_add_to_view_deduplicates(self, sample_df):
+        mgr = ViewsManager()
+        mgr.add_view(ViewDefinition(name="Manual", names=["a_ec", "b_ec"]))
+        v0 = mgr._version
+        n_added = mgr.add_to_view("Manual", ["b_ec", "c_flow"])
+        vdef = mgr.get_view_def("Manual")
+        assert vdef.names == ["a_ec", "b_ec", "c_flow"]
+        assert n_added == 1  # only c_flow was new
+        assert mgr._version == v0 + 1  # version still incremented
+
+    def test_add_to_view_criteria_view(self, sample_df):
+        """Appending names to a criteria-only view keeps criteria untouched;
+        matches_row then uses names (names take priority)."""
+        mgr = ViewsManager()
+        mgr.add_view(ViewDefinition(name="EC", criteria={"variable": "EC"}))
+        mgr.add_to_view("EC", ["c_flow"])
+        vdef = mgr.get_view_def("EC")
+        # Criteria preserved
+        assert vdef.criteria == {"variable": "EC"}
+        # Names appended
+        assert vdef.names == ["c_flow"]
+        # matches_row now uses names — only c_flow matches
+        result = sample_df[sample_df.apply(vdef.matches_row, axis=1)]
+        assert list(result["name"]) == ["c_flow"]
+
+    def test_add_to_view_unknown_view_raises_key_error(self):
+        mgr = ViewsManager()
+        with pytest.raises(KeyError):
+            mgr.add_to_view("NonExistent", ["ref_a"])

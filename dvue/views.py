@@ -214,6 +214,40 @@ class ViewsManager(param.Parameterized):
             self.active_view = new_name
         self._version += 1
 
+    def add_to_view(self, name: str, new_names: List[str]) -> int:
+        """Append *new_names* to the explicit names list of view *name*.
+
+        Deduplicates: names already present in the view are silently skipped.
+        If the view currently uses only ``criteria``, those criteria are left
+        untouched; since ``names`` takes priority in :meth:`ViewDefinition.matches_row`
+        the criteria become inactive once at least one name is added.
+
+        Parameters
+        ----------
+        name : str
+            Name of an existing user-defined view (not ``"All"``).
+        new_names : list[str]
+            Reference names to append.
+
+        Returns
+        -------
+        int
+            Count of names actually added (excludes pre-existing duplicates).
+
+        Raises
+        ------
+        KeyError
+            If no view named *name* exists.
+        """
+        vdef = self.get_view_def(name)
+        if vdef is None:
+            raise KeyError(f"No view named '{name!r}'.")
+        existing = set(vdef.names)
+        added = [n for n in new_names if n not in existing]
+        vdef.names.extend(added)
+        self._version += 1
+        return len(added)
+
     # ------------------------------------------------------------------
     # Filtering
     # ------------------------------------------------------------------
@@ -372,7 +406,17 @@ def create_views_tab(dataui: Any) -> pn.Column:
         visible=False,
     )
 
-    # ── Section C: Add view from current state ──────────────────────────────
+    # ── Section C: Create / Append — unified toggled section ────────────────
+    mode_toggle = pn.widgets.RadioButtonGroup(
+        options=["Create New", "Add to Existing"],
+        value="Create New",
+        button_type="default",
+        button_style="outline",
+        sizing_mode="stretch_width",
+        margin=(2, 0, 6, 0),
+    )
+
+    # -- Create New sub-panel --
     new_view_name_input = pn.widgets.TextInput(
         placeholder="New view name…",
         name="",
@@ -393,10 +437,48 @@ def create_views_tab(dataui: Any) -> pn.Column:
         sizing_mode="stretch_width",
         margin=(2, 0, 2, 2),
     )
-    add_section = pn.Column(
-        _section("Add View From…"),
+    create_new_panel = pn.Column(
         new_view_name_input,
         pn.Row(from_selection_btn, from_filters_btn, sizing_mode="stretch_width"),
+        sizing_mode="stretch_width",
+        visible=True,
+    )
+
+    # -- Add to Existing sub-panel --
+    _no_views_note = pn.pane.Markdown(
+        "_Create a named view first._",
+        sizing_mode="stretch_width",
+        margin=(0, 0, 4, 0),
+        visible=False,
+    )
+    append_view_select = pn.widgets.Select(
+        name="",
+        options=[v.name for v in mgr._views],
+        disabled=len(mgr._views) == 0,
+        sizing_mode="stretch_width",
+        margin=(2, 0, 4, 0),
+    )
+    add_to_view_btn = pn.widgets.Button(
+        name="Add Selected to View",
+        button_type="primary",
+        icon="plus",
+        sizing_mode="stretch_width",
+        disabled=len(mgr._views) == 0,
+        margin=(2, 0, 2, 0),
+    )
+    add_to_existing_panel = pn.Column(
+        _no_views_note,
+        append_view_select,
+        add_to_view_btn,
+        sizing_mode="stretch_width",
+        visible=False,
+    )
+
+    add_section = pn.Column(
+        _section("From Selection"),
+        mode_toggle,
+        create_new_panel,
+        add_to_existing_panel,
         pn.layout.Divider(),
         sizing_mode="stretch_width",
     )
@@ -440,10 +522,28 @@ def create_views_tab(dataui: Any) -> pn.Column:
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
+    # Tracks the last named view the user was in so the append dropdown can
+    # pre-select it when the user returns after browsing 'All'.
+    _last_named_view: List[str] = [""]  # mutable container for closure mutation
+
+    def _rebuild_view_select() -> None:
+        """Sync the 'Add to Existing' dropdown to the current view list."""
+        names = [v.name for v in mgr._views]
+        append_view_select.options = names
+        has_views = bool(names)
+        append_view_select.disabled = not has_views
+        add_to_view_btn.disabled = not has_views
+        _no_views_note.visible = not has_views
+        if has_views:
+            # Pre-select the last named view the user was in, if still available
+            preferred = _last_named_view[0]
+            append_view_select.value = preferred if preferred in names else names[0]
+
     def _rebuild_radio() -> None:
-        """Sync RadioButtonGroup options to current view list."""
+        """Sync RadioButtonGroup options and append dropdown to current view list."""
         radio.options = mgr.view_names
         radio.value = mgr.active_view
+        _rebuild_view_select()
 
     def _populate_editor() -> None:
         """Populate editor widgets from the active view definition."""
@@ -465,6 +565,9 @@ def create_views_tab(dataui: Any) -> pn.Column:
     # ── Wiring: view switcher ────────────────────────────────────────────────
 
     def _on_radio_change(event: Any) -> None:
+        # Track the last named (non-"All") view for pre-selecting the append dropdown
+        if event.old != "All":
+            _last_named_view[0] = event.old
         mgr.active_view = event.new
         _populate_editor()
 
@@ -613,6 +716,47 @@ def create_views_tab(dataui: Any) -> pn.Column:
         status.object = f"✓ View '{view_name}' created from table filters."
 
     from_filters_btn.on_click(_on_from_filters_click)
+
+    # ── Wiring: mode toggle ──────────────────────────────────────────────────
+
+    def _on_mode_toggle_change(event: Any) -> None:
+        is_create = event.new == "Create New"
+        create_new_panel.visible = is_create
+        add_to_existing_panel.visible = not is_create
+        if not is_create:
+            _rebuild_view_select()
+
+    mode_toggle.param.watch(_on_mode_toggle_change, "value")
+
+    # ── Wiring: add to existing view ─────────────────────────────────────────
+
+    def _on_add_to_view_click(event: Any) -> None:
+        target = append_view_select.value
+        if not target:
+            status.object = "⚠️ No view selected."
+            return
+        sel = dataui.display_table.selection
+        if not sel:
+            status.object = "⚠️ No rows selected in the table."
+            return
+        df = dataui._dfcat_full
+        if "name" not in df.columns:
+            status.object = "⚠️ Catalog has no 'name' column."
+            return
+        selected_names = df.iloc[sel]["name"].tolist()
+        try:
+            n_added = mgr.add_to_view(target, selected_names)
+        except KeyError as exc:
+            status.object = f"⚠️ {exc}"
+            return
+        dataui._refresh_table_from_view()
+        already = len(selected_names) - n_added
+        msg = f"✓ Added {n_added} row(s) to '{target}'."
+        if already:
+            msg += f" ({already} already present.)"
+        status.object = msg
+
+    add_to_view_btn.on_click(_on_add_to_view_click)
 
     # ── Wiring: YAML upload ──────────────────────────────────────────────────
 
