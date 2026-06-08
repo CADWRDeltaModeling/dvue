@@ -97,6 +97,21 @@ class TimeSeriesDataUIManager(DataUIManager):
     fill_gap = param.Integer(
         default=0, doc="Fill gaps in data upto this limit, only when a positive integer"
     )
+    # --- Time shift ---
+    time_shift = param.String(
+        default="",
+        doc="Shift the time index by a pandas offset string (e.g. '-1H', '15min', '1D'). "
+            "Positive values shift forward; negative values shift backward. Empty = disabled.",
+    )
+    # --- Clip / screen ---
+    clip_lower = param.Number(
+        default=None, allow_None=True,
+        doc="Clip values below this threshold (screen outliers). None = no lower bound.",
+    )
+    clip_upper = param.Number(
+        default=None, allow_None=True,
+        doc="Clip values above this threshold (screen outliers). None = no upper bound.",
+    )
     do_tidal_filter = param.Boolean(default=False, doc="Apply tidal filter", constant=not _VTOOLS_AVAILABLE)
     tidal_filter_period = param.String(
         default="40H",
@@ -113,6 +128,12 @@ class TimeSeriesDataUIManager(DataUIManager):
         objects=["mean", "max", "min", "sum", "std"],
         doc="Aggregation method when resampling.",
     )
+    resample_fill = param.Selector(
+        default="",
+        objects=["", "ffill", "bfill", "interpolate"],
+        doc="Fill method applied after resampling (useful for upsampling). "
+            "Empty = no fill (NaN left in place).",
+    )
     # --- Rolling window ---
     rolling_window = param.String(
         default="",
@@ -120,8 +141,13 @@ class TimeSeriesDataUIManager(DataUIManager):
     )
     rolling_agg = param.Selector(
         default="mean",
-        objects=["mean", "max", "min", "std"],
+        objects=["mean", "max", "min", "std", "median"],
         doc="Aggregation method for rolling window.",
+    )
+    rolling_min_periods = param.Integer(
+        default=1, bounds=(1, None),
+        doc="Minimum number of non-NaN observations required in the rolling window to "
+            "produce a non-NaN result. Default 1 keeps edge values.",
     )
     # --- Differencing ---
     do_diff = param.Boolean(default=False, doc="Apply first-difference (period-over-period change).")
@@ -133,6 +159,12 @@ class TimeSeriesDataUIManager(DataUIManager):
     # --- Scale factor ---
     scale_factor = param.Number(
         default=1.0, doc="Multiply all values by this factor. 1.0 = no scaling."
+    )
+    # --- Offset (add constant) ---
+    offset_value = param.Number(
+        default=0.0,
+        doc="Add this constant to all values after scaling (e.g. datum shift, bias correction). "
+            "0.0 = disabled.",
     )
     irregular_curve_connection = param.Selector(
         objects=["steps-post", "steps-pre", "steps-mid", "linear"],
@@ -320,6 +352,14 @@ class TimeSeriesDataUIManager(DataUIManager):
             icon="folder-plus",
             action_type="display",
             callback=AddSourceFilesAction().callback,
+        ))
+        from .actions import DescriptiveStatsAction
+        actions.append(dict(
+            name="Stats",
+            button_type="light",
+            icon="chart-bar",
+            action_type="display",
+            callback=DescriptiveStatsAction().callback,
         ))
         if self.show_clear_cache:
             from .actions import ClearCacheAction
@@ -510,10 +550,18 @@ class TimeSeriesDataUIManager(DataUIManager):
         _M = (1, 3, 1, 0)  # tight uniform margin for all widgets
         fill_gap_w = pn.widgets.IntInput.from_param(
             self.param.fill_gap, name="", width=60, margin=_M)
+        time_shift_w = pn.widgets.TextInput.from_param(
+            self.param.time_shift, name="", placeholder="e.g. -1H, 15min", width=100, margin=_M)
+        clip_lower_w = pn.widgets.FloatInput.from_param(
+            self.param.clip_lower, name="", placeholder="min", width=70, margin=_M)
+        clip_upper_w = pn.widgets.FloatInput.from_param(
+            self.param.clip_upper, name="", placeholder="max", width=70, margin=_M)
         resample_period_w = pn.widgets.TextInput.from_param(
             self.param.resample_period, name="", placeholder="e.g. 1D", width=80, margin=_M)
         resample_agg_w = pn.widgets.Select.from_param(
-            self.param.resample_agg, name="", width=72, margin=_M)
+            self.param.resample_agg, name="", width=80, margin=_M)
+        resample_fill_w = pn.widgets.Select.from_param(
+            self.param.resample_fill, name="", width=80, margin=_M)
         tidal_w = pn.widgets.Checkbox.from_param(
             self.param.do_tidal_filter, name="Tidal filter",
             disabled=not _VTOOLS_AVAILABLE, margin=_M)
@@ -522,7 +570,9 @@ class TimeSeriesDataUIManager(DataUIManager):
         rolling_window_w = pn.widgets.TextInput.from_param(
             self.param.rolling_window, name="", placeholder="e.g. 24H", width=80, margin=_M)
         rolling_agg_w = pn.widgets.Select.from_param(
-            self.param.rolling_agg, name="", width=72, margin=_M)
+            self.param.rolling_agg, name="", width=80, margin=_M)
+        rolling_min_periods_w = pn.widgets.IntInput.from_param(
+            self.param.rolling_min_periods, name="", width=50, margin=_M)
         do_diff_w = pn.widgets.Checkbox.from_param(
             self.param.do_diff, name="Diff", margin=_M)
         diff_n_w = pn.widgets.IntInput.from_param(
@@ -531,6 +581,8 @@ class TimeSeriesDataUIManager(DataUIManager):
             self.param.do_cumsum, name="Cumsum", margin=_M)
         scale_w = pn.widgets.FloatInput.from_param(
             self.param.scale_factor, name="", width=80, margin=_M)
+        offset_w = pn.widgets.FloatInput.from_param(
+            self.param.offset_value, name="", width=80, margin=_M)
         sensible_w = pn.widgets.Checkbox.from_param(
             self.param.sensible_range_yaxis, name="Sensible", margin=_M)
         pct_range_w = pn.widgets.RangeSlider.from_param(
@@ -576,20 +628,26 @@ class TimeSeriesDataUIManager(DataUIManager):
         )
 
         _transform_watch_params = [
+            "time_shift", "clip_lower", "clip_upper",
             "fill_gap", "do_tidal_filter", "tidal_filter_period", "resample_period", "resample_agg",
-            "rolling_window", "rolling_agg", "do_diff", "diff_periods",
-            "do_cumsum", "scale_factor",
+            "resample_fill", "rolling_window", "rolling_agg", "rolling_min_periods",
+            "do_diff", "diff_periods",
+            "do_cumsum", "scale_factor", "offset_value",
         ]
 
         def _is_any_transform_active():
             return (
-                (getattr(self, "fill_gap", 0) or 0) > 0
+                bool(getattr(self, "time_shift", "").strip())
+                or (getattr(self, "fill_gap", 0) or 0) > 0
+                or getattr(self, "clip_lower", None) is not None
+                or getattr(self, "clip_upper", None) is not None
                 or getattr(self, "do_tidal_filter", False)
                 or bool(getattr(self, "resample_period", "").strip())
                 or bool(getattr(self, "rolling_window", "").strip())
                 or getattr(self, "do_diff", False)
                 or getattr(self, "do_cumsum", False)
                 or getattr(self, "scale_factor", 1.0) != 1.0
+                or getattr(self, "offset_value", 0.0) != 0.0
             )
 
         def _update_expr_and_btn(*args):
@@ -620,18 +678,46 @@ class TimeSeriesDataUIManager(DataUIManager):
 
         # ── Build Transform tab ──────────────────────────────────────────────
         transform_widgets = pn.Column(
-            # ── ① Gap Fill ———————————————————————————————————————
-            _section("① Gap Fill"),
+            # ── ① Data Prep ——————————————————————————————————————
+            _section("① Data Prep"),
             pn.Row(
                 pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Interpolation limit</span>",
+                    "<span style='font-size:11px;color:#666'>Gap fill limit</span>",
                     align=("start", "center"), margin=(0, 6, 0, 6),
                 ),
                 fill_gap_w,
                 align="center",
             ),
-            # ── ② Smooth ————————————————————————————————————————
-            _section("② Smooth"),
+            pn.Row(
+                pn.pane.HTML(
+                    "<span style='font-size:11px;color:#666'>Time shift</span>",
+                    align=("start", "center"), margin=(0, 6, 0, 6),
+                ),
+                time_shift_w,
+                align="center",
+            ),
+            # ── ② Screen / Clip ——————————————————————————————————
+            _section("② Screen / Clip"),
+            pn.pane.HTML(
+                "<div style='font-size:10px;color:#888;font-style:italic;"
+                "margin:0 0 4px 6px'>Set bounds to screen out outliers. Leave blank for no limit.</div>",
+                sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+            ),
+            pn.Row(
+                clip_lower_w,
+                pn.pane.HTML(
+                    "<span style='font-size:10px;color:#999;align-self:center'>lower</span>",
+                    align=("start", "center"),
+                ),
+                clip_upper_w,
+                pn.pane.HTML(
+                    "<span style='font-size:10px;color:#999;align-self:center'>upper</span>",
+                    align=("start", "center"),
+                ),
+                align="center",
+            ),
+            # ── ③ Smooth ————————————————————————————————————————
+            _section("③ Smooth"),
             pn.pane.HTML(
                 "<div style='font-size:10px;color:#888;font-style:italic;"
                 "margin:0 0 4px 6px'>Tidal filter runs <b>before</b> Resample"
@@ -658,9 +744,17 @@ class TimeSeriesDataUIManager(DataUIManager):
                 ),
                 align="center",
             ),
+            pn.Row(
+                pn.pane.HTML(
+                    "<span style='font-size:11px;color:#666'>Min periods</span>",
+                    align=("start", "center"), margin=(0, 6, 0, 6),
+                ),
+                rolling_min_periods_w,
+                align="center",
+            ),
             smooth_warning,
-            # ── ③ Resample —————————————————————————————————————
-            _section("③ Resample"),
+            # ── ④ Resample —————————————————————————————————————
+            _section("④ Resample"),
             pn.Row(
                 resample_period_w, resample_agg_w,
                 pn.pane.HTML(
@@ -670,17 +764,31 @@ class TimeSeriesDataUIManager(DataUIManager):
                 ),
                 align="center",
             ),
-            # ── ④ Diff / Cumsum ————————————————————————————————
-            _section("④ Diff / Cumsum"),
+            pn.Row(
+                resample_fill_w,
+                pn.pane.HTML(
+                    "<span style='font-size:10px;color:#999;align-self:center'>"
+                    "fill (upsampling)</span>",
+                    align=("start", "center"),
+                ),
+                align="center",
+            ),
+            # ── ⑤ Diff / Cumsum ————————————————————————————————
+            _section("⑤ Diff / Cumsum"),
             pn.Row(do_diff_w, diff_n_w, cumsum_w, align="center"),
-            # ── ⑤ Scale —————————————————————————————————————————
-            _section("⑤ Scale"),
+            # ── ⑥ Arithmetic ————————————————————————————————————
+            _section("⑥ Arithmetic"),
             pn.Row(
                 pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Factor ×</span>",
+                    "<span style='font-size:11px;color:#666'>Scale ×</span>",
                     align=("start", "center"), margin=(0, 6, 0, 6),
                 ),
                 scale_w,
+                pn.pane.HTML(
+                    "<span style='font-size:11px;color:#666'>Offset +</span>",
+                    align=("start", "center"), margin=(0, 6, 0, 6),
+                ),
+                offset_w,
                 align="center",
             ),
             # ── Expression preview + Save ──────────────────────────────────
@@ -881,15 +989,21 @@ class TimeSeriesDataUIManager(DataUIManager):
     _URL_PARAM_MAP: dict = {
         "time_range": "tr",
         "fill_gap": "fg",
+        "time_shift": "ts",
+        "clip_lower": "cll",
+        "clip_upper": "clu",
         "do_tidal_filter": "tf",
         "resample_period": "rp",
         "resample_agg": "ra",
+        "resample_fill": "rf",
         "rolling_window": "rw",
         "rolling_agg": "rwa",
+        "rolling_min_periods": "rmp",
         "do_diff": "dd",
         "diff_periods": "dp",
         "do_cumsum": "cs",
         "scale_factor": "sf",
+        "offset_value": "ov",
         "show_legend": "sl",
         "legend_position": "lp",
         "regular_curve_connection": "rcc",
@@ -1102,8 +1216,22 @@ class TimeSeriesDataUIManager(DataUIManager):
             data = data[(data.index >= t0) & (data.index <= t1)]
 
         # Apply optional data transformations
+
+        # ① Time shift — move the index forward/backward before any processing
+        if self.time_shift.strip():
+            try:
+                data = data.shift(freq=self.time_shift)
+            except Exception as e:
+                logger.warning(
+                    f"Time shift (shift={self.time_shift!r}) failed and was skipped: {e}"
+                )
+
         if self.fill_gap > 0:
             data = data.interpolate(limit=self.fill_gap)
+
+        # ③ Clip / screen — remove outliers before filtering or resampling
+        if self.clip_lower is not None or self.clip_upper is not None:
+            data = data.clip(lower=self.clip_lower, upper=self.clip_upper)
 
         # Tidal filter is applied first — it requires raw sub-daily data.
         # Resampling afterwards makes sense (e.g. daily-average the filtered signal);
@@ -1148,6 +1276,13 @@ class TimeSeriesDataUIManager(DataUIManager):
                 data = agg_fn()
                 # Drop all-NaN rows that arise when resampling sparse data
                 data = data.dropna(how="all")
+                # Optional fill for upsampling (e.g. ffill when going to finer resolution)
+                if self.resample_fill == "ffill":
+                    data = data.ffill()
+                elif self.resample_fill == "bfill":
+                    data = data.bfill()
+                elif self.resample_fill == "interpolate":
+                    data = data.interpolate()
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -1158,7 +1293,9 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Rolling window (applied after resample)
         if self.rolling_window.strip():
             try:
-                roller = data.astype("float64").rolling(self.rolling_window)
+                roller = data.astype("float64").rolling(
+                    self.rolling_window, min_periods=self.rolling_min_periods
+                )
                 agg_fn = getattr(roller, self.rolling_agg)
                 data = agg_fn()
             except Exception as e:
@@ -1179,6 +1316,10 @@ class TimeSeriesDataUIManager(DataUIManager):
         # Scale factor
         if self.scale_factor != 1.0:
             data = data * self.scale_factor
+
+        # Offset (add constant) — applied last, after scaling
+        if self.offset_value != 0.0:
+            data = data + self.offset_value
 
         return data
 

@@ -579,11 +579,31 @@ class TransformToCatalogAction:
         expr = "x"
         tags = []
 
-        # Fill gaps first — same order as the plot path in tsdataui.py.
+        # Time shift — shifts the index before any other transform.
+        time_shift = getattr(manager, "time_shift", "").strip()
+        if time_shift:
+            expr = f"{expr}.shift(freq='{time_shift}')"
+            tags.append(f"sh_{time_shift}")
+
+        # Fill gaps — same order as the plot path in tsdataui.py.
         fill_gap = getattr(manager, "fill_gap", 0)
         if fill_gap and fill_gap > 0:
             expr = f"{expr}.interpolate(limit={fill_gap})"
             tags.append(f"fill{fill_gap}")
+
+        # Clip / screen — remove outliers before filtering or resampling.
+        clip_lower = getattr(manager, "clip_lower", None)
+        clip_upper = getattr(manager, "clip_upper", None)
+        if clip_lower is not None or clip_upper is not None:
+            lo_str = repr(clip_lower) if clip_lower is not None else "None"
+            hi_str = repr(clip_upper) if clip_upper is not None else "None"
+            expr = f"{expr}.clip(lower={lo_str}, upper={hi_str})"
+            if clip_lower is not None and clip_upper is not None:
+                tags.append(f"cl{clip_lower!r}_{clip_upper!r}")
+            elif clip_lower is not None:
+                tags.append(f"clL{clip_lower!r}")
+            else:
+                tags.append(f"clU{clip_upper!r}")
 
         # Tidal filter next — operates on raw (gap-filled) sub-daily data.
         # Resampling and rolling are applied to the filtered result.
@@ -597,13 +617,29 @@ class TransformToCatalogAction:
         if period:
             agg = getattr(manager, "resample_agg", "mean")
             expr = f"{expr}.resample('{period}').{agg}().dropna(how='all')"
-            tags.append(f"{period}_{agg}")
+            fill = getattr(manager, "resample_fill", "").strip()
+            if fill == "ffill":
+                expr = f"{expr}.ffill()"
+                tags.append(f"{period}_{agg}_ff")
+            elif fill == "bfill":
+                expr = f"{expr}.bfill()"
+                tags.append(f"{period}_{agg}_bf")
+            elif fill == "interpolate":
+                expr = f"{expr}.interpolate()"
+                tags.append(f"{period}_{agg}_itp")
+            else:
+                tags.append(f"{period}_{agg}")
 
         window = getattr(manager, "rolling_window", "").strip()
         if window:
             agg = getattr(manager, "rolling_agg", "mean")
-            expr = f"{expr}.rolling('{window}').{agg}()"
-            tags.append(f"r{window}_{agg}")
+            min_p = getattr(manager, "rolling_min_periods", 1)
+            if min_p != 1:
+                expr = f"{expr}.rolling('{window}', min_periods={min_p}).{agg}()"
+                tags.append(f"r{window}_{agg}_mp{min_p}")
+            else:
+                expr = f"{expr}.rolling('{window}').{agg}()"
+                tags.append(f"r{window}_{agg}")
 
         if getattr(manager, "do_diff", False):
             periods = getattr(manager, "diff_periods", 1)
@@ -618,6 +654,11 @@ class TransformToCatalogAction:
         if scale != 1.0:
             expr = f"{expr} * {scale!r}"
             tags.append(f"x{scale!r}")
+
+        offset = getattr(manager, "offset_value", 0.0)
+        if offset != 0.0:
+            expr = f"{expr} + {offset!r}"
+            tags.append(f"o{offset!r}")
 
         tag = "__".join(tags) if tags else ""
         return expr, tag
@@ -1206,6 +1247,69 @@ class SourceCompareAction:
         )
 
         dataui.show_in_display_panel("Source Compare", form)
+
+
+class DescriptiveStatsAction(PlotAction):
+    """Display per-series descriptive statistics in a Panel table.
+
+    Computes for each selected series (after active transforms are applied):
+    count, first/last timestamp, min, max, mean, std, skew,
+    percentiles (5 / 25 / 50 / 75 / 95), and cumulative sum.
+
+    Reuses :class:`PlotAction`'s threaded callback for progress-bar and
+    tab management; only :meth:`render` is overridden.
+    """
+
+    def get_tab_label(self, tab_count: int) -> str:
+        return f"S{tab_count}"
+
+    def render(self, df, refs_and_data, manager):
+        rows = []
+        for row, ref, data in refs_and_data:
+            if data is None or (hasattr(data, "empty") and data.empty):
+                continue
+            try:
+                # Apply active transforms so stats reflect what the user sees on the plot.
+                time_range = getattr(manager, "time_range", None)
+                if hasattr(manager, "_process_curve_data"):
+                    data = manager._process_curve_data(data, row, time_range)
+                if data is None or (hasattr(data, "empty") and data.empty):
+                    continue
+                s = data.iloc[:, 0].dropna()
+                if s.empty:
+                    continue
+                name = row.get("name", str(getattr(row, "name", "?")))
+                rows.append({
+                    "series": name,
+                    "count": int(len(s)),
+                    "start": str(s.index.min())[:19],
+                    "end": str(s.index.max())[:19],
+                    "min": round(float(s.min()), 6),
+                    "max": round(float(s.max()), 6),
+                    "mean": round(float(s.mean()), 6),
+                    "std": round(float(s.std()), 6),
+                    "skew": round(float(s.skew()), 6),
+                    "p5": round(float(s.quantile(0.05)), 6),
+                    "p25": round(float(s.quantile(0.25)), 6),
+                    "p50": round(float(s.quantile(0.50)), 6),
+                    "p75": round(float(s.quantile(0.75)), 6),
+                    "p95": round(float(s.quantile(0.95)), 6),
+                    "sum": round(float(s.sum()), 6),
+                })
+            except Exception as e:
+                logger.warning(
+                    "DescriptiveStatsAction: stats failed for %s: %s",
+                    row.get("name", "?"), e,
+                )
+        if not rows:
+            return pn.pane.Markdown("*No data to summarise.*")
+        stats_df = pd.DataFrame(rows).set_index("series")
+        return pn.widgets.Tabulator(
+            stats_df,
+            sizing_mode="stretch_width",
+            show_index=True,
+            header_filters=False,
+        )
 
 
 class AddSourceFilesAction:
