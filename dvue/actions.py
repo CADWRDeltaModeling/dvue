@@ -1250,14 +1250,13 @@ class SourceCompareAction:
 
 
 class DescriptiveStatsAction(PlotAction):
-    """Display per-series descriptive statistics in a Panel table.
+    """Display per-series descriptive statistics in a summary table.
 
-    Computes for each selected series (after active transforms are applied):
-    count, first/last timestamp, min, max, mean, std, skew,
-    percentiles (5 / 25 / 50 / 75 / 95), and cumulative sum.
-
-    Reuses :class:`PlotAction`'s threaded callback for progress-bar and
-    tab management; only :meth:`render` is overridden.
+    Shows a Tabulator with one row per selected series containing:
+    count, date range (start/end), 5-number summary (min, p25, p50, p75, max),
+    mean, std, skew, and sum.  Transforms are applied via
+    ``_process_curve_data`` before computing statistics so the numbers match
+    what the user sees on the plot.
     """
 
     def get_tab_label(self, tab_count: int) -> str:
@@ -1265,11 +1264,11 @@ class DescriptiveStatsAction(PlotAction):
 
     def render(self, df, refs_and_data, manager):
         rows = []
+
         for row, ref, data in refs_and_data:
             if data is None or (hasattr(data, "empty") and data.empty):
                 continue
             try:
-                # Apply active transforms so stats reflect what the user sees on the plot.
                 time_range = getattr(manager, "time_range", None)
                 if hasattr(manager, "_process_curve_data"):
                     data = manager._process_curve_data(data, row, time_range)
@@ -1282,34 +1281,39 @@ class DescriptiveStatsAction(PlotAction):
                 rows.append({
                     "series": name,
                     "count": int(len(s)),
-                    "start": str(s.index.min())[:19],
-                    "end": str(s.index.max())[:19],
-                    "min": round(float(s.min()), 6),
-                    "max": round(float(s.max()), 6),
-                    "mean": round(float(s.mean()), 6),
-                    "std": round(float(s.std()), 6),
-                    "skew": round(float(s.skew()), 6),
-                    "p5": round(float(s.quantile(0.05)), 6),
-                    "p25": round(float(s.quantile(0.25)), 6),
-                    "p50": round(float(s.quantile(0.50)), 6),
-                    "p75": round(float(s.quantile(0.75)), 6),
-                    "p95": round(float(s.quantile(0.95)), 6),
-                    "sum": round(float(s.sum()), 6),
+                    "start": str(s.index.min())[:10],
+                    "end": str(s.index.max())[:10],
+                    "min": round(float(s.min()), 4),
+                    "p25": round(float(s.quantile(0.25)), 4),
+                    "p50": round(float(s.quantile(0.50)), 4),
+                    "p75": round(float(s.quantile(0.75)), 4),
+                    "max": round(float(s.max()), 4),
+                    "mean": round(float(s.mean()), 4),
+                    "std": round(float(s.std()), 4),
+                    "skew": round(float(s.skew()), 4),
+                    "sum": round(float(s.sum()), 4),
                 })
             except Exception as e:
                 logger.warning(
                     "DescriptiveStatsAction: stats failed for %s: %s",
                     row.get("name", "?"), e,
                 )
+
         if not rows:
             return pn.pane.Markdown("*No data to summarise.*")
+
         stats_df = pd.DataFrame(rows).set_index("series")
-        return pn.widgets.Tabulator(
+
+        table = pn.widgets.Tabulator(
             stats_df,
             sizing_mode="stretch_width",
+            layout="fit_columns",
             show_index=True,
+            disabled=True,
+            theme="materialize",
             header_filters=False,
         )
+        return table
 
 
 class AddSourceFilesAction:
