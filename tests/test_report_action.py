@@ -225,8 +225,8 @@ class TestReportActionCallback:
         tabs = dataui._display_panel.objects[0]
         assert len(tabs) == 2
 
-    def test_callback_error_shows_error_pane(self, monkeypatch):
-        """If generate() raises, the display panel shows an error pane (not a crash)."""
+    def test_callback_error_shows_error_tab(self, monkeypatch):
+        """If generate() raises, the display panel shows an error tab (not a crash)."""
         class _BrokenReport(ReportAction):
             def generate(self, catalog_df, manager):
                 raise ValueError("simulated error")
@@ -236,8 +236,12 @@ class TestReportActionCallback:
 
         _run_callback_synchronously(action, dataui, monkeypatch)
 
-        # Display panel should show a Markdown error pane, not be empty.
+        # Display panel should contain Tabs with a Markdown error tab.
         assert len(dataui._display_panel.objects) == 1
-        obj = dataui._display_panel.objects[0]
+        tabs = dataui._display_panel.objects[0]
+        assert isinstance(tabs, pn.Tabs)
+        assert len(tabs) == 1
+        assert tabs._names[0].startswith("E")
+        obj = tabs[0]
         assert isinstance(obj, pn.pane.Markdown)
         assert "Error" in obj.object or "error" in obj.object

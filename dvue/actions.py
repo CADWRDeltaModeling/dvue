@@ -153,12 +153,27 @@ class PlotAction:
                 short_msg = f"{type(e).__name__}: {e}"
 
                 def _show_error():
-                    dataui._display_panel.objects = [
-                        pn.pane.Markdown(
-                            f"**Error loading data**\n\n`{short_msg}`\n\n"
-                            "_See the application log for the full traceback._"
-                        )
-                    ]
+                    error_panel = pn.pane.Markdown(
+                        f"**Error loading data**\n\n`{short_msg}`\n\n"
+                        "_See the application log for the full traceback._"
+                    )
+                    if len(dataui._display_panel.objects) > 0 and isinstance(
+                        dataui._display_panel.objects[0], pn.Tabs
+                    ):
+                        tabs = dataui._display_panel.objects[0]
+                        dataui._tab_count += 1
+                        tabs.append((f"E{dataui._tab_count}", error_panel))
+                        tabs.active = len(tabs) - 1
+                    else:
+                        dataui._tab_count = 0
+                        dataui._display_panel.objects = [
+                            pn.Tabs(
+                                (f"E{dataui._tab_count}", error_panel),
+                                closable=True,
+                                sizing_mode="stretch_both",
+                                dynamic=True,
+                            )
+                        ]
                     if pn.state.notifications is not None:
                         pn.state.notifications.error(short_msg, duration=8000)
                     else:
@@ -381,12 +396,27 @@ class ReportAction:
                 short_msg = f"{type(e).__name__}: {e}"
 
                 def _show_error():
-                    dataui._display_panel.objects = [
-                        pn.pane.Markdown(
-                            f"**Error generating report**\n\n`{short_msg}`\n\n"
-                            "_See the application log for the full traceback._"
-                        )
-                    ]
+                    error_panel = pn.pane.Markdown(
+                        f"**Error generating report**\n\n`{short_msg}`\n\n"
+                        "_See the application log for the full traceback._"
+                    )
+                    if len(dataui._display_panel.objects) > 0 and isinstance(
+                        dataui._display_panel.objects[0], pn.Tabs
+                    ):
+                        tabs = dataui._display_panel.objects[0]
+                        dataui._tab_count += 1
+                        tabs.append((f"E{dataui._tab_count}", error_panel))
+                        tabs.active = len(tabs) - 1
+                    else:
+                        dataui._tab_count = 0
+                        dataui._display_panel.objects = [
+                            pn.Tabs(
+                                (f"E{dataui._tab_count}", error_panel),
+                                closable=True,
+                                sizing_mode="stretch_both",
+                                dynamic=True,
+                            )
+                        ]
                     if pn.state.notifications is not None:
                         pn.state.notifications.error(short_msg, duration=8000)
                     else:
