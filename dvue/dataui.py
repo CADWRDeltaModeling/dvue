@@ -1213,6 +1213,46 @@ class DataUI(param.Parameterized):
             self._map_filter_station_ids = set(merged_indices)
         self._refresh_table_with_map_filter()
 
+    def refresh_catalog_table(self, manager):
+        """Refresh the table after the catalog has changed (e.g. a math ref was added).
+
+        This is the single entry point for all catalog-update-driven table refreshes.
+        It is map-filter-aware: if a map filter is currently active, ``_dfcat_before_map_filter``
+        is updated to the new full catalog and the filter is re-applied so the filtered
+        view remains consistent.  Column-structure changes (e.g. the first math ref
+        adding a ``name`` column) are applied before the filter is re-applied so new
+        columns are never silently dropped.
+        """
+        new_full_df = manager.get_data_catalog()
+        new_cols = manager.get_table_columns()
+
+        # Helper: fix pandas ExtensionDtype columns for Panel/Tabulator.
+        def _fix_dtypes(df):
+            ext = {c: object for c, dt in df.dtypes.items() if not isinstance(dt, np.dtype)}
+            return df.astype(ext) if ext else df
+
+        if self._map_filter_station_ids is not None:
+            # A map filter is active — keep the full catalog in the backup slot and
+            # re-apply the filter so the table still shows only the selected stations.
+            self._dfcat_before_map_filter = new_full_df
+            idcol = self._station_id_column
+            full = new_full_df
+            ids = self._map_filter_station_ids
+            if idcol and idcol in full.columns:
+                filtered = full[full[idcol].isin(ids)]
+            else:
+                filtered = full.loc[full.index.isin(ids)]
+            self._dfcat = filtered
+            display_df = _fix_dtypes(filtered.reindex(columns=new_cols))
+            self.display_table.param.update(value=display_df, selection=[])
+        else:
+            self._dfcat = new_full_df
+            sliced = _fix_dtypes(new_full_df.reindex(columns=new_cols))
+            self.display_table.value = sliced
+
+        self.display_table.widths = manager.get_table_column_width_map()
+        self.display_table.header_filters = manager.get_table_filters()
+
     def _on_map_filter_mode_changed(self, event):
         """Restore normal table when filter mode is toggled off."""
         if not event.new:  # switched OFF

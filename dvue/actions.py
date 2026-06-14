@@ -773,21 +773,7 @@ class TransformToCatalogAction:
     @staticmethod
     def _refresh_table(dataui, manager):
         try:
-            new_df = manager.get_data_catalog()
-            dataui._dfcat = new_df
-            new_cols = manager.get_table_columns()
-            sliced = dataui._dfcat.reindex(columns=new_cols)
-            # Convert pandas ExtensionDtype columns (e.g. StringDtype from pandas 3.x)
-            # to plain object dtype.  Panel's Tabulator data-only update path does not
-            # handle non-numpy dtypes: the browser column definitions expect numpy-typed
-            # arrays, so StringDtype values display as NaN for all but numeric-looking
-            # columns (which get coerced to float).
-            _ext_cols = {c: object for c, dt in sliced.dtypes.items() if not isinstance(dt, np.dtype)}
-            if _ext_cols:
-                sliced = sliced.astype(_ext_cols)
-            dataui.display_table.value = sliced
-            dataui.display_table.widths = manager.get_table_column_width_map()
-            dataui.display_table.header_filters = manager.get_table_filters()
+            dataui.refresh_catalog_table(manager)
         except Exception as e:
             logger.warning("TransformToCatalogAction: table refresh failed: %s", e)
 

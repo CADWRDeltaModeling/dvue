@@ -240,11 +240,7 @@ class MathRefEditorAction:
                     added += 1
                 if hasattr(dataui, "_dfcat"):
                     try:
-                        dataui._dfcat = manager.get_data_catalog()
-                        new_cols = manager.get_table_columns()
-                        dataui.display_table.value = dataui._dfcat[new_cols]
-                        dataui.display_table.widths = manager.get_table_column_width_map()
-                        dataui.display_table.header_filters = manager.get_table_filters()
+                        dataui.refresh_catalog_table(manager)
                     except Exception as _te:
                         logger.warning("Could not refresh table after YAML upload: %s", _te)
                 fname = getattr(upload_widget, "filename", "file")
@@ -910,13 +906,7 @@ class MathRefEditorAction:
                 # (e.g. if the manager builds a GeoDataFrame and new refs lack geometry).
                 if hasattr(dataui, "_dfcat"):
                     try:
-                        dataui._dfcat = manager.get_data_catalog()
-                        new_cols = manager.get_table_columns()
-                        dataui.display_table.value = dataui._dfcat[new_cols]
-                        # Also refresh widths and filters — needed when this is
-                        # the first math ref added (new expression column appears).
-                        dataui.display_table.widths = manager.get_table_column_width_map()
-                        dataui.display_table.header_filters = manager.get_table_filters()
+                        dataui.refresh_catalog_table(manager)
                         # Auto-show ref_type column when catalog becomes mixed.
                         # Update the column picker to reflect the new state.
                         from dvue.tsdataui import TimeSeriesDataUIManager
