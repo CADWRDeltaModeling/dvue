@@ -54,8 +54,8 @@ def test_ui_allows_explicit_plugin_manager_override(monkeypatch):
         captured["manager_cls"] = type(build_manager())
 
     monkeypatch.setattr("dvue.registry.ReaderRegistry.load_plugins_from_entry_points", _fake_load_plugins)
-    monkeypatch.setattr("importlib.import_module", _fake_import_module)
     monkeypatch.setattr("dvue.session_persistence.serve_session_app", _fake_serve_session_app)
+    monkeypatch.setattr("importlib.import_module", _fake_import_module)
 
     HIST_DSS = r"d:\delta\dsm2_studies\timeseries\hist.dss"
 
