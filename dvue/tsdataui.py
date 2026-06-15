@@ -1213,7 +1213,17 @@ class TimeSeriesDataUIManager(DataUIManager):
         if time_range is not None:
             t0 = pd.Timestamp(time_range[0])
             t1 = pd.Timestamp(time_range[1])
-            data = data[(data.index >= t0) & (data.index <= t1)]
+            if not isinstance(data.index, pd.DatetimeIndex):
+                # Non-datetime index (e.g. RangeIndex from an empty or mis-typed
+                # DataFrame) cannot be compared to Timestamps — skip the filter
+                # and let the empty-check below discard the frame.
+                logger.warning(
+                    "_process_curve_data: expected DatetimeIndex, got %s"
+                    " — time-range filter skipped",
+                    type(data.index).__name__,
+                )
+            else:
+                data = data[(data.index >= t0) & (data.index <= t1)]
 
         # Apply optional data transformations
 

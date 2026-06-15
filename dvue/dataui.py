@@ -923,10 +923,25 @@ class DataUI(param.Parameterized):
         query = query.strip()
         dfs = self._get_map_catalog()
         if self.map_filters_table:
-            # In filter mode the map is decoupled from the table: always show the
-            # full map catalog (not restricted to display_table.current_view) and
-            # never highlight features based on table selection while this mode is active.
-            current_view = dfs
+            # In filter mode the map is restricted to stations visible in the
+            # current table view (based on header filters / query) so that the
+            # user can see which stations are available before clicking to select.
+            # When nothing is selected on the map yet the full filtered set is
+            # shown; once a map click fires, select_data_catalog filters the table.
+            table_view = self._safe_current_view()
+            if (
+                self._station_id_column
+                and self._station_id_column in table_view.columns
+            ):
+                current_view = dfs[
+                    dfs[self._station_id_column].isin(
+                        table_view[self._station_id_column]
+                    )
+                ]
+            else:
+                current_view = dfs.loc[
+                    dfs.index.isin(table_view.index)
+                ]
             if isinstance(current_view, gpd.GeoDataFrame):
                 current_view = current_view.loc[current_view.is_valid]
             current_selection = []
@@ -934,11 +949,11 @@ class DataUI(param.Parameterized):
             # select only those rows in dfs that have station_id_column in self.display_table.current_view
             if (
                 self._station_id_column
-                and self._station_id_column in self.display_table.current_view.columns
+                and self._station_id_column in self._safe_current_view().columns
             ):
                 current_view = dfs[
                     dfs[self._station_id_column].isin(
-                        self.display_table.current_view[self._station_id_column]
+                        self._safe_current_view()[self._station_id_column]
                     )
                 ]
                 # if current_view is a geodataframe, keep only valid geometries
@@ -951,7 +966,7 @@ class DataUI(param.Parameterized):
                     )
                 ]
             else:
-                current_view = dfs.loc[self.display_table.current_view.index]
+                current_view = dfs.loc[self._safe_current_view().index]
                 if isinstance(current_view, gpd.GeoDataFrame):
                     current_view = current_view.loc[current_view.is_valid]
                 current_table_selected = self._dfcat.iloc[selection]
@@ -1114,8 +1129,8 @@ class DataUI(param.Parameterized):
                 set(stations_map_selected) - set(stations_table_selected)
             )
             # get the indices of the stations that are not in the selected stations in the current view
-            current_view_selected_indices = table.current_view[
-                table.current_view[idcol].isin(stations_to_be_selected)
+            current_view_selected_indices = self._safe_current_view()[
+                self._safe_current_view()[idcol].isin(stations_to_be_selected)
             ].index.to_list()
             # First get the indices of matching rows
             matching_indices = table.selected_dataframe[
@@ -1403,20 +1418,92 @@ class DataUI(param.Parameterized):
 
         self.display_table.param.watch(_on_selection_change, "selection")
 
+    def _safe_current_view(self):
+        """Return ``display_table.current_view``, falling back to ``display_table.value``.
+
+        Panel's server-side ``current_view`` computation raises
+        ``ValueError('Regex filtering not supported.')`` when any header filter
+        has ``func='regex'``, because Panel cannot apply regex filters in Python.
+        When regex mode is active we therefore fall back to the unfiltered
+        ``display_table.value`` so map interactions (which only need the
+        station-ID column, not strict row-count accuracy) continue to work.
+        """
+        try:
+            return self.display_table.current_view
+        except ValueError:
+            return self.display_table.value
+
     @param.depends("use_regex_filter", watch=True)
     def update_data_table_filters(self):
-        """Update the table filters based on the use_regex_filter parameter."""
-        if self.use_regex_filter:
-            # Update filters to use regex
-            for column in self.display_table.header_filters:
-                # self.display_table.header_filters[column]["type"] = "regex"
-                self.display_table.header_filters[column]["func"] = "regex"
-        else:
-            # Revert to 'like' functionality
-            for column in self.display_table.header_filters:
-                # self.display_table.header_filters[column]["type"] = "input"
-                self.display_table.header_filters[column]["func"] = "like"
-        self.display_table.header_filters = self.display_table.header_filters
+        """Recreate the Tabulator widget to apply changed header filter functions.
+
+        Tabulator column definitions (including ``headerFilterFunc``) are fixed
+        at JS initialisation time and cannot be changed reactively.  A new
+        widget is built with the correct ``func``, current data/state is copied
+        across, all registered watchers are re-wired, and the old widget is
+        swapped out of its container.
+        """
+        if not hasattr(self, "_table_container"):
+            return  # called before create_view(); nothing to do
+
+        if pn.state.notifications:
+            pn.state.notifications.warning(
+                "Regex filter mode changed — rebuilding table. "
+                "Active filters and current selection will be cleared.",
+                duration=5000,
+            )
+
+        old = self.display_table
+        self.display_table = pn.widgets.Tabulator(
+            old.value,
+            disabled=True,
+            widths=old.widths,
+            hidden_columns=list(old.hidden_columns or []),
+            show_index=False,
+            sizing_mode="stretch_width",
+            header_filters=self._build_header_filters(self.use_regex_filter),
+            sorters=list(old.sorters or []),
+            pagination="local",
+            page_size=old.page_size or 200,
+            configuration={
+                "headerFilterLiveFilterDelay": 600,
+                "columnDefaults": {"tooltip": True},
+            },
+        )
+        # Re-wire watchers on the new widget.
+        self._setup_selection_btn_watcher()
+        for event_name, callback in getattr(self, "_tbl_watchers", []):
+            self.display_table.param.watch(callback, event_name)
+        # Swap the widget into the live container.
+        self._table_container.clear()
+        self._table_container.append(self.display_table)
+
+    def _build_header_filters(self, use_regex: bool) -> dict:
+        """Return header_filters dict with ``func`` set to ``'regex'`` or ``'like'``.
+
+        Only overrides ``func`` for columns whose filter type is ``'input'``
+        (the default text-search type); numeric/boolean filters are left unchanged.
+        """
+        func = "regex" if use_regex else "like"
+        result = {}
+        for col, spec in self._dataui_manager.get_table_filters().items():
+            new_spec = dict(spec)
+            if new_spec.get("type", "input") == "input":
+                new_spec["func"] = func
+            result[col] = new_spec
+        return result
+
+    def _register_table_watcher(self, event_name: str, callback) -> None:
+        """Register *callback* on ``display_table`` and remember it for re-registration.
+
+        When ``update_data_table_filters`` swaps the Tabulator widget, all
+        callbacks registered through this method are automatically re-wired
+        onto the new widget.
+        """
+        if not hasattr(self, "_tbl_watchers"):
+            self._tbl_watchers = []
+        self._tbl_watchers.append((event_name, callback))
+        self.display_table.param.watch(callback, event_name)
 
     def create_data_table(self, dfs):
         column_width_map = self._dataui_manager.get_table_column_width_map()
@@ -1455,6 +1542,7 @@ class DataUI(param.Parameterized):
             if not TimeSeriesDataUIManager._has_mixed_ref_types(dfs):
                 if "ref_type" not in initial_hidden:
                     initial_hidden.append("ref_type")
+        self._tbl_watchers = []
         self.display_table = pn.widgets.Tabulator(
             dfs,
             disabled=True,
@@ -1462,7 +1550,7 @@ class DataUI(param.Parameterized):
             hidden_columns=initial_hidden,
             show_index=False,
             sizing_mode="stretch_width",
-            header_filters=self._dataui_manager.get_table_filters(),
+            header_filters=self._build_header_filters(self.use_regex_filter),
             pagination="local",
             page_size=200,
             configuration={
@@ -1506,7 +1594,8 @@ class DataUI(param.Parameterized):
             )
         )
         gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=True, allow_drag=False)
-        gspec[0:4, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
+        self._table_container = pn.Row(self.display_table, scroll=True)
+        gspec[0:4, 0:10] = fullscreen.FullScreen(self._table_container)
         gspec[5:14, 0:10] = fullscreen.FullScreen(self._display_panel)
         self._main_panel = gspec
         return gspec
@@ -1633,7 +1722,7 @@ class DataUI(param.Parameterized):
             loc.update_query(sel=sel_encoded)
 
         if hasattr(self, "display_table"):
-            self.display_table.param.watch(_on_selection_change, "selection")
+            self._register_table_watcher("selection", _on_selection_change)
 
     def _setup_filter_url_sync(self):
         """Sync table header filter values with the URL ``flt`` query parameter.
@@ -1747,7 +1836,7 @@ class DataUI(param.Parameterized):
         """Create the main view content based on the current view_type"""
         if self.view_type == "table":
             gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
-            gspec[0:14, 0:10] = fullscreen.FullScreen(pn.Row(self.display_table, scroll=True))
+            gspec[0:14, 0:10] = fullscreen.FullScreen(self._table_container)
             return pn.Column(self._action_panel, gspec, sizing_mode="stretch_both")
         elif self.view_type == "display":
             gspec = pn.GridStack(sizing_mode="stretch_both", allow_resize=False, allow_drag=False)
@@ -2093,11 +2182,13 @@ class DataUI(param.Parameterized):
                     self._map_sel_proxy = list(event.new)
 
             def _on_tbl_filters(event):
-                if not self.map_filters_table:
-                    self._map_filter_proxy += 1
+                # Always refresh the map when table filters change:
+                # - map_filters_table=False: map highlights the filtered subset
+                # - map_filters_table=True:  map restricts to filtered stations
+                self._map_filter_proxy += 1
 
-            self.display_table.param.watch(_on_tbl_selection, "selection")
-            self.display_table.param.watch(_on_tbl_filters, "filters")
+            self._register_table_watcher("selection", _on_tbl_selection)
+            self._register_table_watcher("filters", _on_tbl_filters)
             self.param.watch(self._on_map_filter_mode_changed, "map_filters_table")
             map_tooltip = pn.widgets.TooltipIcon(
                 value="""Map of geographical features. Click on a feature to see data available in the table. <br/>
@@ -2366,11 +2457,11 @@ class DataUI(param.Parameterized):
                     self._map_sel_proxy = list(event.new)
 
             def _on_tbl_filters(event):
-                if not self.map_filters_table:
-                    self._map_filter_proxy += 1
+                # Always refresh the map when table filters change.
+                self._map_filter_proxy += 1
 
-            self.display_table.param.watch(_on_tbl_selection, "selection")
-            self.display_table.param.watch(_on_tbl_filters, "filters")
+            self._register_table_watcher("selection", _on_tbl_selection)
+            self._register_table_watcher("filters", _on_tbl_filters)
             self.param.watch(self._on_map_filter_mode_changed, "map_filters_table")
 
             # Touch-friendly map — tap only, no lasso/box
