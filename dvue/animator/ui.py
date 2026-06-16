@@ -518,6 +518,15 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             show_value=False,        # we show timestamp in the Div above
             sizing_mode="stretch_width",
         )
+        # DatetimePicker — lets the user jump directly to any date/time.
+        # Synced bidirectionally with the DiscretePlayer (snaps to nearest step).
+        self._datetime_picker = pn.widgets.DatetimePicker(
+            name="Go to date/time",
+            value=ti[0].to_pydatetime(),
+            start=ti[0].to_pydatetime(),
+            end=ti[-1].to_pydatetime(),
+            sizing_mode="stretch_width",
+        )
         self._clim_input = pn.widgets.TextInput(
             name="Color range  (min, max)",
             value=f"{init_vmin:.4g}, {init_vmax:.4g}",
@@ -587,6 +596,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             pn.pane.Markdown("**Time**"),
             self._time_label_pane,
             self._time_slider,
+            self._datetime_picker,
             pn.pane.Markdown("**Colour scale**"),
             self._clim_input,
             pn.pane.Markdown("**Colormap**"),
@@ -616,6 +626,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # 10. Wire watchers (after super so param system is initialised).
         # ----------------------------------------------------------------
         self._time_slider.param.watch(self._on_slider_change, "value")
+        self._datetime_picker.param.watch(self._on_datetime_picker_change, "value")
+        self._syncing = False  # guard against slider ↔ picker feedback loops
         self.param.watch(self._on_style_change, ["vmin", "vmax", "colormap", "size"])
         self._clim_input.param.watch(self._on_clim_text_change, "value")
         self._colormap_select.param.watch(self._on_colormap_widget_change, "value")
@@ -856,10 +868,33 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     # ------------------------------------------------------------------
 
     def _on_slider_change(self, event: param.parameterized.Event) -> None:
+        if self._syncing:
+            return
         idx = int(event.new)
         ts = self._reader.time_index[idx]
         # Update the Div text (Bokeh model — no Panel layout reflow)
         self._time_div.text = f"<b>{ts.strftime('%Y-%m-%d %H:%M')}</b>"
+        # Sync DatetimePicker without causing a feedback loop.
+        self._syncing = True
+        try:
+            self._datetime_picker.value = ts.to_pydatetime()
+        finally:
+            self._syncing = False
+        self._load_frame(idx)
+
+    def _on_datetime_picker_change(self, event: param.parameterized.Event) -> None:
+        """Jump the animation to the nearest time step for the picked datetime."""
+        if self._syncing or event.new is None:
+            return
+        ts = pd.Timestamp(event.new)
+        idx = int(self._reader.time_index.get_indexer([ts], method="nearest")[0])
+        self._syncing = True
+        try:
+            self._time_slider.value = idx
+        finally:
+            self._syncing = False
+        actual_ts = self._reader.time_index[idx]
+        self._time_div.text = f"<b>{actual_ts.strftime('%Y-%m-%d %H:%M')}</b>"
         self._load_frame(idx)
 
     def _on_style_change(self, *events) -> None:
