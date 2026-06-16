@@ -408,7 +408,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             url=_CARTO_LIGHT_URL,
             attribution=_CARTO_LIGHT_ATTR,
         )
-        p.add_tile(tile_source)
+        self._tile_renderer = p.add_tile(tile_source)
 
         # Two separate HoverTools so each renderer gets the right tooltip:
         # - data_hover: restricted to the data (channel) renderer
@@ -424,17 +424,17 @@ class GeoAnimatorManager(pn.viewable.Viewer):
 
         color_field = {"field": "_value", "transform": self._bk_mapper}
         if self._geom_type == "point":
-            p.scatter(
+            self._data_renderer = p.scatter(
                 x="xs", y="ys", source=self._bk_source,
                 color=color_field, size=size, line_color=None,
             )
         elif self._geom_type == "line":
-            p.multi_line(
+            self._data_renderer = p.multi_line(
                 xs="xs", ys="ys", source=self._bk_source,
                 line_color=color_field, line_width=size,
             )
         else:  # polygon
-            p.patches(
+            self._data_renderer = p.patches(
                 xs="xs", ys="ys", source=self._bk_source,
                 fill_color=color_field,
                 line_color="white", line_width=0.5, line_alpha=0.2,
@@ -535,6 +535,10 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contours_check = pn.widgets.Checkbox(
             name="Show contours", value=False, sizing_mode="stretch_width",
         )
+        self._contour_color_check = pn.widgets.Checkbox(
+            name="Color contours (colormap)", value=True,
+            sizing_mode="stretch_width", visible=False,
+        )
         self._n_contours_slider = pn.widgets.IntSlider(
             name="Contour levels", start=2, end=30, step=1, value=8,
             sizing_mode="stretch_width", visible=False,
@@ -552,6 +556,13 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_labels_check = pn.widgets.Checkbox(
             name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
+        )
+        # Channel visibility toggle — always shown.
+        self._show_channels_check = pn.widgets.Checkbox(
+            name="Show channels", value=True, sizing_mode="stretch_width",
+        )
+        self._show_basemap_check = pn.widgets.Checkbox(
+            name="Show background map", value=True, sizing_mode="stretch_width",
         )
         # X2 controls — only shown when an x2_callback is provided.
         _has_x2 = x2_callback is not None
@@ -581,11 +592,14 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             pn.pane.Markdown("**Colormap**"),
             self._colormap_select,
             *size_row,
+            self._show_channels_check,
+            self._show_basemap_check,
             pn.pane.Markdown("**Contours**"),
             self._contours_check,
             self._n_contours_slider,
             self._contour_smooth_slider,
             self._contour_levels_select,
+            self._contour_color_check,
             self._contour_labels_check,
             *x2_row,
             sizing_mode="stretch_width",
@@ -608,10 +622,13 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._geom_type != "polygon":
             self._size_slider.param.watch(self._on_size_widget_change, "value")
         self._contours_check.param.watch(self._on_contours_toggle, "value")
+        self._contour_color_check.param.watch(self._on_contour_color_toggle, "value")
         self._n_contours_slider.param.watch(self._on_n_contours_change, "value")
         self._contour_smooth_slider.param.watch(self._on_contour_smooth_change, "value")
         self._contour_levels_select.param.watch(self._on_contour_levels_change, "value")
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
+        self._show_channels_check.param.watch(self._on_show_channels_toggle, "value")
+        self._show_basemap_check.param.watch(self._on_show_basemap_toggle, "value")
         if x2_callback is not None:
             self._x2_check.param.watch(self._on_x2_toggle, "value")
             self._x2_threshold_input.param.watch(self._on_x2_threshold_change, "value")
@@ -820,8 +837,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
 
         if self._contour_renderer.visible:
             xs, ys, lvls = self._compute_contours(new_values)
-            eff_vmin, eff_vmax = self._current_clim()
-            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            colors = self._contour_colors(lvls)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
@@ -847,7 +863,27 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._load_frame(idx)
 
     def _on_style_change(self, *events) -> None:
-        """Update LinearColorMapper in-place — no frame rebuild needed."""
+        """Update LinearColorMapper in-place — no frame rebuild needed.
+
+        Bokeh model property mutations (mapper.low, glyph.size, etc.) require
+        the Bokeh server session's document lock.  When this method is called
+        from inside param's synchronous watcher chain (e.g. TextInput →
+        _on_clim_text_change → self.vmin = ... → _on_style_change), the
+        document lock is NOT held, which triggers Bokeh's
+        ``_pending_writes should be non-None`` error.
+
+        Fix: defer all direct Bokeh property mutations to the next IOLoop tick
+        via ``add_next_tick_callback`` when a document is attached (Panel serve
+        context).  In tests / notebooks there is no document, so run directly.
+        """
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(self._apply_bokeh_style)
+        else:
+            self._apply_bokeh_style()
+
+    def _apply_bokeh_style(self) -> None:
+        """Apply direct Bokeh property mutations — must run under document lock."""
         eff_vmin, eff_vmax = self._current_clim()
         self._bk_mapper.palette = _cmap_to_palette(self.colormap)
         self._bk_mapper.low = eff_vmin
@@ -868,7 +904,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            colors = self._contour_colors(lvls)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
@@ -878,18 +914,38 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     def _on_size_widget_change(self, event: param.parameterized.Event) -> None:
         self.size = float(event.new)
 
+    def _contour_colors(self, lvls: list) -> list:
+        """Return per-path hex colors — colormap or black depending on toggle."""
+        if self._contour_color_check.value:
+            eff_vmin, eff_vmax = self._current_clim()
+            return _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+        return ["black"] * len(lvls)
+
+    def _on_show_channels_toggle(self, event: param.parameterized.Event) -> None:
+        self._data_renderer.visible = bool(event.new)
+
+    def _on_show_basemap_toggle(self, event: param.parameterized.Event) -> None:
+        self._tile_renderer.visible = bool(event.new)
+
+    def _on_contour_color_toggle(self, event: param.parameterized.Event) -> None:
+        """Switch contour line colour between colormap-derived and black."""
+        lvls = self._contour_source.data.get("level", [])
+        if lvls:
+            colors = self._contour_colors(lvls)
+            self._contour_source.data = dict(self._contour_source.data, color=colors)
+
     def _on_contours_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide contours; recompute for current frame when enabling."""
         self._contour_renderer.visible = bool(event.new)
         self._n_contours_slider.visible = bool(event.new)
         self._contour_smooth_slider.visible = bool(event.new)
         self._contour_levels_select.visible = bool(event.new)
+        self._contour_color_check.visible = bool(event.new)
         self._contour_labels_check.visible = bool(event.new)
         if event.new:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            eff_vmin, eff_vmax = self._current_clim()
-            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            colors = self._contour_colors(lvls)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
         else:
@@ -901,8 +957,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            eff_vmin, eff_vmax = self._current_clim()
-            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            colors = self._contour_colors(lvls)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
@@ -911,8 +966,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            eff_vmin, eff_vmax = self._current_clim()
-            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            colors = self._contour_colors(lvls)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
@@ -921,8 +975,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            eff_vmin, eff_vmax = self._current_clim()
-            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            colors = self._contour_colors(lvls)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
