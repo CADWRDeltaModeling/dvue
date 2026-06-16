@@ -335,7 +335,10 @@ def serve_session_app(
         pn.state.onload(_on_load)
 
     # Sanitize title into a URL-safe Bokeh app-route key.
-    app_key = title.lower().replace(" ", "-")
+    # Replace spaces and any non-alphanumeric characters (e.g. em-dashes, slashes)
+    # with hyphens, then collapse consecutive hyphens and strip leading/trailing.
+    import re as _re
+    app_key = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "app"
 
     pn.serve(
         {app_key: make_app},
@@ -684,7 +687,8 @@ def serve_desktop_app(
 
         pn.state.onload(_on_load)
 
-    app_key = title.lower().replace(" ", "-")
+    import re as _re
+    app_key = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "app"
     url = f"http://localhost:{port}/{app_key}"
 
     # Start Panel server in a background daemon thread (show=False).
