@@ -170,6 +170,14 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         doc="Gaussian smoothing sigma applied to the raster before contouring "
             "(grid cells). 0 = no smoothing.",
     )
+    contour_levels: str = param.Selector(
+        default="nice",
+        objects=["linear", "nice", "eq_hist"],
+        doc="How contour levels are placed.\n"
+            "linear  — equally spaced between vmin and vmax.\n"
+            "nice    — rounded tick-like values (matplotlib MaxNLocator).\n"
+            "eq_hist — quantile-spaced so each band covers equal data density.",
+    )
     current_dt: Optional[datetime.datetime] = param.Parameter(
         default=None, doc="Current animation datetime.",
     )
@@ -401,6 +409,22 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         )
         p.add_tools(contour_hover)
 
+        # Contour label renderer — one text label per level (longest path).
+        self._contour_label_source = ColumnDataSource(
+            {"x": [], "y": [], "text": []}
+        )
+        self._contour_label_renderer = p.text(
+            x="x", y="y", text="text",
+            source=self._contour_label_source,
+            text_font_size="10px",
+            text_color="black",
+            text_align="center",
+            text_baseline="middle",
+            background_fill_color="white",
+            background_fill_alpha=0.6,
+            visible=False,
+        )
+
         # X2 isohaline renderer — a single bold line, initially invisible.
         self._x2_source = ColumnDataSource({"xs": [], "ys": []})
         self._x2_renderer = p.multi_line(
@@ -421,17 +445,22 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # from the options list position inside _on_slider_change.
         # ----------------------------------------------------------------
         ti = reader.time_index
-        # IntSlider (0..N-1): fast even for multi-year 15-min series.
-        # A Bokeh Div shows the current timestamp below the slider;
-        # it is updated via _on_slider_change without causing a Panel
-        # layout reflow (Div is a leaf Bokeh model, not a Panel pane).
+        # DiscretePlayer with integer indices 0..N-1 — compact options list,
+        # no per-step string serialisation overhead.  Built-in play/pause/
+        # loop controls drive the animation; the Bokeh Div shows the resolved
+        # timestamp so the user sees readable dates throughout.
         self._time_div = Div(
             text=f"<b>{ti[0].strftime('%Y-%m-%d %H:%M')}</b>",
             styles={"font-size": "13px", "margin": "2px 0 6px 0"},
         )
         self._time_label_pane = pn.pane.Bokeh(self._time_div, sizing_mode="stretch_width")
-        self._time_slider = pn.widgets.IntSlider(
-            name="", start=0, end=len(ti) - 1, step=1, value=0,
+        self._time_slider = pn.widgets.DiscretePlayer(
+            name="",
+            options=list(range(len(ti))),
+            value=0,
+            interval=500,            # ms between steps when playing
+            loop_policy="once",
+            show_value=False,        # we show timestamp in the Div above
             sizing_mode="stretch_width",
         )
         self._clim_input = pn.widgets.TextInput(
@@ -457,6 +486,16 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         )
         self._contour_smooth_slider = pn.widgets.FloatSlider(
             name="Contour smoothing", start=0.0, end=20.0, step=0.5, value=3.0,
+            sizing_mode="stretch_width", visible=False,
+        )
+        self._contour_levels_select = pn.widgets.Select(
+            name="Contour level mode",
+            options=["linear", "nice", "eq_hist"],
+            value="nice",
+            sizing_mode="stretch_width", visible=False,
+        )
+        self._contour_labels_check = pn.widgets.Checkbox(
+            name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
         )
         # X2 controls — only shown when an x2_callback is provided.
@@ -491,6 +530,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._contours_check,
             self._n_contours_slider,
             self._contour_smooth_slider,
+            self._contour_levels_select,
+            self._contour_labels_check,
             *x2_row,
             sizing_mode="stretch_width",
             max_width=260,
@@ -514,6 +555,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contours_check.param.watch(self._on_contours_toggle, "value")
         self._n_contours_slider.param.watch(self._on_n_contours_change, "value")
         self._contour_smooth_slider.param.watch(self._on_contour_smooth_change, "value")
+        self._contour_levels_select.param.watch(self._on_contour_levels_change, "value")
+        self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
         if x2_callback is not None:
             self._x2_check.param.watch(self._on_x2_toggle, "value")
             self._x2_threshold_input.param.watch(self._on_x2_threshold_change, "value")
@@ -530,6 +573,69 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if vmin == vmax:
             vmax = vmin + 1.0
         return float(vmin), float(vmax)
+
+    def _compute_label_positions(
+        self,
+        xs_list: list,
+        ys_list: list,
+        lvls: list,
+    ) -> dict:
+        """Pick one label position per unique level (midpoint of longest path).
+
+        Returns a dict suitable for ``ColumnDataSource.data``:
+        ``{"x": [...], "y": [...], "text": [...]}``.
+        """
+        # Group paths by level, keep the longest for labelling
+        best: dict[float, tuple[float, float, int]] = {}  # level -> (mx, my, length)
+        for xs, ys, lvl in zip(xs_list, ys_list, lvls):
+            n = len(xs)
+            if n < 2:
+                continue
+            if lvl not in best or n > best[lvl][2]:
+                mid = n // 2
+                best[lvl] = (xs[mid], ys[mid], n)
+
+        lx, ly, lt = [], [], []
+        for lvl, (mx, my, _) in sorted(best.items()):
+            lx.append(mx)
+            ly.append(my)
+            lt.append(f"{lvl:.4g}")
+        return {"x": lx, "y": ly, "text": lt}
+
+    def _update_contour_labels(
+        self, xs_list: list, ys_list: list, lvls: list
+    ) -> None:
+        """Update the label source if the label renderer is visible."""
+        if self._contour_label_renderer.visible:
+            self._contour_label_source.data = (
+                self._compute_label_positions(xs_list, ys_list, lvls)
+            )
+
+    def _compute_levels(
+        self, finite_vals: np.ndarray, vmin: float, vmax: float
+    ) -> np.ndarray:
+        """Compute contour level positions according to ``contour_levels`` param."""
+        n = self.n_contours
+        mode = self.contour_levels
+
+        if mode == "eq_hist" and len(finite_vals) >= n:
+            quantiles = np.linspace(0.0, 1.0, n + 2)[1:-1]
+            levels = np.quantile(finite_vals, quantiles)
+            levels = levels[(levels > vmin) & (levels < vmax)]
+            if len(levels) == 0:
+                levels = np.linspace(vmin, vmax, n + 2)[1:-1]
+            return levels
+
+        if mode == "nice":
+            from matplotlib.ticker import MaxNLocator
+            locator = MaxNLocator(nbins=n, steps=[1, 2, 2.5, 5, 10])
+            levels = np.asarray(locator.tick_values(vmin, vmax))
+            levels = levels[(levels > vmin) & (levels < vmax)]
+            if len(levels) == 0:
+                levels = np.linspace(vmin, vmax, n + 2)[1:-1]
+            return levels
+
+        return np.linspace(vmin, vmax, n + 2)[1:-1]
 
     def _compute_contours(self, values: list[float]) -> tuple[list, list, list]:
         """Interpolate values to a regular grid, optionally smooth, then contour.
@@ -567,7 +673,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             grid_z = gaussian_filter(grid_z.astype(float), sigma=sigma)
 
         eff_vmin, eff_vmax = self._current_clim()
-        levels = np.linspace(eff_vmin, eff_vmax, self.n_contours + 2)[1:-1]
+        levels = self._compute_levels(vals[mask], eff_vmin, eff_vmax)
 
         fig, ax = plt.subplots(1, 1)
         try:
@@ -655,6 +761,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             xs, ys, lvls = self._compute_contours(new_values)
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            self._update_contour_labels(xs, ys, lvls)
 
         if self._x2_renderer.visible and self._x2_callback is not None:
             threshold = float(self._x2_threshold_input.value)
@@ -700,6 +807,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            self._update_contour_labels(xs, ys, lvls)
 
     def _on_colormap_widget_change(self, event: param.parameterized.Event) -> None:
         self.colormap = event.new
@@ -712,29 +820,54 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_renderer.visible = bool(event.new)
         self._n_contours_slider.visible = bool(event.new)
         self._contour_smooth_slider.visible = bool(event.new)
+        self._contour_levels_select.visible = bool(event.new)
+        self._contour_labels_check.visible = bool(event.new)
         if event.new:
-            # Compute contours for the current frame immediately
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            self._update_contour_labels(xs, ys, lvls)
         else:
             self._contour_source.data = {"xs": [], "ys": [], "level": []}
+            self._contour_label_source.data = {"x": [], "y": [], "text": []}
 
     def _on_n_contours_change(self, event: param.parameterized.Event) -> None:
-        """Recompute contours when the number of levels changes."""
         self.n_contours = int(event.new)
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            self._update_contour_labels(xs, ys, lvls)
 
     def _on_contour_smooth_change(self, event: param.parameterized.Event) -> None:
-        """Recompute contours when the smoothing sigma changes."""
         self.contour_smooth = float(event.new)
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
             self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            self._update_contour_labels(xs, ys, lvls)
+
+    def _on_contour_levels_change(self, event: param.parameterized.Event) -> None:
+        self.contour_levels = event.new
+        if self._contour_renderer.visible:
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            self._update_contour_labels(xs, ys, lvls)
+
+    def _on_contour_labels_toggle(self, event: param.parameterized.Event) -> None:
+        """Show or hide contour labels."""
+        self._contour_label_renderer.visible = bool(event.new)
+        if event.new:
+            xs = self._contour_source.data["xs"]
+            ys = self._contour_source.data["ys"]
+            lvls = self._contour_source.data["level"]
+            if xs:
+                self._contour_label_source.data = (
+                    self._compute_label_positions(xs, ys, lvls)
+                )
+        else:
+            self._contour_label_source.data = {"x": [], "y": [], "text": []}
 
     def _on_x2_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide the X2 isohaline line."""

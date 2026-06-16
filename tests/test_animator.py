@@ -314,8 +314,9 @@ class TestGeoAnimatorManager:
 
     def test_time_slider_start_end_match_reader(self, manager_points, reader):
         slider = manager_points._time_slider
-        assert slider.start == 0
-        assert slider.end == len(reader.time_index) - 1
+        # DiscretePlayer: options is a list of integer indices 0..N-1
+        assert slider.options[0] == 0
+        assert slider.options[-1] == len(reader.time_index) - 1
         assert slider.value == 0
 
     def test_gdf_no_crs_raises(self, reader):
