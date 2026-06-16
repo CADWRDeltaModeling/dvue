@@ -69,6 +69,59 @@ def _cmap_to_palette(name: str, n: int = 256) -> list[str]:
     return [matplotlib.colors.to_hex(cmap(i / max(n - 1, 1))) for i in range(n)]
 
 
+def _nice_decimal_places(levels: list) -> int:
+    """Return the number of decimal places needed for plain-numeric labels.
+
+    Rules:
+    - If all levels are whole numbers (or very close): 0 decimals.
+    - Otherwise find the smallest gap between adjacent levels and use
+      enough decimals to show at least one significant digit of that gap.
+    - Cap at 4 decimals to avoid excessive precision.
+    """
+    if not levels:
+        return 0
+    # Treat as integer if all within floating-point noise of a whole number
+    if all(abs(v - round(v)) < 1e-9 for v in levels):
+        return 0
+    sorted_lvls = sorted(levels)
+    gaps = [sorted_lvls[i + 1] - sorted_lvls[i]
+            for i in range(len(sorted_lvls) - 1) if sorted_lvls[i + 1] > sorted_lvls[i]]
+    if not gaps:
+        return 1
+    min_gap = min(gaps)
+    if min_gap >= 1.0:
+        return 0
+    import math
+    # digits needed to represent min_gap with 1 significant figure
+    n_dec = max(0, -int(math.floor(math.log10(min_gap))))
+    return min(n_dec, 4)
+
+
+def _format_level(value: float, n_dec: int) -> str:
+    """Format a contour level value as a plain number (no scientific notation)."""
+    if n_dec == 0:
+        return str(int(round(value)))
+    return f"{value:.{n_dec}f}"
+
+
+def _level_colors(
+    lvls: list, vmin: float, vmax: float, colormap: str
+) -> list[str]:
+    """Map a list of isovalues to hex colours using *colormap*.
+
+    Each level is normalised to [0, 1] within [vmin, vmax] and sampled from
+    the colormap palette so contour lines carry the same colour as the
+    corresponding data region.
+    """
+    palette = _cmap_to_palette(colormap, n=256)
+    span = vmax - vmin if vmax != vmin else 1.0
+    colors = []
+    for lvl in lvls:
+        t = max(0.0, min(1.0, (float(lvl) - vmin) / span))
+        colors.append(palette[int(t * 255)])
+    return colors
+
+
 # ---------------------------------------------------------------------------
 # Geometry type constants
 # ---------------------------------------------------------------------------
@@ -156,7 +209,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         doc="Colormap name for the value dimension.",
     )
     size: float = param.Number(
-        default=8.0, bounds=(1.0, 50.0),
+        default=6.0, bounds=(1.0, 50.0),
         doc="Point radius (points) or line width (px). Not used for polygons.",
     )
     show_contours: bool = param.Boolean(
@@ -191,7 +244,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         vmin: Optional[float] = None,
         vmax: Optional[float] = None,
         colormap: str = "viridis",
-        size: float = 8.0,
+        size: float = 6.0,
         map_width: int = 750,
         map_height: int = 500,
         x2_callback: Optional[object] = None,
@@ -296,8 +349,10 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             "_value": init_values, "geo_id": self._geo_ids,
         })
         # Contour source — empty until show_contours is enabled.
-        # Carries xs, ys, and level (the isovalue at each contour path).
-        self._contour_source = ColumnDataSource({"xs": [], "ys": [], "level": []})
+        # Carries xs, ys, level (isovalue), and color (hex from colormap).
+        self._contour_source = ColumnDataSource(
+            {"xs": [], "ys": [], "level": [], "color": []}
+        )
 
         # ----------------------------------------------------------------
         # 6. LinearColorMapper — updated in-place on style changes.
@@ -394,11 +449,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         )
         p.add_layout(colorbar, "right")
 
-        # Contour renderer — fixed width=2, sits on top, initially invisible.
-        # Restricted to contour_source so the data HoverTool doesn't fire on it.
+        # Contour renderer — coloured by isovalue via the same colormap,
+        # fixed width=3, sits on top, initially invisible.
         self._contour_renderer = p.multi_line(
             xs="xs", ys="ys", source=self._contour_source,
-            line_color="black", line_width=2.0, line_alpha=0.75,
+            line_color="color", line_width=3.0, line_alpha=0.9,
             visible=False,
         )
         # Dedicated hover for contour renderer showing the isovalue level.
@@ -416,7 +471,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_label_renderer = p.text(
             x="x", y="y", text="text",
             source=self._contour_label_source,
-            text_font_size="10px",
+            text_font_size="13px",
             text_color="black",
             text_align="center",
             text_baseline="middle",
@@ -596,10 +651,15 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 best[lvl] = (xs[mid], ys[mid], n)
 
         lx, ly, lt = [], [], []
+        all_levels = sorted(best.keys())
+        # Determine decimal places needed to distinguish adjacent levels.
+        # If levels are all whole numbers, format as integers.  Otherwise
+        # use enough decimal places so no two labels are identical.
+        n_dec = _nice_decimal_places(all_levels)
         for lvl, (mx, my, _) in sorted(best.items()):
             lx.append(mx)
             ly.append(my)
-            lt.append(f"{lvl:.4g}")
+            lt.append(_format_level(lvl, n_dec))
         return {"x": lx, "y": ly, "text": lt}
 
     def _update_contour_labels(
@@ -760,7 +820,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
 
         if self._contour_renderer.visible:
             xs, ys, lvls = self._compute_contours(new_values)
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            eff_vmin, eff_vmax = self._current_clim()
+            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
         if self._x2_renderer.visible and self._x2_callback is not None:
@@ -806,7 +868,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
     def _on_colormap_widget_change(self, event: param.parameterized.Event) -> None:
@@ -825,10 +888,12 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if event.new:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            eff_vmin, eff_vmax = self._current_clim()
+            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
         else:
-            self._contour_source.data = {"xs": [], "ys": [], "level": []}
+            self._contour_source.data = {"xs": [], "ys": [], "level": [], "color": []}
             self._contour_label_source.data = {"x": [], "y": [], "text": []}
 
     def _on_n_contours_change(self, event: param.parameterized.Event) -> None:
@@ -836,7 +901,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            eff_vmin, eff_vmax = self._current_clim()
+            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
     def _on_contour_smooth_change(self, event: param.parameterized.Event) -> None:
@@ -844,7 +911,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            eff_vmin, eff_vmax = self._current_clim()
+            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
     def _on_contour_levels_change(self, event: param.parameterized.Event) -> None:
@@ -852,7 +921,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+            eff_vmin, eff_vmax = self._current_clim()
+            colors = _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
             self._update_contour_labels(xs, ys, lvls)
 
     def _on_contour_labels_toggle(self, event: param.parameterized.Event) -> None:
