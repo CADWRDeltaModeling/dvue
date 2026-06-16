@@ -159,6 +159,17 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         default=8.0, bounds=(1.0, 50.0),
         doc="Point radius (points) or line width (px). Not used for polygons.",
     )
+    show_contours: bool = param.Boolean(
+        default=False, doc="Overlay contour lines on the map."
+    )
+    n_contours: int = param.Integer(
+        default=8, bounds=(2, 30), doc="Number of contour levels.",
+    )
+    contour_smooth: float = param.Number(
+        default=3.0, bounds=(0.0, 20.0),
+        doc="Gaussian smoothing sigma applied to the raster before contouring "
+            "(grid cells). 0 = no smoothing.",
+    )
     current_dt: Optional[datetime.datetime] = param.Parameter(
         default=None, doc="Current animation datetime.",
     )
@@ -175,16 +186,19 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         size: float = 8.0,
         map_width: int = 750,
         map_height: int = 500,
+        x2_callback: Optional[object] = None,
         **params,
     ) -> None:
         # ----------------------------------------------------------------
-        # 1. Config — stored before super().__init__() because on_init
-        #    watchers fire during super().
+        # 1. Config
         # ----------------------------------------------------------------
         self._reader = reader
         self._geo_id_column = geo_id_column
         self._title = title
         self._map_height = map_height
+        # Optional callable(step_idx: int, threshold: float) -> (xs, ys)
+        # where xs/ys are lists of lists suitable for multi_line.
+        self._x2_callback = x2_callback
 
         # ----------------------------------------------------------------
         # 2. Project GDF to EPSG:3857 once.
@@ -206,8 +220,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._geom_type == "point":
             bk_xs: list = self._gdf_proj.geometry.x.values.tolist()
             bk_ys: list = self._gdf_proj.geometry.y.values.tolist()
+            self._centroids_x = np.array(bk_xs)
+            self._centroids_y = np.array(bk_ys)
         else:
             bk_xs, bk_ys = [], []
+            cx_list, cy_list = [], []
             for geom in self._gdf_proj.geometry:
                 if self._geom_type == "polygon":
                     coords = np.array(geom.exterior.coords)
@@ -215,6 +232,40 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                     coords = np.array(geom.coords)
                 bk_xs.append(coords[:, 0].tolist())
                 bk_ys.append(coords[:, 1].tolist())
+                c = geom.centroid
+                cx_list.append(c.x)
+                cy_list.append(c.y)
+            self._centroids_x = np.array(cx_list)
+            self._centroids_y = np.array(cy_list)
+
+        # Regular grid for contour interpolation (built once).
+        bounds = self._gdf_proj.total_bounds
+        span_x = float(bounds[2] - bounds[0])
+        span_y = float(bounds[3] - bounds[1])
+        if not np.isfinite(span_x) or span_x <= 0:
+            span_x = 1.0
+        if not np.isfinite(span_y) or span_y <= 0:
+            span_y = 1.0
+        nx = 200
+        ny = max(int(round(200 * span_y / span_x)), 10)
+        self._grid_x, self._grid_y = np.meshgrid(
+            np.linspace(bounds[0], bounds[2], nx),
+            np.linspace(bounds[1], bounds[3], ny),
+        )
+
+        # Buffer zone for contour clipping — built once from the union of all
+        # channel geometries.  Contour paths outside this zone are discarded.
+        # Buffer radius: ~10× the grid cell size so channels that are narrow
+        # relative to the grid still have coverage.
+        _cell_size = max(span_x / nx, span_y / ny)
+        _buf_radius = _cell_size * 10.0
+        try:
+            from shapely.ops import unary_union
+            self._contour_clip_zone = (
+                unary_union(self._gdf_proj.geometry).buffer(_buf_radius)
+            )
+        except Exception:
+            self._contour_clip_zone = None
 
         # ----------------------------------------------------------------
         # 4. Effective vmin/vmax and initial frame values.
@@ -230,14 +281,15 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         ]
 
         # ----------------------------------------------------------------
-        # 5. Bokeh ColumnDataSource — geometry is set here once.
+        # 5. Bokeh ColumnDataSource — geometry set once; _value patched.
         # ----------------------------------------------------------------
         self._bk_source = ColumnDataSource({
-            "xs": bk_xs,
-            "ys": bk_ys,
-            "_value": init_values,
-            "geo_id": self._geo_ids,
+            "xs": bk_xs, "ys": bk_ys,
+            "_value": init_values, "geo_id": self._geo_ids,
         })
+        # Contour source — empty until show_contours is enabled.
+        # Carries xs, ys, and level (the isovalue at each contour path).
+        self._contour_source = ColumnDataSource({"xs": [], "ys": [], "level": []})
 
         # ----------------------------------------------------------------
         # 6. LinearColorMapper — updated in-place on style changes.
@@ -295,17 +347,17 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         )
         p.add_tile(tile_source)
 
-        # Configure hover to show only channel id and the data value.
-        # The value format uses {0.3f}; the label is set later via
-        # _update_hover_tool() so it reflects the variable name.
-        hover = HoverTool(
+        # Two separate HoverTools so each renderer gets the right tooltip:
+        # - data_hover: restricted to the data (channel) renderer
+        # - contour_hover: restricted to the contour renderer (shows level)
+        data_hover = HoverTool(
             tooltips=[
                 ("Channel", "@geo_id"),
                 ("Value",   "@_value{0.3f}"),
             ],
             point_policy="follow_mouse",
         )
-        p.add_tools(hover)
+        p.add_tools(data_hover)
 
         color_field = {"field": "_value", "transform": self._bk_mapper}
         if self._geom_type == "point":
@@ -333,6 +385,30 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             location=(0, 0),
         )
         p.add_layout(colorbar, "right")
+
+        # Contour renderer — fixed width=2, sits on top, initially invisible.
+        # Restricted to contour_source so the data HoverTool doesn't fire on it.
+        self._contour_renderer = p.multi_line(
+            xs="xs", ys="ys", source=self._contour_source,
+            line_color="black", line_width=2.0, line_alpha=0.75,
+            visible=False,
+        )
+        # Dedicated hover for contour renderer showing the isovalue level.
+        contour_hover = HoverTool(
+            renderers=[self._contour_renderer],
+            tooltips=[("Level", "@level{0.3f}")],
+            point_policy="follow_mouse",
+        )
+        p.add_tools(contour_hover)
+
+        # X2 isohaline renderer — a single bold line, initially invisible.
+        self._x2_source = ColumnDataSource({"xs": [], "ys": []})
+        self._x2_renderer = p.multi_line(
+            xs="xs", ys="ys", source=self._x2_source,
+            line_color="black", line_width=3.0, line_alpha=0.9,
+            line_dash="solid", visible=False,
+        )
+
         self._bk_figure = p
         self._chart_pane = pn.pane.Bokeh(p, sizing_mode="stretch_both", min_height=map_height)
 
@@ -372,6 +448,31 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             start=1.0, end=50.0, step=0.5, value=size,
             sizing_mode="stretch_width",
         )
+        self._contours_check = pn.widgets.Checkbox(
+            name="Show contours", value=False, sizing_mode="stretch_width",
+        )
+        self._n_contours_slider = pn.widgets.IntSlider(
+            name="Contour levels", start=2, end=30, step=1, value=8,
+            sizing_mode="stretch_width", visible=False,
+        )
+        self._contour_smooth_slider = pn.widgets.FloatSlider(
+            name="Contour smoothing", start=0.0, end=20.0, step=0.5, value=3.0,
+            sizing_mode="stretch_width", visible=False,
+        )
+        # X2 controls — only shown when an x2_callback is provided.
+        _has_x2 = x2_callback is not None
+        self._x2_check = pn.widgets.Checkbox(
+            name="Show X2 line", value=False,
+            sizing_mode="stretch_width", visible=_has_x2,
+        )
+        self._x2_threshold_input = pn.widgets.FloatInput(
+            name="X2 threshold", value=2700.0,
+            sizing_mode="stretch_width", visible=False,
+        )
+        x2_row: list = (
+            [pn.pane.Markdown("**X2 isohaline**"), self._x2_check, self._x2_threshold_input]
+            if _has_x2 else []
+        )
         size_row: list = (
             [] if self._geom_type == "polygon"
             else [pn.pane.Markdown("**Size**"), self._size_slider]
@@ -386,6 +487,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             pn.pane.Markdown("**Colormap**"),
             self._colormap_select,
             *size_row,
+            pn.pane.Markdown("**Contours**"),
+            self._contours_check,
+            self._n_contours_slider,
+            self._contour_smooth_slider,
+            *x2_row,
             sizing_mode="stretch_width",
             max_width=260,
             margin=(4, 8, 4, 4),
@@ -405,6 +511,12 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._colormap_select.param.watch(self._on_colormap_widget_change, "value")
         if self._geom_type != "polygon":
             self._size_slider.param.watch(self._on_size_widget_change, "value")
+        self._contours_check.param.watch(self._on_contours_toggle, "value")
+        self._n_contours_slider.param.watch(self._on_n_contours_change, "value")
+        self._contour_smooth_slider.param.watch(self._on_contour_smooth_change, "value")
+        if x2_callback is not None:
+            self._x2_check.param.watch(self._on_x2_toggle, "value")
+            self._x2_threshold_input.param.watch(self._on_x2_threshold_change, "value")
 
         self.current_dt = ti[0].to_pydatetime()
 
@@ -419,24 +531,140 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             vmax = vmin + 1.0
         return float(vmin), float(vmax)
 
-    def _load_frame(self, step_idx: int) -> None:
-        """Fast path: patch only _value in the ColumnDataSource.
+    def _compute_contours(self, values: list[float]) -> tuple[list, list, list]:
+        """Interpolate values to a regular grid, optionally smooth, then contour.
 
-        Only Bokeh-document mutations happen here.  No Panel widget or
-        param changes — those trigger a Panel layout reflow which resizes
-        the ``stretch_both`` figure and resets the viewport/aspect ratio.
+        Gaussian smoothing (``contour_smooth`` sigma) is applied to the
+        Voronoi-nearest raster before contouring.  This rounds the blocky
+        edges produced by nearest-neighbour interpolation into smooth curves
+        without introducing artefacts between disconnected channel branches.
+
+        Returns
+        -------
+        (xs, ys, levels) : each a flat list — one entry per contour path.
+            ``levels[i]`` is the isovalue of path ``i``.
         """
+        from scipy.interpolate import griddata
+        from scipy.ndimage import gaussian_filter
+        import matplotlib.pyplot as plt
+
+        pts = np.column_stack([self._centroids_x, self._centroids_y])
+        vals = np.asarray(values, dtype=float)
+        mask = np.isfinite(vals)
+        if mask.sum() < 4:
+            return [], [], []
+
+        grid_z = griddata(
+            pts[mask], vals[mask],
+            (self._grid_x, self._grid_y),
+            method="nearest",
+        )
+
+        # Apply Gaussian smoothing to the raster before contouring.
+        # This converts the blocky Voronoi-step contours into smooth curves.
+        sigma = float(self.contour_smooth)
+        if sigma > 0:
+            grid_z = gaussian_filter(grid_z.astype(float), sigma=sigma)
+
+        eff_vmin, eff_vmax = self._current_clim()
+        levels = np.linspace(eff_vmin, eff_vmax, self.n_contours + 2)[1:-1]
+
+        fig, ax = plt.subplots(1, 1)
+        try:
+            cs = ax.contour(self._grid_x, self._grid_y, grid_z, levels=levels)
+            xs_out, ys_out, lvl_out = [], [], []
+            if hasattr(cs, "allsegs"):
+                # matplotlib ≥ 3.8
+                for i, lvl in enumerate(cs.levels):
+                    for seg in cs.allsegs[i]:
+                        if len(seg) > 1:
+                            self._clip_and_append(
+                                seg, float(lvl), xs_out, ys_out, lvl_out
+                            )
+            else:
+                # matplotlib < 3.8
+                for collection, lvl in zip(cs.collections, cs.levels):
+                    for path in collection.get_paths():
+                        v = path.vertices
+                        if len(v) > 1:
+                            self._clip_and_append(
+                                v, float(lvl), xs_out, ys_out, lvl_out
+                            )
+        finally:
+            plt.close(fig)
+
+        return xs_out, ys_out, lvl_out
+
+    def _clip_and_append(
+        self,
+        seg: np.ndarray,
+        lvl: float,
+        xs_out: list,
+        ys_out: list,
+        lvl_out: list,
+    ) -> None:
+        """Clip a contour segment to the channel buffer zone, then append.
+
+        Segments entirely outside the buffer are dropped.  Segments that
+        intersect the boundary are trimmed to the intersection.  The result
+        may be a single LineString or a MultiLineString (for segments that
+        re-enter the buffer zone multiple times).
+        """
+        if self._contour_clip_zone is None:
+            # No clip zone available — append as-is
+            xs_out.append(seg[:, 0].tolist())
+            ys_out.append(seg[:, 1].tolist())
+            lvl_out.append(lvl)
+            return
+
+        from shapely.geometry import LineString, MultiLineString
+
+        line = LineString(seg)
+        clipped = line.intersection(self._contour_clip_zone)
+        if clipped.is_empty:
+            return
+
+        # Normalise to a list of LineStrings
+        if isinstance(clipped, LineString):
+            parts = [clipped]
+        elif isinstance(clipped, MultiLineString):
+            parts = list(clipped.geoms)
+        else:
+            # Could be GeometryCollection with mixed types — extract lines
+            from shapely.geometry import GeometryCollection
+            parts = [
+                g for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped])
+                if isinstance(g, LineString) and len(g.coords) > 1
+            ]
+
+        for part in parts:
+            coords = np.array(part.coords)
+            if len(coords) > 1:
+                xs_out.append(coords[:, 0].tolist())
+                ys_out.append(coords[:, 1].tolist())
+                lvl_out.append(lvl)
+
+    def _load_frame(self, step_idx: int) -> None:
+        """Fast path: patch _value, optionally update contours and X2 line."""
         ts = self._reader.time_index[step_idx]
         series = self._reader.get_slice_nearest(ts)
         new_values = series.reindex(self._geo_ids).fillna(np.nan).tolist()
 
-        # patch() sends only _value over WebSocket — geometry never re-sent
         self._bk_source.patch({"_value": [(slice(None), new_values)]})
 
-        # Update Bokeh title (pure Bokeh document change, no Panel reflow)
+        if self._contour_renderer.visible:
+            xs, ys, lvls = self._compute_contours(new_values)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+
+        if self._x2_renderer.visible and self._x2_callback is not None:
+            threshold = float(self._x2_threshold_input.value)
+            xs, ys = self._x2_callback(step_idx, threshold)
+            self._x2_source.data = {"xs": xs, "ys": ys}
+
         ts_str = ts.strftime("%Y-%m-%d %H:%M")
-        plot_title = f"{self._title + ' — ' if self._title else ''}{ts_str}"
-        self._bk_figure.title.text = plot_title
+        self._bk_figure.title.text = (
+            f"{self._title + ' \u2014 ' if self._title else ''}{ts_str}"
+        )
 
     # ------------------------------------------------------------------
     # Widget callbacks
@@ -455,22 +683,79 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._bk_mapper.palette = _cmap_to_palette(self.colormap)
         self._bk_mapper.low = eff_vmin
         self._bk_mapper.high = eff_vmax
-        # Update glyph size/line_width if size param changed
         new_size = float(self.size)
+        # Only update size on the data renderer — contour and X2 renderers
+        # have their own fixed line widths and must not be resized.
+        _skip = {id(self._contour_renderer), id(self._x2_renderer)}
         for r in self._bk_figure.renderers:
-            if not hasattr(r, "glyph"):
+            if id(r) in _skip or not hasattr(r, "glyph"):
                 continue
             g = r.glyph
-            if hasattr(g, "size"):          # Scatter
+            if hasattr(g, "size"):
                 g.size = new_size
             elif hasattr(g, "line_width") and not hasattr(g, "fill_color"):
-                g.line_width = new_size     # MultiLine
+                g.line_width = new_size
+        # Recompute contour levels when clim changes
+        if self._contour_renderer.visible:
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
 
     def _on_colormap_widget_change(self, event: param.parameterized.Event) -> None:
         self.colormap = event.new
 
     def _on_size_widget_change(self, event: param.parameterized.Event) -> None:
         self.size = float(event.new)
+
+    def _on_contours_toggle(self, event: param.parameterized.Event) -> None:
+        """Show or hide contours; recompute for current frame when enabling."""
+        self._contour_renderer.visible = bool(event.new)
+        self._n_contours_slider.visible = bool(event.new)
+        self._contour_smooth_slider.visible = bool(event.new)
+        if event.new:
+            # Compute contours for the current frame immediately
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+        else:
+            self._contour_source.data = {"xs": [], "ys": [], "level": []}
+
+    def _on_n_contours_change(self, event: param.parameterized.Event) -> None:
+        """Recompute contours when the number of levels changes."""
+        self.n_contours = int(event.new)
+        if self._contour_renderer.visible:
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+
+    def _on_contour_smooth_change(self, event: param.parameterized.Event) -> None:
+        """Recompute contours when the smoothing sigma changes."""
+        self.contour_smooth = float(event.new)
+        if self._contour_renderer.visible:
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls}
+
+    def _on_x2_toggle(self, event: param.parameterized.Event) -> None:
+        """Show or hide the X2 isohaline line."""
+        self._x2_renderer.visible = bool(event.new)
+        self._x2_threshold_input.visible = bool(event.new)
+        if event.new and self._x2_callback is not None:
+            threshold = float(self._x2_threshold_input.value)
+            xs, ys = self._x2_callback(self._time_slider.value, threshold)
+            self._x2_source.data = {"xs": xs, "ys": ys}
+        else:
+            self._x2_source.data = {"xs": [], "ys": []}
+
+    def _on_x2_threshold_change(self, event: param.parameterized.Event) -> None:
+        """Recompute X2 line when the threshold value changes."""
+        if self._x2_renderer.visible and self._x2_callback is not None:
+            try:
+                threshold = float(event.new)
+            except (TypeError, ValueError):
+                return
+            xs, ys = self._x2_callback(self._time_slider.value, threshold)
+            self._x2_source.data = {"xs": xs, "ys": ys}
 
     def _on_clim_text_change(self, event: param.parameterized.Event) -> None:
         try:
