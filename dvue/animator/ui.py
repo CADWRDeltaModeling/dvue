@@ -29,7 +29,7 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure as bk_figure
 
-from .reader import SlicingReader
+from .reader import SlicingReader, BufferedSlicingReader, TransformedSlicingReader
 
 # ---------------------------------------------------------------------------
 # Curated colormaps (subset that works well with numeric data on maps)
@@ -248,17 +248,21 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         map_width: int = 750,
         map_height: int = 500,
         x2_callback: Optional[object] = None,
+        transform_options: Optional[dict] = None,
+        initial_transform: str = "none",
+        buffer_chunk_size: int = 200,
         **params,
     ) -> None:
         # ----------------------------------------------------------------
         # 1. Config
         # ----------------------------------------------------------------
-        self._reader = reader
+        self._base_reader = reader          # raw reader, never transformed
+        self._transform_options = transform_options or {}
+        self._buffer_chunk_size = buffer_chunk_size
+        self._reader = self._setup_reader(initial_transform)
         self._geo_id_column = geo_id_column
         self._title = title
         self._map_height = map_height
-        # Optional callable(step_idx: int, threshold: float) -> (xs, ys)
-        # where xs/ys are lists of lists suitable for multi_line.
         self._x2_callback = x2_callback
 
         # ----------------------------------------------------------------
@@ -573,6 +577,19 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._show_basemap_check = pn.widgets.Checkbox(
             name="Show background map", value=True, sizing_mode="stretch_width",
         )
+        # Transform selector — only shown when transform_options is provided
+        _transform_names = ["none"] + list(self._transform_options.keys())
+        self._transform_select = pn.widgets.Select(
+            name="Transform",
+            options=_transform_names,
+            value=initial_transform if initial_transform in _transform_names else "none",
+            sizing_mode="stretch_width",
+            visible=bool(self._transform_options),
+        )
+        transform_row: list = (
+            [pn.pane.Markdown("**Transform**"), self._transform_select]
+            if self._transform_options else []
+        )
         # X2 controls — only shown when an x2_callback is provided.
         _has_x2 = x2_callback is not None
         self._x2_check = pn.widgets.Checkbox(
@@ -604,6 +621,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             *size_row,
             self._show_channels_check,
             self._show_basemap_check,
+            *transform_row,
             pn.pane.Markdown("**Contours**"),
             self._contours_check,
             self._n_contours_slider,
@@ -641,6 +659,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
         self._show_channels_check.param.watch(self._on_show_channels_toggle, "value")
         self._show_basemap_check.param.watch(self._on_show_basemap_toggle, "value")
+        if self._transform_options:
+            self._transform_select.param.watch(self._on_transform_change, "value")
         if x2_callback is not None:
             self._x2_check.param.watch(self._on_x2_toggle, "value")
             self._x2_threshold_input.param.watch(self._on_x2_threshold_change, "value")
@@ -956,11 +976,51 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             return _level_colors(lvls, eff_vmin, eff_vmax, self.colormap)
         return ["black"] * len(lvls)
 
+    def _setup_reader(self, transform_name: str) -> "SlicingReader":
+        """Wrap ``_base_reader`` with an optional transform then buffer it."""
+        reader = self._base_reader
+        if transform_name and transform_name != "none" and transform_name in self._transform_options:
+            fn = self._transform_options[transform_name]
+            reader = TransformedSlicingReader(reader, fn)
+        return BufferedSlicingReader(reader, chunk_size=self._buffer_chunk_size)
+
     def _on_show_channels_toggle(self, event: param.parameterized.Event) -> None:
         self._data_renderer.visible = bool(event.new)
 
     def _on_show_basemap_toggle(self, event: param.parameterized.Event) -> None:
         self._tile_renderer.visible = bool(event.new)
+
+    def _on_transform_change(self, event: param.parameterized.Event) -> None:
+        """Apply a new time-domain transform; preserve current playback position."""
+        # Snapshot the current timestamp BEFORE swapping the reader so we
+        # can restore the closest step in the new (possibly coarser) index.
+        current_ts = pd.Timestamp(
+            self._reader.time_index[self._time_slider.value]
+        )
+
+        new_reader = self._setup_reader(event.new)
+        self._reader = new_reader
+
+        ti = self._reader.time_index
+        n = len(ti)
+
+        # Map the old timestamp to the nearest step in the new index.
+        nearest_idx = int(ti.get_indexer([current_ts], method="nearest")[0])
+        nearest_idx = max(0, min(nearest_idx, n - 1))
+
+        # Update widgets without triggering feedback loops.
+        self._syncing = True
+        try:
+            self._time_slider.options = list(range(n))
+            self._time_slider.value = nearest_idx
+            self._datetime_picker.start = ti[0].to_pydatetime()
+            self._datetime_picker.end = ti[-1].to_pydatetime()
+            self._datetime_picker.value = ti[nearest_idx].to_pydatetime()
+        finally:
+            self._syncing = False
+
+        self._time_div.text = f"<b>{ti[nearest_idx].strftime('%Y-%m-%d %H:%M')}</b>"
+        self._load_frame(nearest_idx)
 
     def _on_contour_color_toggle(self, event: param.parameterized.Event) -> None:
         """Switch contour line colour between colormap-derived and black."""

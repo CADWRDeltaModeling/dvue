@@ -357,3 +357,191 @@ class BufferedSlicingReader(SlicingReader):
 
     def __exit__(self, *args):
         self.close()
+
+
+# ---------------------------------------------------------------------------
+# Transformed wrapper
+# ---------------------------------------------------------------------------
+
+class TransformedSlicingReader(SlicingReader):
+    """Applies a time-dimension transform to any :class:`SlicingReader`.
+
+    The entire raw dataset is loaded from the inner reader on **first
+    access**, the transform function is applied once, and the result is
+    cached as an in-memory DataFrame.  Subsequent ``get_slice`` /
+    ``get_slice_range`` calls are served from that cache.
+
+    This eager-on-first-access strategy keeps chunk-boundary arithmetic
+    simple: transforms that require context across time steps (rolling
+    average, tidal filter warmup) see the full dataset, not just a window.
+
+    Parameters
+    ----------
+    inner : SlicingReader
+        The raw data source.
+    transform_fn : callable
+        ``(df: pd.DataFrame) -> pd.DataFrame``
+
+        Receives the full raw DataFrame (rows = timestamps, columns =
+        geo_ids) and must return a DataFrame with a **regular
+        DatetimeIndex**.  The output may have a different frequency or
+        fewer rows than the input (e.g. after resampling).
+    warmup_steps : int, optional
+        Number of raw time steps to prepend before the first usable output
+        step.  These rows are discarded after the transform.  Only needed
+        for filters with a warm-up period (e.g. Godin: ~134 steps at
+        15 min).  Default ``0``.
+
+    Notes
+    -----
+    For very large tidefiles (multi-year at 15-min) this class reads the
+    **entire** dataset into memory.  Callers should apply a time-window
+    restriction on the inner reader, or use ``InMemorySlicingReader``
+    with a pre-loaded block, when memory is a concern.
+
+    Transform functions for DSM2 data (resample, rolling average, Godin
+    filter) are provided in :mod:`dsm2ui.animate` to keep vtools3 out of
+    the dvue dependency tree.
+
+    Examples
+    --------
+    Daily average of a 15-min reader::
+
+        from dvue.animator import TransformedSlicingReader
+        daily_reader = TransformedSlicingReader(
+            raw_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        )
+
+    24-hour centred rolling mean (keeps 15-min timesteps)::
+
+        TransformedSlicingReader(
+            raw_reader,
+            transform_fn=lambda df: df.rolling(96, center=True, min_periods=48).mean(),
+        )
+    """
+
+    def __init__(
+        self,
+        inner: SlicingReader,
+        transform_fn,
+        warmup_steps: int = 0,
+    ) -> None:
+        self._inner = inner
+        self._transform_fn = transform_fn
+        self._warmup_steps = max(0, int(warmup_steps))
+        self._cache: Optional[pd.DataFrame] = None  # populated on first access
+
+        # Compute a provisional time index from the inner reader so the
+        # SlicingReader base class is satisfied at __init__ time.
+        # The real (post-transform) index is set on first access via
+        # _ensure_cache(); the base __init__ call below will be re-invoked
+        # via _reinit_from_cache once the actual index is known.
+        # For now pass the inner index as a placeholder — it will be
+        # replaced when the cache is populated.
+        self._inner_time_index_placeholder = inner.time_index
+        # We cannot call super().__init__ with the correct index until the
+        # transform has been applied.  Instead we initialise with the inner
+        # index and then override _time_index after transform.
+        super().__init__(inner.time_index)
+
+    # ------------------------------------------------------------------
+    # Lazy cache population
+    # ------------------------------------------------------------------
+
+    def _ensure_cache(self) -> None:
+        """Populate the in-memory transformed DataFrame (once only)."""
+        if self._cache is not None:
+            return
+
+        inner = self._inner
+        n_raw = len(inner.time_index)
+
+        # Fetch more raw data if warmup padding is requested.
+        # warmup_steps rows are prepended before the logical start.
+        start_raw = 0   # always start from the beginning for full coverage
+        raw_df = inner.get_slice_range(start_raw, n_raw)
+
+        # Apply the user-supplied transform
+        transformed: pd.DataFrame = self._transform_fn(raw_df)
+
+        if not isinstance(transformed.index, pd.DatetimeIndex):
+            raise TypeError(
+                "transform_fn must return a DataFrame with a pd.DatetimeIndex."
+            )
+
+        # Enforce a regular frequency on the output index
+        if transformed.index.freq is None:
+            transformed.index.freq = pd.infer_freq(transformed.index)
+        if transformed.index.freq is None:
+            raise ValueError(
+                "transform_fn returned a DataFrame with an irregular DatetimeIndex. "
+                "Ensure the transform produces a regular time series "
+                "(e.g. use resample().mean() or rolling().mean())."
+            )
+
+        # Discard any warmup rows from the *output* if warmup_steps > 0.
+        # For most transforms (resample, rolling) the warmup is expressed as
+        # NaN rows at the start; drop them here.
+        if self._warmup_steps > 0:
+            # Map warmup_steps (raw steps) → output steps
+            # Heuristic: drop leading NaN rows up to warmup_steps worth of time
+            raw_freq_ns = pd.tseries.frequencies.to_offset(inner.time_index.freq).nanos
+            out_freq_ns = pd.tseries.frequencies.to_offset(transformed.index.freq).nanos
+            out_warmup = max(1, int(self._warmup_steps * raw_freq_ns / out_freq_ns))
+            n_drop = min(out_warmup, len(transformed))
+            # Only drop if all-NaN rows exist at the start
+            leading_nan = transformed.iloc[:n_drop].isna().all(axis=1)
+            n_actual_drop = int(leading_nan[::-1].idxmax() + 1) if leading_nan.any() else 0
+            if n_actual_drop > 0:
+                transformed = transformed.iloc[n_actual_drop:]
+
+        self._cache = transformed
+
+        # Update the time_index to the transformed index
+        self._time_index = transformed.index
+
+        # Recompute vmin/vmax from transformed data
+        vals = transformed.to_numpy(dtype=float, na_value=np.nan)
+        self._vmin = float(np.nanmin(vals)) if not np.all(np.isnan(vals)) else 0.0
+        self._vmax = float(np.nanmax(vals)) if not np.all(np.isnan(vals)) else 0.0
+
+    # ------------------------------------------------------------------
+    # SlicingReader interface
+    # ------------------------------------------------------------------
+
+    @property
+    def time_index(self) -> pd.DatetimeIndex:
+        self._ensure_cache()
+        return self._time_index
+
+    @property
+    def vmin(self) -> float:
+        self._ensure_cache()
+        return self._vmin
+
+    @property
+    def vmax(self) -> float:
+        self._ensure_cache()
+        return self._vmax
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        self._ensure_cache()
+        i = self._time_index.get_indexer([timestamp], method="nearest")[0]
+        return self._cache.iloc[i].astype(float)
+
+    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
+        self._ensure_cache()
+        return self._cache.iloc[start_idx:end_idx].astype(float)
+
+    def close(self) -> None:
+        """Close the underlying inner reader if it supports ``close()``."""
+        if hasattr(self._inner, "close"):
+            self._inner.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+

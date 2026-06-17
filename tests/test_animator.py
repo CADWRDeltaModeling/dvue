@@ -444,3 +444,112 @@ class TestBufferedSlicingReader:
         # not raise if inner has no close method
         buf = BufferedSlicingReader(inner)
         buf.close()  # must not raise
+
+
+# ===========================================================================
+# TransformedSlicingReader tests
+# ===========================================================================
+
+class TestTransformedSlicingReader:
+    """Tests for TransformedSlicingReader with synthetic daily data."""
+
+    @pytest.fixture
+    def hourly_df(self):
+        """48 hourly steps × 4 channels — suitable for resampling and rolling."""
+        idx = pd.date_range("2020-01-01", periods=48, freq="h")
+        rng = np.random.default_rng(7)
+        data = rng.uniform(100.0, 1000.0, size=(48, 4))
+        return pd.DataFrame(data, index=idx, columns=[1, 2, 3, 4])
+
+    @pytest.fixture
+    def hourly_reader(self, hourly_df):
+        from dvue.animator import InMemorySlicingReader
+        return InMemorySlicingReader(hourly_df)
+
+    def test_resample_daily_reduces_steps(self, hourly_reader):
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        )
+        # 48 hourly steps → 2 daily steps
+        assert len(tr.time_index) == 2
+
+    def test_resample_daily_freq(self, hourly_reader):
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        )
+        assert tr.time_index.freq == pd.tseries.frequencies.to_offset("D")
+
+    def test_resample_get_slice_returns_series(self, hourly_reader):
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        )
+        s = tr.get_slice(tr.time_index[0])
+        assert isinstance(s, pd.Series)
+        assert len(s) == 4
+
+    def test_rolling_keeps_steps(self, hourly_reader, hourly_df):
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.rolling("6h", center=True, min_periods=1).mean(),
+        )
+        assert len(tr.time_index) == 48
+
+    def test_rolling_smooths_values(self, hourly_reader, hourly_df):
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.rolling(6, center=True, min_periods=1).mean(),
+        )
+        raw = hourly_reader.get_slice(hourly_df.index[12])
+        smoothed = tr.get_slice_nearest(hourly_df.index[12])
+        # Smoothed should differ from raw (unless all same value)
+        assert isinstance(smoothed, pd.Series)
+        assert len(smoothed) == 4
+
+    def test_vmin_vmax_from_transformed_data(self, hourly_reader, hourly_df):
+        from dvue.animator import TransformedSlicingReader
+        # Daily mean should have vmin/vmax within the raw range
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        )
+        assert tr.vmin >= hourly_reader.vmin - 1e-6
+        assert tr.vmax <= hourly_reader.vmax + 1e-6
+
+    def test_get_slice_nearest_on_transformed(self, hourly_reader):
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        )
+        # Query midday — should snap to the daily step
+        midday = pd.Timestamp("2020-01-01 12:00")
+        s = tr.get_slice_nearest(midday)
+        assert isinstance(s, pd.Series)
+
+    def test_non_datetime_output_raises(self, hourly_reader):
+        from dvue.animator import TransformedSlicingReader
+        import pytest
+        # transform_fn that returns a non-DatetimeIndex should raise TypeError
+        def bad_transform(df):
+            result = df.reset_index(drop=True)
+            return result
+
+        tr = TransformedSlicingReader(hourly_reader, transform_fn=bad_transform)
+        with pytest.raises(TypeError, match="DatetimeIndex"):
+            tr.get_slice(hourly_reader.time_index[0])
+
+    def test_context_manager(self, hourly_reader):
+        from dvue.animator import TransformedSlicingReader
+        with TransformedSlicingReader(
+            hourly_reader,
+            transform_fn=lambda df: df.resample("D").mean(),
+        ) as tr:
+            assert len(tr.time_index) == 2

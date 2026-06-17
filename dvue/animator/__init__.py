@@ -13,12 +13,13 @@ code which only uses :class:`SlicingReader` or :class:`InMemorySlicingReader`
 does not pull in Panel, HoloViews, GeoViews, Cartopy, or geopandas.
 """
 
-from .reader import SlicingReader, InMemorySlicingReader, BufferedSlicingReader
+from .reader import SlicingReader, InMemorySlicingReader, BufferedSlicingReader, TransformedSlicingReader
 
 __all__ = [
     "SlicingReader",
     "InMemorySlicingReader",
     "BufferedSlicingReader",
+    "TransformedSlicingReader",
     "GeoAnimatorManager",
     "CURATED_COLORMAPS",
 ]
