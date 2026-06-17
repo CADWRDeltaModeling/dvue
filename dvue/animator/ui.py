@@ -123,6 +123,184 @@ def _level_colors(
 
 
 # ---------------------------------------------------------------------------
+# Shared contour computation — module-level so multi_ui.py can import them
+# ---------------------------------------------------------------------------
+
+def _clip_contour_segment(
+    seg: np.ndarray,
+    lvl: float,
+    clip_zone,
+    xs_out: list,
+    ys_out: list,
+    lvl_out: list,
+) -> None:
+    """Clip one contour segment to *clip_zone* and append valid sub-paths."""
+    if clip_zone is None:
+        xs_out.append(seg[:, 0].tolist())
+        ys_out.append(seg[:, 1].tolist())
+        lvl_out.append(lvl)
+        return
+    from shapely.geometry import LineString, MultiLineString
+    line = LineString(seg)
+    clipped = line.intersection(clip_zone)
+    if clipped.is_empty:
+        return
+    if isinstance(clipped, LineString):
+        parts = [clipped]
+    elif isinstance(clipped, MultiLineString):
+        parts = list(clipped.geoms)
+    else:
+        parts = [
+            g for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped])
+            if isinstance(g, LineString) and len(g.coords) > 1
+        ]
+    for part in parts:
+        coords = np.array(part.coords)
+        if len(coords) > 1:
+            xs_out.append(coords[:, 0].tolist())
+            ys_out.append(coords[:, 1].tolist())
+            lvl_out.append(lvl)
+
+
+def _compute_contour_levels(
+    finite_vals: np.ndarray,
+    vmin: float,
+    vmax: float,
+    n: int,
+    mode: str,
+    custom_levels: str,
+) -> np.ndarray:
+    """Return a sorted level array for contouring.
+
+    When *custom_levels* is a non-empty comma-separated string, those values
+    are returned directly (sorted) and all other parameters are ignored.
+    """
+    custom_str = (custom_levels or "").strip()
+    if custom_str:
+        try:
+            explicit = np.array(
+                [float(v) for v in custom_str.split(",") if v.strip()]
+            )
+            explicit = np.sort(explicit)
+            if len(explicit) > 0:
+                return explicit
+        except ValueError:
+            pass
+
+    if mode == "eq_hist" and len(finite_vals) >= n:
+        quantiles = np.linspace(0.0, 1.0, n + 2)[1:-1]
+        levels = np.quantile(finite_vals, quantiles)
+        levels = levels[(levels > vmin) & (levels < vmax)]
+        if len(levels) == 0:
+            levels = np.linspace(vmin, vmax, n + 2)[1:-1]
+        return levels
+
+    if mode == "nice":
+        from matplotlib.ticker import MaxNLocator
+        locator = MaxNLocator(nbins=n, steps=[1, 2, 2.5, 5, 10])
+        levels = np.asarray(locator.tick_values(vmin, vmax))
+        levels = levels[(levels > vmin) & (levels < vmax)]
+        if len(levels) == 0:
+            levels = np.linspace(vmin, vmax, n + 2)[1:-1]
+        return levels
+
+    return np.linspace(vmin, vmax, n + 2)[1:-1]
+
+
+def _run_contour_computation(
+    vals: np.ndarray,
+    centroids_x: np.ndarray,
+    centroids_y: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    sigma: float,
+    levels_arr: np.ndarray,
+    clip_zone,
+) -> tuple:
+    """Rasterize *vals* → smooth → contour at *levels_arr* → clip.
+
+    Returns ``(xs_out, ys_out, lvl_out)`` suitable for a Bokeh
+    ``multi_line`` + ``level`` column-data-source.
+    """
+    from scipy.interpolate import griddata
+    from scipy.ndimage import gaussian_filter
+    import matplotlib.pyplot as plt
+
+    pts = np.column_stack([centroids_x, centroids_y])
+    vals = np.asarray(vals, dtype=float)
+    mask = np.isfinite(vals)
+    if mask.sum() < 4:
+        return [], [], []
+
+    grid_z = griddata(pts[mask], vals[mask], (grid_x, grid_y), method="nearest")
+    if sigma > 0:
+        grid_z = gaussian_filter(grid_z.astype(float), sigma=sigma)
+
+    xs_out, ys_out, lvl_out = [], [], []
+    fig, ax = plt.subplots(1, 1)
+    try:
+        cs = ax.contour(grid_x, grid_y, grid_z, levels=levels_arr)
+        if hasattr(cs, "allsegs"):
+            for i, lvl in enumerate(cs.levels):
+                for seg in cs.allsegs[i]:
+                    if len(seg) > 1:
+                        _clip_contour_segment(seg, float(lvl), clip_zone, xs_out, ys_out, lvl_out)
+        else:
+            for collection, lvl in zip(cs.collections, cs.levels):
+                for path in collection.get_paths():
+                    v = path.vertices
+                    if len(v) > 1:
+                        _clip_contour_segment(v, float(lvl), clip_zone, xs_out, ys_out, lvl_out)
+    finally:
+        plt.close(fig)
+    return xs_out, ys_out, lvl_out
+
+
+def _make_contour_grid(
+    gdf_proj: "gpd.GeoDataFrame",
+    geom_type: str,
+) -> tuple:
+    """Build the contour interpolation grid + clip zone for a projected GDF.
+
+    Returns ``(centroids_x, centroids_y, grid_x, grid_y, clip_zone)``.
+    All coordinates are in the GDF's CRS (expected EPSG:3857).
+    """
+    if geom_type == "point":
+        centroids_x = gdf_proj.geometry.x.values.copy()
+        centroids_y = gdf_proj.geometry.y.values.copy()
+    else:
+        cx_list, cy_list = [], []
+        for geom in gdf_proj.geometry:
+            c = geom.centroid
+            cx_list.append(c.x)
+            cy_list.append(c.y)
+        centroids_x = np.array(cx_list)
+        centroids_y = np.array(cy_list)
+
+    bounds = gdf_proj.total_bounds
+    span_x = float(bounds[2] - bounds[0])
+    span_y = float(bounds[3] - bounds[1])
+    if not np.isfinite(span_x) or span_x <= 0:
+        span_x = 1.0
+    if not np.isfinite(span_y) or span_y <= 0:
+        span_y = 1.0
+    nx = 200
+    ny = max(int(round(200 * span_y / span_x)), 10)
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(bounds[0], bounds[2], nx),
+        np.linspace(bounds[1], bounds[3], ny),
+    )
+    _cell_size = max(span_x / nx, span_y / ny)
+    _buf_radius = _cell_size * 10.0
+    try:
+        from shapely.ops import unary_union
+        clip_zone = unary_union(gdf_proj.geometry).buffer(_buf_radius)
+    except Exception:
+        clip_zone = None
+    return centroids_x, centroids_y, grid_x, grid_y, clip_zone
+
+
+# ---------------------------------------------------------------------------
 # Geometry type constants
 # ---------------------------------------------------------------------------
 
@@ -290,11 +468,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._geom_type == "point":
             bk_xs: list = self._gdf_proj.geometry.x.values.tolist()
             bk_ys: list = self._gdf_proj.geometry.y.values.tolist()
-            self._centroids_x = np.array(bk_xs)
-            self._centroids_y = np.array(bk_ys)
         else:
             bk_xs, bk_ys = [], []
-            cx_list, cy_list = [], []
             for geom in self._gdf_proj.geometry:
                 if self._geom_type == "polygon":
                     coords = np.array(geom.exterior.coords)
@@ -302,40 +477,13 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                     coords = np.array(geom.coords)
                 bk_xs.append(coords[:, 0].tolist())
                 bk_ys.append(coords[:, 1].tolist())
-                c = geom.centroid
-                cx_list.append(c.x)
-                cy_list.append(c.y)
-            self._centroids_x = np.array(cx_list)
-            self._centroids_y = np.array(cy_list)
 
-        # Regular grid for contour interpolation (built once).
-        bounds = self._gdf_proj.total_bounds
-        span_x = float(bounds[2] - bounds[0])
-        span_y = float(bounds[3] - bounds[1])
-        if not np.isfinite(span_x) or span_x <= 0:
-            span_x = 1.0
-        if not np.isfinite(span_y) or span_y <= 0:
-            span_y = 1.0
-        nx = 200
-        ny = max(int(round(200 * span_y / span_x)), 10)
-        self._grid_x, self._grid_y = np.meshgrid(
-            np.linspace(bounds[0], bounds[2], nx),
-            np.linspace(bounds[1], bounds[3], ny),
-        )
-
-        # Buffer zone for contour clipping — built once from the union of all
-        # channel geometries.  Contour paths outside this zone are discarded.
-        # Buffer radius: ~10× the grid cell size so channels that are narrow
-        # relative to the grid still have coverage.
-        _cell_size = max(span_x / nx, span_y / ny)
-        _buf_radius = _cell_size * 10.0
-        try:
-            from shapely.ops import unary_union
-            self._contour_clip_zone = (
-                unary_union(self._gdf_proj.geometry).buffer(_buf_radius)
-            )
-        except Exception:
-            self._contour_clip_zone = None
+        # Contour grid (centroids, regular raster, clip zone) — built once.
+        (
+            self._centroids_x, self._centroids_y,
+            self._grid_x, self._grid_y,
+            self._contour_clip_zone,
+        ) = _make_contour_grid(self._gdf_proj, self._geom_type)
 
         # ----------------------------------------------------------------
         # 4. Effective vmin/vmax and initial frame values.
@@ -735,46 +883,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     def _compute_levels(
         self, finite_vals: np.ndarray, vmin: float, vmax: float
     ) -> np.ndarray:
-        """Compute contour level positions according to ``contour_levels`` param.
-
-        When ``contour_custom_levels`` is non-empty, the comma-separated values
-        it contains are used directly and the count / mode selectors are ignored.
-        """
-        # --- User-specified explicit levels take priority ---
-        custom_str = self.contour_custom_levels.strip()
-        if custom_str:
-            try:
-                explicit = np.array(
-                    [float(v) for v in custom_str.split(",") if v.strip()]
-                )
-                explicit = np.sort(explicit)
-                if len(explicit) > 0:
-                    return explicit
-            except ValueError:
-                pass  # fall through to automatic computation
-
-        # --- Automatic computation ---
-        n = self.n_contours
-        mode = self.contour_levels
-
-        if mode == "eq_hist" and len(finite_vals) >= n:
-            quantiles = np.linspace(0.0, 1.0, n + 2)[1:-1]
-            levels = np.quantile(finite_vals, quantiles)
-            levels = levels[(levels > vmin) & (levels < vmax)]
-            if len(levels) == 0:
-                levels = np.linspace(vmin, vmax, n + 2)[1:-1]
-            return levels
-
-        if mode == "nice":
-            from matplotlib.ticker import MaxNLocator
-            locator = MaxNLocator(nbins=n, steps=[1, 2, 2.5, 5, 10])
-            levels = np.asarray(locator.tick_values(vmin, vmax))
-            levels = levels[(levels > vmin) & (levels < vmax)]
-            if len(levels) == 0:
-                levels = np.linspace(vmin, vmax, n + 2)[1:-1]
-            return levels
-
-        return np.linspace(vmin, vmax, n + 2)[1:-1]
+        """Delegate to module-level ``_compute_contour_levels``."""
+        return _compute_contour_levels(
+            finite_vals, vmin, vmax,
+            self.n_contours, self.contour_levels, self.contour_custom_levels,
+        )
 
     def _compute_contours(self, values: list[float]) -> tuple[list, list, list]:
         """Interpolate values to a regular grid, optionally smooth, then contour.
@@ -789,54 +902,21 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         (xs, ys, levels) : each a flat list — one entry per contour path.
             ``levels[i]`` is the isovalue of path ``i``.
         """
-        from scipy.interpolate import griddata
-        from scipy.ndimage import gaussian_filter
-        import matplotlib.pyplot as plt
-
-        pts = np.column_stack([self._centroids_x, self._centroids_y])
+        eff_vmin, eff_vmax = self._current_clim()
         vals = np.asarray(values, dtype=float)
         mask = np.isfinite(vals)
         if mask.sum() < 4:
             return [], [], []
-
-        grid_z = griddata(
-            pts[mask], vals[mask],
-            (self._grid_x, self._grid_y),
-            method="nearest",
+        levels = _compute_contour_levels(
+            vals[mask], eff_vmin, eff_vmax,
+            self.n_contours, self.contour_levels, self.contour_custom_levels,
         )
-
-        # Apply Gaussian smoothing to the raster before contouring.
-        # This converts the blocky Voronoi-step contours into smooth curves.
-        sigma = float(self.contour_smooth)
-        if sigma > 0:
-            grid_z = gaussian_filter(grid_z.astype(float), sigma=sigma)
-
-        eff_vmin, eff_vmax = self._current_clim()
-        levels = self._compute_levels(vals[mask], eff_vmin, eff_vmax)
-
-        fig, ax = plt.subplots(1, 1)
-        try:
-            cs = ax.contour(self._grid_x, self._grid_y, grid_z, levels=levels)
-            xs_out, ys_out, lvl_out = [], [], []
-            if hasattr(cs, "allsegs"):
-                # matplotlib ≥ 3.8
-                for i, lvl in enumerate(cs.levels):
-                    for seg in cs.allsegs[i]:
-                        if len(seg) > 1:
-                            self._clip_and_append(
-                                seg, float(lvl), xs_out, ys_out, lvl_out
-                            )
-            else:
-                # matplotlib < 3.8
-                for collection, lvl in zip(cs.collections, cs.levels):
-                    for path in collection.get_paths():
-                        v = path.vertices
-                        if len(v) > 1:
-                            self._clip_and_append(
-                                v, float(lvl), xs_out, ys_out, lvl_out
-                            )
-        finally:
-            plt.close(fig)
+        return _run_contour_computation(
+            vals,
+            self._centroids_x, self._centroids_y,
+            self._grid_x, self._grid_y,
+            float(self.contour_smooth), levels, self._contour_clip_zone,
+        )
 
         return xs_out, ys_out, lvl_out
 
@@ -848,46 +928,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         ys_out: list,
         lvl_out: list,
     ) -> None:
-        """Clip a contour segment to the channel buffer zone, then append.
-
-        Segments entirely outside the buffer are dropped.  Segments that
-        intersect the boundary are trimmed to the intersection.  The result
-        may be a single LineString or a MultiLineString (for segments that
-        re-enter the buffer zone multiple times).
-        """
-        if self._contour_clip_zone is None:
-            # No clip zone available — append as-is
-            xs_out.append(seg[:, 0].tolist())
-            ys_out.append(seg[:, 1].tolist())
-            lvl_out.append(lvl)
-            return
-
-        from shapely.geometry import LineString, MultiLineString
-
-        line = LineString(seg)
-        clipped = line.intersection(self._contour_clip_zone)
-        if clipped.is_empty:
-            return
-
-        # Normalise to a list of LineStrings
-        if isinstance(clipped, LineString):
-            parts = [clipped]
-        elif isinstance(clipped, MultiLineString):
-            parts = list(clipped.geoms)
-        else:
-            # Could be GeometryCollection with mixed types — extract lines
-            from shapely.geometry import GeometryCollection
-            parts = [
-                g for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped])
-                if isinstance(g, LineString) and len(g.coords) > 1
-            ]
-
-        for part in parts:
-            coords = np.array(part.coords)
-            if len(coords) > 1:
-                xs_out.append(coords[:, 0].tolist())
-                ys_out.append(coords[:, 1].tolist())
-                lvl_out.append(lvl)
+        """Delegate to module-level ``_clip_contour_segment``."""
+        _clip_contour_segment(seg, lvl, self._contour_clip_zone, xs_out, ys_out, lvl_out)
 
     def _load_frame(self, step_idx: int) -> None:
         """Fast path: patch _value, optionally update contours and X2 line."""
