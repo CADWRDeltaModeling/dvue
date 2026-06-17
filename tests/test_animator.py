@@ -553,3 +553,77 @@ class TestTransformedSlicingReader:
             transform_fn=lambda df: df.resample("D").mean(),
         ) as tr:
             assert len(tr.time_index) == 2
+
+
+# ===========================================================================
+# DiffSlicingReader tests
+# ===========================================================================
+
+
+class TestDiffSlicingReader:
+
+    @pytest.fixture
+    def reader_a(self):
+        """Daily reader, values in [100, 1000]."""
+        from dvue.animator import InMemorySlicingReader
+        idx = pd.date_range("2020-01-01", periods=20, freq="D")
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame(rng.uniform(100, 1000, (20, 4)), index=idx, columns=[1, 2, 3, 4])
+        return InMemorySlicingReader(df)
+
+    @pytest.fixture
+    def reader_b(self):
+        """Daily reader (same dates), values slightly lower."""
+        from dvue.animator import InMemorySlicingReader
+        idx = pd.date_range("2020-01-01", periods=20, freq="D")
+        rng = np.random.default_rng(2)
+        df = pd.DataFrame(rng.uniform(50, 900, (20, 4)), index=idx, columns=[1, 2, 3, 4])
+        return InMemorySlicingReader(df)
+
+    @pytest.fixture
+    def diff_reader(self, reader_a, reader_b):
+        from dvue.animator import DiffSlicingReader
+        return DiffSlicingReader(reader_a, reader_b)
+
+    def test_time_index_is_intersection(self, reader_a, reader_b, diff_reader):
+        # Same dates → same length
+        assert len(diff_reader.time_index) == len(reader_a.time_index)
+
+    def test_time_index_is_regular(self, diff_reader):
+        assert diff_reader.time_index.freq is not None
+
+    def test_get_slice_is_difference(self, diff_reader, reader_a, reader_b):
+        ts = diff_reader.time_index[5]
+        result = diff_reader.get_slice(ts)
+        expected = reader_a.get_slice_nearest(ts) - reader_b.get_slice_nearest(ts)
+        pd.testing.assert_series_equal(result, expected.astype(float))
+
+    def test_vmin_vmax_symmetric(self, diff_reader):
+        # vmin and vmax should be symmetric around 0
+        assert abs(diff_reader.vmin + diff_reader.vmax) < 1e-9
+
+    def test_get_slice_range_shape(self, diff_reader):
+        df = diff_reader.get_slice_range(0, 5)
+        assert df.shape == (5, 4)
+
+    def test_no_overlap_raises(self):
+        from dvue.animator import InMemorySlicingReader, DiffSlicingReader
+        idx_a = pd.date_range("2020-01-01", periods=5, freq="D")
+        idx_b = pd.date_range("2021-01-01", periods=5, freq="D")
+        ra = InMemorySlicingReader(pd.DataFrame(np.ones((5, 2)), index=idx_a, columns=[1, 2]))
+        rb = InMemorySlicingReader(pd.DataFrame(np.ones((5, 2)), index=idx_b, columns=[1, 2]))
+        with pytest.raises(ValueError, match="no overlap"):
+            DiffSlicingReader(ra, rb)
+
+    def test_coarser_freq_used_when_different(self):
+        """When reader_b has daily freq and reader_a has hourly, result uses daily."""
+        from dvue.animator import InMemorySlicingReader, DiffSlicingReader
+        idx_hourly = pd.date_range("2020-01-01", periods=48, freq="h")
+        idx_daily = pd.date_range("2020-01-01", periods=2, freq="D")
+        ra = InMemorySlicingReader(
+            pd.DataFrame(np.ones((48, 2)), index=idx_hourly, columns=[1, 2]))
+        rb = InMemorySlicingReader(
+            pd.DataFrame(np.ones((2, 2)), index=idx_daily, columns=[1, 2]))
+        dr = DiffSlicingReader(ra, rb)
+        # Should use daily (coarser) freq
+        assert dr.time_index.freq == pd.tseries.frequencies.to_offset("D")

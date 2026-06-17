@@ -4,30 +4,35 @@ Provides a framework for animating spatial data over time:
 - :class:`SlicingReader` — abstract base; subclass to connect any data source.
 - :class:`InMemorySlicingReader` — wraps a ``pd.DataFrame(index=DatetimeIndex,
   columns=geo_ids)`` for immediate use.
-- :class:`GeoAnimatorManager` — Panel Viewer that combines a SlicingReader with
-  a GeoDataFrame to produce a map animated by a DateSlider.
+- :class:`BufferedSlicingReader` — keeps a rolling in-memory buffer for HDF5.
+- :class:`TransformedSlicingReader` — applies a time-domain transform once at cache time.
+- :class:`DiffSlicingReader` — computes element-wise A − B between two readers.
+- :class:`GeoAnimatorManager` — single-reader Panel Viewer animated by a DateSlider.
+- :class:`MultiGeoAnimatorManager` — two-reader side-by-side or diff Panel Viewer.
 - :data:`CURATED_COLORMAPS` — curated list of valid colormap names.
 
-``GeoAnimatorManager`` and ``CURATED_COLORMAPS`` are lazily imported so that
-code which only uses :class:`SlicingReader` or :class:`InMemorySlicingReader`
-does not pull in Panel, HoloViews, GeoViews, Cartopy, or geopandas.
+UI classes are lazily imported so that importing reader classes does not pull
+in Panel, HoloViews, GeoViews, Cartopy, or geopandas.
 """
 
-from .reader import SlicingReader, InMemorySlicingReader, BufferedSlicingReader, TransformedSlicingReader
+from .reader import (
+    SlicingReader,
+    InMemorySlicingReader,
+    BufferedSlicingReader,
+    TransformedSlicingReader,
+    DiffSlicingReader,
+)
 
 __all__ = [
     "SlicingReader",
     "InMemorySlicingReader",
     "BufferedSlicingReader",
     "TransformedSlicingReader",
+    "DiffSlicingReader",
     "GeoAnimatorManager",
+    "MultiGeoAnimatorManager",
     "CURATED_COLORMAPS",
 ]
-
-# GeoAnimatorManager and CURATED_COLORMAPS are imported lazily so that
-# heavy optional dependencies (Panel, HoloViews, GeoViews, Cartopy,
-# geopandas) are NOT pulled in just because code imports SlicingReader or
-# InMemorySlicingReader.
 
 
 def __getattr__(name: str):
@@ -35,4 +40,7 @@ def __getattr__(name: str):
         from .ui import GeoAnimatorManager, CURATED_COLORMAPS  # noqa: F401
         g = {"GeoAnimatorManager": GeoAnimatorManager, "CURATED_COLORMAPS": CURATED_COLORMAPS}
         return g[name]
+    if name == "MultiGeoAnimatorManager":
+        from .multi_ui import MultiGeoAnimatorManager  # noqa: F401
+        return MultiGeoAnimatorManager
     raise AttributeError(f"module 'dvue.animator' has no attribute {name!r}")

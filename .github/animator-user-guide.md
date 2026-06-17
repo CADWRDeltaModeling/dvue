@@ -41,8 +41,15 @@ mgr.servable()
 Or from the command line (DSM2 tidefiles):
 
 ```bash
+# Single file
 dsm2ui animate hydro path/to/tidefile.h5
 dsm2ui animate qual  path/to/qual_ec.h5 --constituent ec
+
+# Two files — side-by-side
+dsm2ui animate hydro study_a.h5 study_b.h5
+
+# Two files — difference map (A − B)
+dsm2ui animate hydro study_a.h5 study_b.h5 --diff
 ```
 
 ---
@@ -93,9 +100,12 @@ from dsm2ui.animate import (
 | `vmin` | `None` | Colour scale lower bound (None → reader.vmin) |
 | `vmax` | `None` | Colour scale upper bound (None → reader.vmax) |
 | `colormap` | `"viridis"` | Initial colormap (see curated list below) |
-| `size` | `8.0` | Point radius (px) or line width (px) |
+| `size` | `6.0` | Point radius (px) or line width (px) |
 | `map_height` | `500` | Minimum map height (px) |
 | `x2_callback` | `None` | Optional callable for an isohaline overlay |
+| `transform_options` | `None` | Dict of `{"label": transform_fn}` shown in the Transform dropdown |
+| `initial_transform` | `"none"` | Which transform to apply on startup |
+| `buffer_chunk_size` | `200` | HDF5 read chunk size for `BufferedSlicingReader` |
 
 ---
 
@@ -118,6 +128,49 @@ from dsm2ui.animate import (
 
 **Hover tooltip** on channels: shows `Channel` (feature ID) and `Value` (current data value).  
 **Hover tooltip** on contour lines: shows `Level` (the isovalue).
+
+---
+
+## Time-Domain Transforms
+
+The **Transform** dropdown in the controls panel switches between representations
+of the same data without restarting the app.  The current playback position is
+preserved (snapped to the nearest available timestamp in the new series).
+
+| Transform | Effect | Timestep change? |
+|---|---|---|
+| `none` (default) | Raw data | No |
+| `Daily mean` | `resample("D").mean()` | Yes — coarser (1 day) |
+| `Rolling 24 h` | 24 h centred rolling mean | No |
+| `Rolling 14 D` | 14-day centred rolling mean | No |
+| `Godin filter` | Godin tidal filter (requires vtools3) | No |
+
+### Applying transforms programmatically
+
+```python
+from dsm2ui.animate import (
+    HydroH5FlowReader,
+    make_resample_transform,
+    make_moving_average_transform,
+    apply_godin,
+)
+from dvue.animator import TransformedSlicingReader, BufferedSlicingReader
+
+raw = HydroH5FlowReader("hist_fc_mss.h5")
+
+# Daily average
+daily = TransformedSlicingReader(raw, make_resample_transform("D"))
+
+# 14-day rolling mean
+rolling = TransformedSlicingReader(raw, make_moving_average_transform("14D"))
+
+# Godin tidal filter (removes tidal oscillation, needs vtools3)
+godin = apply_godin(raw)
+
+# Always buffer after transforming
+buffered = BufferedSlicingReader(godin, chunk_size=200)
+mgr = GeoAnimatorManager(buffered, gdf, title="Tidally filtered flow")
+```
 
 ---
 
@@ -164,21 +217,104 @@ dsm2ui animate hydro tidefile.h5 --vmin 0 --vmax 50000
 
 ---
 
+## Multi-File Comparison
+
+Two tidefiles can be compared side-by-side or as a difference map without writing
+any Python — both modes are accessible from the CLI and the Python API.
+
+### Side-by-side
+
+```python
+from dsm2ui.animate import animate_hydro_multi
+
+mgr = animate_hydro_multi(
+    "study_a.h5", "study_b.h5",
+    variable="flow",
+    title_a="Calibration", title_b="Alternative",
+)
+mgr.servable()
+```
+
+The `MultiGeoAnimatorManager` renders two maps next to each other with a shared
+`DiscretePlayer` and `DatetimePicker`.  All controls (colormap, size, transform)
+apply to both maps simultaneously.
+
+### Difference map
+
+Pass `show_diff=True` (Python) or `--diff` (CLI) to show `A − B` in a single map
+using a **diverging colourmap** (default `coolwarm`) centred on zero.  A **"Show
+diff (A − B)"** checkbox in the UI lets you toggle between side-by-side and diff
+mode at runtime.
+
+```python
+mgr = animate_hydro_multi(
+    "study_a.h5", "study_b.h5",
+    variable="flow",
+    show_diff=True,
+    diff_colormap="coolwarm",
+)
+```
+
+### DiffSlicingReader (low-level)
+
+Use `DiffSlicingReader` directly when you need a diff data source without the UI:
+
+```python
+from dvue.animator import DiffSlicingReader, BufferedSlicingReader
+
+diff = DiffSlicingReader(reader_a, reader_b)
+# vmin/vmax are symmetric around 0 (auto-estimated)
+
+buffered = BufferedSlicingReader(diff, chunk_size=200)
+
+# Use like any other reader
+frame = buffered.get_slice(pd.Timestamp("2016-01-15"))
+```
+
+**Mismatched time indices** are handled automatically:
+- The common time index is the intersection of both readers' time ranges.
+- The coarser of the two frequencies is used.
+- A `ValueError` is raised if there is no temporal overlap.
+
+### MultiGeoAnimatorManager parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `reader_a`, `reader_b` | required | Two `SlicingReader` instances |
+| `gdf_a`, `gdf_b` | required | GeoDataFrames (may be the same object) |
+| `title_a`, `title_b` | `""` | Per-map title |
+| `colormap` | `"rainbow"` | Applied to both side-by-side maps |
+| `diff_colormap` | `"coolwarm"` | Applied when diff mode is active |
+| `show_diff` | `False` | Start in diff mode |
+| `transform_options` | `None` | Same dict as `GeoAnimatorManager`; applied to both |
+| `initial_transform` | `"none"` | Transform applied on startup |
+| `buffer_chunk_size` | `200` | Chunk size for buffered readers |
+| `map_height` | `500` | Map height in pixels |
+| `size` | `3.0` | Line width in pixels |
+
+---
+
 ## DSM2 CLI Reference
 
 ### `dsm2ui animate hydro`
 
-Animate a DSM2 HYDRO tidefile.
+Animate 1 or 2 DSM2 HYDRO tidefiles.  With 2 files: side-by-side or `--diff`.
 
 ```
-Usage: dsm2ui animate hydro [OPTIONS] H5FILE
+Usage: dsm2ui animate hydro [OPTIONS] H5FILES...
 
 Options:
-  --variable [flow|stage|velocity]   Default: flow
-  --location [both|upstream|downstream]  Default: both
+  --variable [flow|stage|velocity]         Default: flow
+  --location [both|upstream|downstream]    Default: both
+  --diff                                   Show diff map (A − B) instead of
+                                           side-by-side (only with 2 files)
+  --transform [none|daily|rolling-24h|rolling-14d|godin]
+                                           Default: none
   --port INTEGER          Web server port (0 = random)
   --desktop               Open in native window (requires pywebview)
   --shapefile FILE        Override bundled channel centreline GeoJSON
+                          (repeat for two shapefiles)
+  --channel-id-column TEXT  Column in shapefile holding channel numbers
   --vmin FLOAT            Colour scale lower bound
   --vmax FLOAT            Colour scale upper bound
   --colormap NAME         Colormap (default: rainbow)
@@ -190,7 +326,7 @@ Options:
 
 ### `dsm2ui animate qual`
 
-Animate a DSM2 QUAL or GTM tidefile.
+Animate a DSM2 QUAL or GTM tidefile (single file only; multi-file via Python API).
 
 ```
 Usage: dsm2ui animate qual [OPTIONS] H5FILE
@@ -198,9 +334,12 @@ Usage: dsm2ui animate qual [OPTIONS] H5FILE
 Options:
   --constituent TEXT      Constituent name, e.g. ec (default: ec)
   --x2-threshold FLOAT    Enable X2 isohaline at this EC threshold (µS/cm)
+  --transform [none|daily|rolling-24h|rolling-14d|godin]
+                                           Default: none
   --port INTEGER
   --desktop
   --shapefile FILE
+  --channel-id-column TEXT  Column in shapefile holding channel numbers
   --vmin FLOAT
   --vmax FLOAT
   --colormap NAME         (default: rainbow)
@@ -210,10 +349,29 @@ Options:
   --log-level [debug|info|warning|error]
 ```
 
-**Example with X2 overlay:**
+**Examples:**
 
 ```bash
-dsm2ui animate qual hist_qual_ec.h5 --constituent ec --x2-threshold 2700
+# Tidally filtered EC with X2 overlay
+dsm2ui animate qual hist_qual_ec.h5 --constituent ec \
+    --transform godin --x2-threshold 2700
+
+# Daily-average flow
+dsm2ui animate hydro hist_fc_mss.h5 --variable flow --transform daily
+
+# Custom shapefile with non-standard channel ID column
+dsm2ui animate qual hist_qual_ec.h5 \
+    --shapefile my_channels.shp --channel-id-column chan_no
+
+# Two HYDRO files side-by-side
+dsm2ui animate hydro study_a.h5 study_b.h5
+
+# Two HYDRO files — difference map (A − B), with Godin filter
+dsm2ui animate hydro study_a.h5 study_b.h5 --diff --transform godin
+
+# Two files with different shapefiles
+dsm2ui animate hydro study_a.h5 study_b.h5 \
+    --shapefile net_a.shp --shapefile net_b.shp --diff
 ```
 
 ---

@@ -360,8 +360,137 @@ class BufferedSlicingReader(SlicingReader):
 
 
 # ---------------------------------------------------------------------------
-# Transformed wrapper
+# Diff reader (A − B)
 # ---------------------------------------------------------------------------
+
+class DiffSlicingReader(SlicingReader):
+    """Computes the element-wise difference ``reader_a - reader_b``.
+
+    The two readers may have different time indices (different start dates,
+    end dates, or time steps).  ``DiffSlicingReader`` builds a common
+    ``DatetimeIndex`` that covers the **intersection** of both ranges at
+    the **coarser** of the two frequencies, then serves ``A - B`` for each
+    step.
+
+    Parameters
+    ----------
+    reader_a : SlicingReader
+        The minuend ("base" study).
+    reader_b : SlicingReader
+        The subtrahend ("comparison" study).
+
+    Notes
+    -----
+    ``vmin`` and ``vmax`` are estimated from the first 20 diff steps.
+    Because differences can be negative, the range is symmetric around
+    zero by default — ``|max(abs(vmin), abs(vmax))|``.  Callers can
+    override via the UI colour-range controls.
+
+    Both readers are queried with :meth:`~SlicingReader.get_slice_nearest`
+    so mismatches in the exact time index are handled gracefully.
+
+    Examples
+    --------
+    >>> diff = DiffSlicingReader(study_a_reader, study_b_reader)
+    >>> # wrap with Buffer for HDF5 performance:
+    >>> buffered_diff = BufferedSlicingReader(diff, chunk_size=200)
+    """
+
+    def __init__(
+        self,
+        reader_a: SlicingReader,
+        reader_b: SlicingReader,
+    ) -> None:
+        self._a = reader_a
+        self._b = reader_b
+
+        # Build the common time index (intersection of both ranges at
+        # the coarser frequency).
+        common_idx = _build_common_index(reader_a.time_index, reader_b.time_index)
+        super().__init__(common_idx)
+
+        # Estimate vmin/vmax from first 20 diff steps — symmetric around 0.
+        n_sample = min(20, len(common_idx))
+        sample_vals = []
+        for ts in common_idx[:n_sample]:
+            diff = self._a.get_slice_nearest(ts) - self._b.get_slice_nearest(ts)
+            finite = diff[np.isfinite(diff)]
+            if len(finite):
+                sample_vals.extend(finite.tolist())
+        if sample_vals:
+            absmax = float(max(abs(v) for v in sample_vals))
+            self._vmin = -absmax if absmax > 0 else -1.0
+            self._vmax = absmax if absmax > 0 else 1.0
+        else:
+            self._vmin, self._vmax = -1.0, 1.0
+
+    @property
+    def vmin(self) -> float:
+        return self._vmin
+
+    @property
+    def vmax(self) -> float:
+        return self._vmax
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        sa = self._a.get_slice_nearest(timestamp)
+        sb = self._b.get_slice_nearest(timestamp)
+        return (sa - sb).astype(float)
+
+    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
+        """Compute diff for a contiguous block."""
+        timestamps = self._time_index[start_idx:end_idx]
+        rows = {}
+        for ts in timestamps:
+            rows[ts] = self.get_slice(ts)
+        return pd.DataFrame(rows).T
+
+    def close(self) -> None:
+        for r in (self._a, self._b):
+            if hasattr(r, "close"):
+                r.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def _build_common_index(
+    idx_a: pd.DatetimeIndex,
+    idx_b: pd.DatetimeIndex,
+) -> pd.DatetimeIndex:
+    """Return the intersection of two DatetimeIndexes at the coarser frequency.
+
+    Steps:
+    1. Choose the coarser (larger period) frequency between the two.
+    2. Restrict to the overlapping time range.
+    3. Build a regular ``date_range`` with that frequency.
+    4. Raise ``ValueError`` if there is no overlap.
+    """
+    start = max(idx_a[0], idx_b[0])
+    end = min(idx_a[-1], idx_b[-1])
+    if start > end:
+        raise ValueError(
+            "DiffSlicingReader: the two time indices have no overlap.\n"
+            f"  Reader A: {idx_a[0]} … {idx_a[-1]}\n"
+            f"  Reader B: {idx_b[0]} … {idx_b[-1]}"
+        )
+    # Choose coarser frequency
+    freq_a = pd.tseries.frequencies.to_offset(idx_a.freq)
+    freq_b = pd.tseries.frequencies.to_offset(idx_b.freq)
+    # Compare nanos safely
+    try:
+        nanos_a = freq_a.nanos
+        nanos_b = freq_b.nanos
+        coarser_freq = freq_a if nanos_a >= nanos_b else freq_b
+    except AttributeError:
+        # Non-fixed frequency (e.g. MS) — fall back to freq_a
+        coarser_freq = freq_a
+
+    return pd.date_range(start=start, end=end, freq=coarser_freq)
+
 
 class TransformedSlicingReader(SlicingReader):
     """Applies a time-dimension transform to any :class:`SlicingReader`.
