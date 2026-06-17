@@ -111,20 +111,51 @@ from dsm2ui.animate import (
 
 ## UI Controls
 
+Controls are organised into **collapsible `pn.Card` sections** so the sidebar
+stays compact.  Time controls are always visible above the sections.
+
+### Always visible — Time
+
 | Control | Description |
 |---|---|
-| **DiscretePlayer** | Play/pause/step/loop controls; `-`/`+` buttons adjust playback speed; loop policy radio (once / loop / reflect) |
-| **Datetime label** | Shows the current timestamp above the player |
-| **Color range (min, max)** | Enter two comma-separated values to fix the colour scale |
+| **Timestamp label** | Current date/time shown above the player |
+| **DiscretePlayer** | Play/pause/step/speed/loop controls |
+| **Go to date/time** | Jump to any timestamp (snaps to nearest step) |
+
+### Appearance card (open by default)
+
+| Control | Description |
+|---|---|
+| **Color range (min, max)** | Two comma-separated values to fix the colour scale |
 | **Colormap** | Dropdown to switch colormap |
-| **Size** | Point radius or line width (hidden for polygon geometry) |
+| **Size / Line width** | Point radius or line width in pixels |
+| **Show channels** | Toggle the channel data renderer on/off |
+| **Show background map** | Toggle the WMTS tile basemap on/off |
+
+### Contours card (collapsed; expands automatically when enabled)
+
+| Control | Description |
+|---|---|
 | **Show contours** | Toggle iso-value contour lines |
-| **Contour levels** | Number of contour levels (2–30, shown when contours on) |
-| **Contour smoothing** | Gaussian sigma for smoothing the contour raster (0=none) |
+| **Contour levels** | Number of levels when using auto mode (2–30) |
+| **Contour smoothing** | Gaussian sigma applied to the raster before contouring (0 = none) |
 | **Contour level mode** | `nice` (round values), `linear` (equal spacing), `eq_hist` (quantile spacing) |
-| **Label contours** | Toggle value labels on each contour level |
-| **Show X2 line** | Toggle X2 isohaline (only shown if `x2_callback` was provided) |
-| **X2 threshold** | EC threshold for X2 (µS/cm, shown when X2 on) |
+| **Custom levels** | Comma-separated explicit levels, e.g. `500, 1000, 2000` — overrides count and mode when non-empty |
+| **Color contours** | Colour lines using the active colormap (vs plain black) |
+| **Label contours** | Show value labels on each level |
+
+### Transform card (collapsed; shown only if transform options are provided)
+
+| Control | Description |
+|---|---|
+| **Transform** | `none` / `Daily mean` / `Rolling 24 h` / `Rolling 14 D` / `Godin filter` |
+
+### X2 isohaline card (collapsed; shown only if `x2_callback` was provided)
+
+| Control | Description |
+|---|---|
+| **Show X2 line** | Toggle the X2 isohaline overlay |
+| **X2 threshold** | EC threshold in µS/cm |
 
 **Hover tooltip** on channels: shows `Channel` (feature ID) and `Value` (current data value).  
 **Hover tooltip** on contour lines: shows `Level` (the isovalue).
@@ -144,6 +175,26 @@ preserved (snapped to the nearest available timestamp in the new series).
 | `Rolling 24 h` | 24 h centred rolling mean | No |
 | `Rolling 14 D` | 14-day centred rolling mean | No |
 | `Godin filter` | Godin tidal filter (requires vtools3) | No |
+
+> **Loading indicator** — Godin and rolling transforms require loading the full HDF5
+> dataset before the first frame can be shown.  A **spinner overlay** appears on the
+> map while the cache is being built, and the Transform selector is greyed out to
+> prevent double-triggers.  The spinner clears automatically once the first frame is
+> ready.
+
+### Custom contour levels
+
+Type explicit levels in the **Custom levels** text box to bypass the automatic
+algorithm entirely:
+
+```
+Custom levels:  500, 1000, 2000, 3000
+```
+
+- Values are parsed as floats, sorted ascending, and used exactly as typed.
+- The level count slider and mode selector are greyed out while custom levels are active.
+- Clear the box to return to automatic level placement.
+- Levels outside the current data range produce no visible line (normal contour behaviour).
 
 ### Applying transforms programmatically
 
@@ -291,6 +342,12 @@ frame = buffered.get_slice(pd.Timestamp("2016-01-15"))
 | `buffer_chunk_size` | `200` | Chunk size for buffered readers |
 | `map_height` | `500` | Map height in pixels |
 | `size` | `3.0` | Line width in pixels |
+
+Both maps share a single set of time controls and a **linked viewport** — pan or
+zoom on one map and the other follows instantly (including the diff map).
+
+A single set of contour controls (level count, smoothing, mode, custom levels)
+applies to all three figures (map A, map B, diff map) simultaneously.
 
 ---
 

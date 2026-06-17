@@ -798,6 +798,27 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 sizing_mode="stretch_width",
             ))
 
+        # Save config card — at the bottom; filled in by dsm2ui after construction.
+        self._animate_meta: dict = {}
+        self._config_path_input = pn.widgets.TextInput(
+            name="Save path (.yml)",
+            placeholder="/path/to/config.yml",
+            sizing_mode="stretch_width",
+        )
+        self._save_config_btn = pn.widgets.Button(
+            name="Save config to YAML",
+            button_type="primary",
+            sizing_mode="stretch_width",
+        )
+        self._save_config_status = pn.pane.Markdown("", sizing_mode="stretch_width")
+        _save_card = pn.Card(
+            self._config_path_input,
+            self._save_config_btn,
+            self._save_config_status,
+            title="Save config", collapsed=True,
+            sizing_mode="stretch_width",
+        )
+
         self._controls = pn.Column(
             pn.pane.Markdown("### Controls", margin=(4, 0, 2, 0)),
             self._time_label_pane,
@@ -807,6 +828,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             _appearance_card,
             _contour_card,
             *_optional_cards,
+            _save_card,
             sizing_mode="stretch_width",
             max_width=280,
             margin=(4, 8, 4, 4),
@@ -842,6 +864,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if x2_callback is not None:
             self._x2_check.param.watch(self._on_x2_toggle, "value")
             self._x2_threshold_input.param.watch(self._on_x2_threshold_change, "value")
+        self._save_config_btn.on_click(self._on_save_config)
 
         self.current_dt = ti[0].to_pydatetime()
 
@@ -1093,6 +1116,82 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             fn = self._transform_options[transform_name]
             reader = TransformedSlicingReader(reader, fn)
         return BufferedSlicingReader(reader, chunk_size=self._buffer_chunk_size)
+
+    # ------------------------------------------------------------------
+    # Config save / load state
+    # ------------------------------------------------------------------
+
+    def collect_state(self) -> dict:
+        """Return a complete dict representing the current UI state + metadata.
+
+        The returned dict can be serialised to YAML and later passed back to
+        the CLI via ``dsm2ui animate hydro --config config.yml`` to recreate
+        the session.  The ``_animate_meta`` attribute must have been set by the
+        DSM2 layer (``dsm2ui.animate``) after construction; without it the data
+        fields will be empty.
+        """
+        meta = self._animate_meta
+        cli_keys = meta.get("_transform_cli_keys", {})
+
+        transform_display = (
+            self._transform_select.value
+            if self._transform_options
+            else "none"
+        )
+
+        state: dict = {
+            "version": 1,
+            "mode": meta.get("mode", "single"),
+            "files": meta.get("files", []),
+            "file_type": meta.get("file_type", "hydro"),
+            "variable": meta.get("variable", "flow"),
+            "location": meta.get("location", "both"),
+            "shapefile": meta.get("shapefile"),
+            "channel_id_column": meta.get("channel_id_column"),
+            "transform": cli_keys.get(transform_display, "none"),
+            "colormap": self.colormap,
+            "vmin": self.vmin,
+            "vmax": self.vmax,
+            "size": self.size,
+            "show_channels": self._show_channels_check.value,
+            "show_basemap": self._show_basemap_check.value,
+            "contours": {
+                "enabled": self._contours_check.value,
+                "n_levels": self._n_contours_slider.value,
+                "smoothing": float(self._contour_smooth_slider.value),
+                "level_mode": self._contour_levels_select.value,
+                "custom_levels": self._contour_custom_input.value,
+                "color": self._contour_color_check.value,
+                "labels": self._contour_labels_check.value,
+            },
+            "diff": {"show": False, "colormap": "coolwarm"},
+        }
+        if self._x2_callback is not None:
+            state["x2"] = {
+                "enabled": self._x2_check.value,
+                "threshold": float(self._x2_threshold_input.value),
+            }
+        else:
+            state["x2"] = {"enabled": False, "threshold": 2700.0}
+        return state
+
+    def _on_save_config(self, event) -> None:
+        """Write current state to a YAML file at the path in the text input."""
+        path = self._config_path_input.value.strip()
+        if not path:
+            self._save_config_status.object = "\u26a0 Enter a file path first."
+            return
+        try:
+            import yaml
+            state = self.collect_state()
+            from pathlib import Path as _Path
+            _Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.dump(state, f, default_flow_style=False,
+                          sort_keys=False, allow_unicode=True)
+            self._save_config_status.object = f"\u2713 Saved to `{path}`"
+        except Exception as exc:
+            self._save_config_status.object = f"\u2717 {exc}"
 
     def _on_show_channels_toggle(self, event: param.parameterized.Event) -> None:
         self._data_renderer.visible = bool(event.new)

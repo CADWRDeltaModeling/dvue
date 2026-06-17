@@ -585,6 +585,27 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 sizing_mode="stretch_width",
             ))
 
+        # Save config card — at the bottom; filled in by dsm2ui after construction.
+        self._animate_meta: dict = {}
+        self._config_path_input = pn.widgets.TextInput(
+            name="Save path (.yml)",
+            placeholder="/path/to/config.yml",
+            sizing_mode="stretch_width",
+        )
+        self._save_config_btn = pn.widgets.Button(
+            name="Save config to YAML",
+            button_type="primary",
+            sizing_mode="stretch_width",
+        )
+        self._save_config_status = pn.pane.Markdown("", sizing_mode="stretch_width")
+        _save_card = pn.Card(
+            self._config_path_input,
+            self._save_config_btn,
+            self._save_config_status,
+            title="Save config", collapsed=True,
+            sizing_mode="stretch_width",
+        )
+
         self._controls = pn.Column(
             pn.pane.Markdown("### Controls", margin=(4, 0, 2, 0)),
             self._time_label_pane,
@@ -595,6 +616,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             _diff_card,
             _contour_card,
             *_optional_cards,
+            _save_card,
             sizing_mode="stretch_width",
             max_width=280,
             margin=(4, 8, 4, 4),
@@ -640,10 +662,92 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._show_basemap_check.param.watch(self._on_show_basemap_toggle, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
+        self._save_config_btn.on_click(self._on_save_config)
 
     # ------------------------------------------------------------------
     # Reader setup
     # ------------------------------------------------------------------
+
+    def collect_state(self) -> dict:
+        """Return a complete dict representing the current UI state + metadata."""
+        meta = self._animate_meta
+        cli_keys = meta.get("_transform_cli_keys", {})
+        transform_display = (
+            self._transform_select.value
+            if self._transform_options
+            else "none"
+        )
+        state: dict = {
+            "version": 1,
+            "mode": meta.get("mode", "multi"),
+            "files": meta.get("files", []),
+            "file_type": meta.get("file_type", "hydro"),
+            "variable": meta.get("variable", "flow"),
+            "location": meta.get("location", "both"),
+            "shapefile": meta.get("shapefile"),
+            "shapefile_b": meta.get("shapefile_b"),
+            "channel_id_column": meta.get("channel_id_column"),
+            "transform": cli_keys.get(transform_display, "none"),
+            "colormap": self.colormap,
+            "vmin": self.vmin,
+            "vmax": self.vmax,
+            "size": self.size,
+            "show_channels": self._show_channels_check.value,
+            "show_basemap": self._show_basemap_check.value,
+            "contours": {
+                "enabled": self._contours_check.value,
+                "n_levels": self._n_contours_slider.value,
+                "smoothing": float(self._contour_smooth_slider.value),
+                "level_mode": self._contour_levels_select.value,
+                "custom_levels": self._contour_custom_input.value,
+                "color": self._contour_color_check.value,
+                "labels": self._contour_labels_check.value,
+            },
+            "diff": {
+                "show": self.show_diff,
+                "colormap": self.diff_colormap,
+            },
+            "x2": {"enabled": False, "threshold": 2700.0},
+        }
+        return state
+
+    def _on_save_config(self, event) -> None:
+        """Write current state to a YAML file at the path in the text input."""
+        path = self._config_path_input.value.strip()
+        if not path:
+            self._save_config_status.object = "\u26a0 Enter a file path first."
+            return
+        try:
+            import yaml
+            state = self.collect_state()
+            from pathlib import Path as _Path
+            _Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.dump(state, f, default_flow_style=False,
+                          sort_keys=False, allow_unicode=True)
+            self._save_config_status.object = f"\u2713 Saved to `{path}`"
+        except Exception as exc:
+            self._save_config_status.object = f"\u2717 {exc}"
+
+    def _active_doc(self):
+        """Return the live Bokeh document, whichever figure is currently displayed.
+
+        When diff mode is on, ``pane_a`` and ``pane_b`` are detached from the
+        layout, so ``fig_a.document`` / ``fig_b.document`` return ``None``.
+        When side-by-side mode is on, ``pane_diff`` is detached.
+        Always try the figure that should be visible first, then fall back to
+        the others so we never return ``None`` while a document exists.
+        """
+        candidates = (
+            (self._fig_diff, self._fig_a, self._fig_b)
+            if self.show_diff
+            else (self._fig_a, self._fig_b, self._fig_diff)
+        )
+        for fig in candidates:
+            doc = fig.document
+            if doc is not None:
+                return doc
+        return None
 
     def _setup_reader(self, base: SlicingReader, transform_name: str) -> SlicingReader:
         reader = base
@@ -804,7 +908,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._datetime_picker.value = ts.to_pydatetime()
         finally:
             self._syncing = False
-        doc = self._fig_a.document
+        doc = self._active_doc()
         if doc is not None:
             doc.add_next_tick_callback(
                 lambda _i=idx, _s=ts_str: self._apply_frame(_i, _s))
@@ -823,7 +927,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._syncing = False
         actual_ts = self._reader_a.time_index[idx]
         ts_str = actual_ts.strftime("%Y-%m-%d %H:%M")
-        doc = self._fig_a.document
+        doc = self._active_doc()
         if doc is not None:
             doc.add_next_tick_callback(
                 lambda _i=idx, _s=ts_str: self._apply_frame(_i, _s))
@@ -835,7 +939,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     # ------------------------------------------------------------------
 
     def _on_style_change(self, *events) -> None:
-        doc = self._fig_a.document
+        doc = self._active_doc()
         if doc is not None:
             doc.add_next_tick_callback(self._apply_bokeh_style)
         else:
@@ -857,7 +961,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_diff_colormap_change(self, *events) -> None:
         pal = _cmap_to_palette(self.diff_colormap)
-        doc = self._fig_diff.document
+        doc = self._active_doc()
         if doc is not None:
             doc.add_next_tick_callback(
                 lambda: setattr(self._mapper_diff, "palette", pal))
@@ -899,7 +1003,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._maps_pane.objects = [self._pane_diff]
             idx = self._time_slider.value
             ts = self._reader_a.time_index[idx]
-            doc = self._fig_diff.document
+            doc = self._active_doc()
             if doc is not None:
                 doc.add_next_tick_callback(lambda _ts=ts: self._update_diff_map(_ts))
             else:
@@ -978,7 +1082,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             return
         idx = self._time_slider.value
         ts = self._reader_a.time_index[idx]
-        doc = self._fig_a.document
+        doc = self._active_doc()
         if doc is not None:
             doc.add_next_tick_callback(
                 lambda _i=idx, _ts=ts: (
@@ -1012,7 +1116,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             pane.loading = True
         self._transform_select.disabled = True
 
-        doc = self._fig_a.document
+        doc = self._active_doc()
 
         def _compute() -> None:
             """Background thread: build both readers (triggers lazy cache)."""

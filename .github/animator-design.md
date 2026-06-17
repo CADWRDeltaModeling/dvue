@@ -246,11 +246,40 @@ vmin/vmax/colormap/size params  →  _on_style_change  (no lock)
 
 Transform dropdown  →  _on_transform_change  (Panel watcher, no lock)
     snapshot current_ts = time_index[current_step]
-    _reader = _setup_reader(new_name)        # wraps _base_reader
-    restore nearest step in new time index
-    update DiscretePlayer options, DatetimePicker bounds (under _syncing guard)
-    _apply_frame(nearest_idx, ...)           # Bokeh mutations direct (already scheduled)
+    chart_pane.loading = True          # immediate spinner over map
+    transform_select.disabled = True   # prevent double-trigger
+    → daemon thread: _setup_reader(name) + access time_index (slow cache fill)
+        → doc.add_next_tick_callback(_apply)
+            _reader = new_reader       # swap under document lock
+            restore nearest step in new time index
+            update DiscretePlayer options, DatetimePicker bounds
+            _load_frame(nearest_idx)
+            chart_pane.loading = False
+            transform_select.disabled = False
 ```
+
+### Controls layout — `pn.Card` collapsible sections
+
+Widgets are grouped into `pn.Card` objects so the sidebar stays compact:
+
+```
+### Controls
+[timestamp label]  [DiscretePlayer]  [DatetimePicker]
+──────────
+▼ Appearance   (open by default)
+    clim input, colormap, size/line-width, Show channels, Show basemap
+▶ Contours     (collapsed; auto-expands when Show contours ticked)
+    Show contours □, n levels, smoothing sigma,
+    level mode (nice/linear/eq_hist), custom levels TextInput,
+    color contours □, label contours □
+▶ Transform    (collapsed; only if transform_options provided)
+    transform selector
+▶ X2 isohaline (collapsed; only if x2_callback provided)
+    Show X2 □, threshold input
+```
+
+`_contour_card.collapsed` is toggled programmatically when the Show-contours
+checkbox changes — the card auto-expands on enable, auto-collapses on disable.
 
 ---
 
@@ -320,12 +349,53 @@ so the diff is re-built against the newly transformed readers.
 
 ```
 _on_transform_change(name)
-    reader_a = _setup_reader(_base_reader_a, name)   # TransformedSlicingReader → BufferedSlicingReader
-    reader_b = _setup_reader(_base_reader_b, name)
-    _diff_reader_cache = None                        # invalidate
-    rebuild common_index
-    restore nearest step
+    # Immediately on watcher thread:
+    pane_a.loading = True; pane_b.loading = True; pane_diff.loading = True
+    transform_select.disabled = True
+    → daemon thread:
+        reader_a = _setup_reader(_base_reader_a, name)
+        reader_b = _setup_reader(_base_reader_b, name)
+        # accessing .time_index triggers lazy cache fill (slow step)
+        _diff_reader_cache = None                # invalidate
+        → doc.add_next_tick_callback(_apply)
+            swap _reader_a, _reader_b
+            rebuild player options + date-picker bounds
+            _apply_frame(nearest_idx, ts_str)
+            pane_*.loading = False
+            transform_select.disabled = False
 ```
+
+### Axis synchronisation
+
+All three Bokeh figures (`fig_a`, `fig_b`, `fig_diff`) are constructed with the
+**same `Range1d` pair** (`shared_x`, `shared_y`), computed from the union of both
+GDFs' bounds.  Bokeh propagates pan / zoom events to every figure that shares the
+same `Range1d` object — no extra callbacks required.
+
+### Controls layout — `pn.Card` collapsible sections
+
+```
+### Controls
+[timestamp label]  [DiscretePlayer]  [DatetimePicker]
+──────────
+▼ Appearance   (open)
+    clim input, colormap, Show channels, Show basemap
+▼ Diff (A − B) (open)
+    Show diff □, diff colormap
+▶ Contours     (collapsed; auto-expands when Show contours ticked)
+    Show contours □ + all sub-controls (shared for all three figures)
+▶ Transform    (collapsed; conditional)
+```
+
+### Contour overlays
+
+`MultiGeoAnimatorManager` reuses the module-level helpers from `dvue.animator.ui`:
+`_compute_contour_levels`, `_run_contour_computation`, `_clip_contour_segment`,
+`_make_contour_grid`.  Each map has its own `_MapContour` state object (centroid
+grid, `ColumnDataSource`, renderers).  The diff map reuses map A's centroid grid.
+
+A single set of shared controls (level count, smoothing, mode, custom levels,
+label toggle) drives all three maps simultaneously.
 
 ---
 
@@ -347,11 +417,17 @@ channel values (Series)
 
 ### Level placement — `_compute_levels(finite_vals, vmin, vmax)`
 
-| `contour_levels` | Algorithm | Notes |
+Now implemented as the module-level function
+`_compute_contour_levels(finite_vals, vmin, vmax, n, mode, custom_levels)`
+so both `GeoAnimatorManager` and `MultiGeoAnimatorManager` can call it without
+duplication.
+
+| Priority | Source | Algorithm |
 |---|---|---|
-| `"nice"` (default) | `matplotlib.ticker.MaxNLocator` | Round tick-like values (100, 500, 1000) — same as axis ticks |
-| `"linear"` | `np.linspace(vmin, vmax, n+2)[1:-1]` | Equally spaced |
-| `"eq_hist"` | `np.quantile(finite_vals, quantiles)` | Quantile-spaced; concentrates lines where data is dense |
+| 1 | `contour_custom_levels` non-empty | Parse comma-separated floats; sort ascending; ignore count + mode |
+| 2 | mode `"nice"` (default) | `matplotlib.ticker.MaxNLocator` — round tick-like values |
+| 3 | mode `"linear"` | `np.linspace(vmin, vmax, n+2)[1:-1]` |
+| 4 | mode `"eq_hist"` | `np.quantile(finite_vals, quantiles)` — concentrates lines where data is dense |
 
 ### Contour labels
 
@@ -360,14 +436,20 @@ channel values (Series)
 - Toggled independently from the contour lines via the **Label contours** checkbox.
 - `_update_contour_labels` is a no-op when the label renderer is not visible.
 
-Other key decisions (unchanged):
-- **`method="nearest"` (Voronoi)** — each grid cell takes the value of its nearest
-  channel centroid.
-- **Gaussian smoothing** — rounds blocky Voronoi edges.
-- **Buffer clip zone** — `unary_union(geometries).buffer(10 × cell_size)` built once
-  at init.
-- **Dedicated `HoverTool`** restricted to `_contour_renderer` — shows `@level{0.3f}`.
-- **Fixed `line_width=2`** — `_on_style_change` skips contour and X2 renderers.
+### Module-level contour helpers
+
+The contour pipeline was extracted to four module-level functions in `dvue.animator.ui`
+so that `multi_ui.py` can reuse them without duplication:
+
+| Function | Purpose |
+|---|---|
+| `_make_contour_grid(gdf_proj, geom_type)` | Build centroids, 200×N raster grid, and Shapely buffer clip zone |
+| `_compute_contour_levels(vals, vmin, vmax, n, mode, custom)` | Return sorted level array (custom > nice > linear > eq_hist) |
+| `_run_contour_computation(vals, cx, cy, gx, gy, sigma, levels, clip)` | Full rasterize → smooth → contour → clip pipeline |
+| `_clip_contour_segment(seg, lvl, clip_zone, xs, ys, lvl_out)` | Clip one path segment to the buffer zone |
+
+`GeoAnimatorManager`'s instance methods delegate to these functions.
+`MultiGeoAnimatorManager` imports them directly.
 
 ---
 
@@ -433,19 +515,17 @@ mgr = GeoAnimatorManager(reader, gdf, x2_callback=my_isoline_callback)
 
 ## 8. Known limitations / future work
 
-- **Play/loop button** — now built into `DiscretePlayer` (Panel widget).
-- **`DatetimePicker`** — bidirectional sync with DiscretePlayer; `_syncing` flag prevents loops.
-- **Transform UI** — `Transform` dropdown in sidebar; switches between `none`, `Daily mean`,
-  `Rolling 24 h`, `Rolling 14 D`, `Godin filter` without restarting the app.  Current
-  timestamp is preserved across transform changes.
-- **Shapefile `.shx` auto-restore** — `SHAPE_RESTORE_SHX=YES` GDAL env var set in
-  `load_dsm2_channel_gdf` so missing `.shx` files are recreated automatically.
-- **`--channel-id-column`** — CLI option to specify non-standard channel ID column names
-  in shapefiles; detailed error message shows available columns with dtypes.
-- **Multi-file comparison** — ✅ implemented: `MultiGeoAnimatorManager` + `DiffSlicingReader`;
-  CLI `dsm2ui animate hydro A.h5 B.h5 [--diff]`.
+- **Play/loop button** — built into `DiscretePlayer` (Panel widget). ✅
+- **`DatetimePicker`** — bidirectional sync with DiscretePlayer; `_syncing` flag prevents loops. ✅
+- **Transform UI with loading spinner** — `Transform` card in sidebar; background thread computes cache; spinner overlay on map while loading; timestamp preserved. ✅
+- **Custom contour levels** — `contour_custom_levels` TextInput accepts comma-separated values; overrides auto count/mode. ✅
+- **Collapsible controls (`pn.Card`)** — Appearance always open; Contours, Transform, X2 collapsed by default; Contours card auto-expands when toggled on. ✅
+- **Shapefile `.shx` auto-restore** — `SHAPE_RESTORE_SHX=YES` set in `load_dsm2_channel_gdf`. ✅
+- **`--channel-id-column`** — CLI option; detailed error message with available columns + dtypes. ✅
+- **Wrong HDF5 file type** — `_DSM2BaseH5Reader` raises `ValueError` with a targeted hint ("try 'dsm2ui animate qual'") when the requested dataset path does not exist. ✅
+- **Invalid shapefile geometry** — rows with non-finite coordinates are dropped (with warning) before `.simplify()`. ✅
+- **Multi-file comparison** — `MultiGeoAnimatorManager` + `DiffSlicingReader`; shared viewport Range1d; shared contour controls; Show channels/basemap; CLI `dsm2ui animate hydro A.h5 B.h5 [--diff]`. ✅
 - **Datashader** — for >10k features, wrap with `datashade()`.  Not in v1.
 - **Irregular time index** — explicitly rejected.
 - **GTM cell concentration** — not yet supported.
-- **Independent colour scales in diff mode** — diff figure always uses symmetric scale
-  centred at zero; a separate control for asymmetric diff ranges is not yet implemented.
+- **Independent colour scales in diff mode** — diff always uses symmetric scale centred at zero.
