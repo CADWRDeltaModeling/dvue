@@ -892,15 +892,23 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             return
         idx = int(event.new)
         ts = self._reader.time_index[idx]
-        # Update the Div text (Bokeh model — no Panel layout reflow)
-        self._time_div.text = f"<b>{ts.strftime('%Y-%m-%d %H:%M')}</b>"
+        ts_str = ts.strftime("%Y-%m-%d %H:%M")
         # Sync DatetimePicker without causing a feedback loop.
         self._syncing = True
         try:
             self._datetime_picker.value = ts.to_pydatetime()
         finally:
             self._syncing = False
-        self._load_frame(idx)
+
+        # Defer Bokeh model mutations to the next IOLoop tick so they run
+        # inside the document lock (avoids _pending_writes RuntimeError).
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(
+                lambda _idx=idx, _s=ts_str: self._apply_frame(_idx, _s)
+            )
+        else:
+            self._apply_frame(idx, ts_str)
 
     def _on_datetime_picker_change(self, event: param.parameterized.Event) -> None:
         """Jump the animation to the nearest time step for the picked datetime."""
@@ -914,7 +922,19 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         finally:
             self._syncing = False
         actual_ts = self._reader.time_index[idx]
-        self._time_div.text = f"<b>{actual_ts.strftime('%Y-%m-%d %H:%M')}</b>"
+        ts_str = actual_ts.strftime("%Y-%m-%d %H:%M")
+
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(
+                lambda _idx=idx, _s=ts_str: self._apply_frame(_idx, _s)
+            )
+        else:
+            self._apply_frame(idx, ts_str)
+
+    def _apply_frame(self, idx: int, ts_str: str) -> None:
+        """Run all Bokeh mutations for a single frame step under document lock."""
+        self._time_div.text = f"<b>{ts_str}</b>"
         self._load_frame(idx)
 
     def _on_style_change(self, *events) -> None:
