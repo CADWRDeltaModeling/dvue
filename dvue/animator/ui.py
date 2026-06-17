@@ -231,6 +231,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             "nice    — rounded tick-like values (matplotlib MaxNLocator).\n"
             "eq_hist — quantile-spaced so each band covers equal data density.",
     )
+    contour_custom_levels: str = param.String(
+        default="",
+        doc="Comma-separated explicit contour levels (e.g. '500, 1000, 2000').  "
+            "When non-empty this overrides the level count and mode selectors.",
+    )
     current_dt: Optional[datetime.datetime] = param.Parameter(
         default=None, doc="Current animation datetime.",
     )
@@ -566,6 +571,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             value="nice",
             sizing_mode="stretch_width", visible=False,
         )
+        self._contour_custom_input = pn.widgets.TextInput(
+            name="Custom levels (comma-separated)",
+            placeholder="e.g. 500, 1000, 2000",
+            sizing_mode="stretch_width", visible=False,
+        )
         self._contour_labels_check = pn.widgets.Checkbox(
             name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
@@ -627,6 +637,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._n_contours_slider,
             self._contour_smooth_slider,
             self._contour_levels_select,
+            self._contour_custom_input,
             self._contour_color_check,
             self._contour_labels_check,
             *x2_row,
@@ -656,6 +667,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._n_contours_slider.param.watch(self._on_n_contours_change, "value")
         self._contour_smooth_slider.param.watch(self._on_contour_smooth_change, "value")
         self._contour_levels_select.param.watch(self._on_contour_levels_change, "value")
+        self._contour_custom_input.param.watch(self._on_contour_custom_levels_change, "value")
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
         self._show_channels_check.param.watch(self._on_show_channels_toggle, "value")
         self._show_basemap_check.param.watch(self._on_show_basemap_toggle, "value")
@@ -723,7 +735,25 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     def _compute_levels(
         self, finite_vals: np.ndarray, vmin: float, vmax: float
     ) -> np.ndarray:
-        """Compute contour level positions according to ``contour_levels`` param."""
+        """Compute contour level positions according to ``contour_levels`` param.
+
+        When ``contour_custom_levels`` is non-empty, the comma-separated values
+        it contains are used directly and the count / mode selectors are ignored.
+        """
+        # --- User-specified explicit levels take priority ---
+        custom_str = self.contour_custom_levels.strip()
+        if custom_str:
+            try:
+                explicit = np.array(
+                    [float(v) for v in custom_str.split(",") if v.strip()]
+                )
+                explicit = np.sort(explicit)
+                if len(explicit) > 0:
+                    return explicit
+            except ValueError:
+                pass  # fall through to automatic computation
+
+        # --- Automatic computation ---
         n = self.n_contours
         mode = self.contour_levels
 
@@ -1055,6 +1085,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._n_contours_slider.visible = bool(event.new)
         self._contour_smooth_slider.visible = bool(event.new)
         self._contour_levels_select.visible = bool(event.new)
+        self._contour_custom_input.visible = bool(event.new)
         self._contour_color_check.visible = bool(event.new)
         self._contour_labels_check.visible = bool(event.new)
         if event.new:
@@ -1087,6 +1118,21 @@ class GeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_contour_levels_change(self, event: param.parameterized.Event) -> None:
         self.contour_levels = event.new
+        if self._contour_renderer.visible:
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            colors = self._contour_colors(lvls)
+            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
+            self._update_contour_labels(xs, ys, lvls)
+
+    def _on_contour_custom_levels_change(self, event: param.parameterized.Event) -> None:
+        """Recompute contours when the user edits the custom levels text box."""
+        self.contour_custom_levels = event.new
+        # When the user fills in explicit levels, the count / mode selectors
+        # become redundant; dim them visually to hint they are being overridden.
+        auto_controls_active = not bool(event.new.strip())
+        self._n_contours_slider.disabled = not auto_controls_active
+        self._contour_levels_select.disabled = not auto_controls_active
         if self._contour_renderer.visible:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))

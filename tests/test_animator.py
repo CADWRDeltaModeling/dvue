@@ -330,6 +330,42 @@ class TestGeoAnimatorManager:
         with pytest.raises(ValueError, match="CRS"):
             GeoAnimatorManager(reader, gdf_no_crs)
 
+    def test_compute_levels_custom_overrides_auto(self, manager_points):
+        """Explicit comma-separated levels are returned without modification."""
+        if not HAS_GEO:
+            pytest.skip("geopandas not available")
+        manager_points.contour_custom_levels = "100, 500, 1000, 2000"
+        vals = np.array([0.0, 50.0, 300.0, 800.0, 1500.0, 2500.0])
+        levels = manager_points._compute_levels(vals, 0.0, 2500.0)
+        np.testing.assert_array_equal(levels, [100.0, 500.0, 1000.0, 2000.0])
+
+    def test_compute_levels_custom_sorted(self, manager_points):
+        """Custom levels are sorted ascending regardless of input order."""
+        if not HAS_GEO:
+            pytest.skip("geopandas not available")
+        manager_points.contour_custom_levels = "2000, 100, 500"
+        vals = np.linspace(0, 3000, 50)
+        levels = manager_points._compute_levels(vals, 0.0, 3000.0)
+        np.testing.assert_array_equal(levels, [100.0, 500.0, 2000.0])
+
+    def test_compute_levels_empty_custom_falls_back_to_auto(self, manager_points):
+        """Empty custom levels string falls back to the automatic algorithm."""
+        if not HAS_GEO:
+            pytest.skip("geopandas not available")
+        manager_points.contour_custom_levels = ""
+        vals = np.linspace(0, 1000, 50)
+        levels = manager_points._compute_levels(vals, 0.0, 1000.0)
+        assert len(levels) >= 1
+
+    def test_compute_levels_invalid_custom_falls_back_to_auto(self, manager_points):
+        """Non-numeric custom levels string falls back to the automatic algorithm."""
+        if not HAS_GEO:
+            pytest.skip("geopandas not available")
+        manager_points.contour_custom_levels = "abc, def"
+        vals = np.linspace(0, 1000, 50)
+        levels = manager_points._compute_levels(vals, 0.0, 1000.0)
+        assert len(levels) >= 1
+
 
 # ===========================================================================
 # Integration test — requires pydsm test data
