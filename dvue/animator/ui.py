@@ -327,6 +327,12 @@ def _detect_geom_type(gdf: gpd.GeoDataFrame) -> str:
         If the geometry type is not one of the three recognised families.
     """
     types = set(gdf.geometry.geom_type.dropna().unique())
+    if not types:
+        raise ValueError(
+            "GeoDataFrame has no valid (non-null) geometries. "
+            "Ensure the shapefile or GeoJSON contains geometries that match the "
+            "channel IDs in the HDF5 file."
+        )
     if types & _POLYGON_TYPES:
         return "polygon"
     if types & _POINT_TYPES:
