@@ -744,10 +744,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
             visible=bool(self._transform_options),
         )
-        transform_row: list = (
-            [pn.pane.Markdown("**Transform**"), self._transform_select]
-            if self._transform_options else []
-        )
         # X2 controls — only shown when an x2_callback is provided.
         _has_x2 = x2_callback is not None
         self._x2_check = pn.widgets.Checkbox(
@@ -758,29 +754,24 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             name="X2 threshold", value=2700.0,
             sizing_mode="stretch_width", visible=False,
         )
-        x2_row: list = (
-            [pn.pane.Markdown("**X2 isohaline**"), self._x2_check, self._x2_threshold_input]
-            if _has_x2 else []
+
+        # ----------------------------------------------------------------
+        # Build accordion sections.  Time is always visible above the
+        # accordion so it is never collapsed away.
+        # ----------------------------------------------------------------
+        _size_widgets: list = (
+            [] if self._geom_type == "polygon" else [self._size_slider]
         )
-        size_row: list = (
-            [] if self._geom_type == "polygon"
-            else [pn.pane.Markdown("**Size**"), self._size_slider]
-        )
-        self._controls = pn.Column(
-            pn.pane.Markdown("### Controls", margin=(4, 0, 0, 0)),
-            pn.pane.Markdown("**Time**"),
-            self._time_label_pane,
-            self._time_slider,
-            self._datetime_picker,
-            pn.pane.Markdown("**Colour scale**"),
+        _appearance_card = pn.Card(
             self._clim_input,
-            pn.pane.Markdown("**Colormap**"),
             self._colormap_select,
-            *size_row,
+            *_size_widgets,
             self._show_channels_check,
             self._show_basemap_check,
-            *transform_row,
-            pn.pane.Markdown("**Contours**"),
+            title="Appearance", collapsed=False,
+            sizing_mode="stretch_width",
+        )
+        _contour_card = pn.Card(
             self._contours_check,
             self._n_contours_slider,
             self._contour_smooth_slider,
@@ -788,9 +779,36 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._contour_custom_input,
             self._contour_color_check,
             self._contour_labels_check,
-            *x2_row,
+            title="Contours", collapsed=True,
             sizing_mode="stretch_width",
-            max_width=260,
+        )
+        self._contour_card = _contour_card
+        _optional_cards: list = []
+        if self._transform_options:
+            _optional_cards.append(pn.Card(
+                self._transform_select,
+                title="Transform", collapsed=True,
+                sizing_mode="stretch_width",
+            ))
+        if _has_x2:
+            _optional_cards.append(pn.Card(
+                self._x2_check,
+                self._x2_threshold_input,
+                title="X2 isohaline", collapsed=True,
+                sizing_mode="stretch_width",
+            ))
+
+        self._controls = pn.Column(
+            pn.pane.Markdown("### Controls", margin=(4, 0, 2, 0)),
+            self._time_label_pane,
+            self._time_slider,
+            self._datetime_picker,
+            pn.layout.Divider(margin=(4, 0, 4, 0)),
+            _appearance_card,
+            _contour_card,
+            *_optional_cards,
+            sizing_mode="stretch_width",
+            max_width=280,
             margin=(4, 8, 4, 4),
         )
 
@@ -1123,14 +1141,16 @@ class GeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_contours_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide contours; recompute for current frame when enabling."""
-        self._contour_renderer.visible = bool(event.new)
-        self._n_contours_slider.visible = bool(event.new)
-        self._contour_smooth_slider.visible = bool(event.new)
-        self._contour_levels_select.visible = bool(event.new)
-        self._contour_custom_input.visible = bool(event.new)
-        self._contour_color_check.visible = bool(event.new)
-        self._contour_labels_check.visible = bool(event.new)
-        if event.new:
+        on = bool(event.new)
+        self._contour_card.collapsed = not on
+        self._contour_renderer.visible = on
+        self._n_contours_slider.visible = on
+        self._contour_smooth_slider.visible = on
+        self._contour_levels_select.visible = on
+        self._contour_custom_input.visible = on
+        self._contour_color_check.visible = on
+        self._contour_labels_check.visible = on
+        if on:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
             colors = self._contour_colors(lvls)

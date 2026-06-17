@@ -549,29 +549,23 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         )
 
         # ----------------------------------------------------------------
-        # 13. Controls column
+        # 13. Controls column — grouped into collapsible pn.Card sections
         # ----------------------------------------------------------------
-        transform_row: list = (
-            [pn.pane.Markdown("**Transform**"), self._transform_select]
-            if self._transform_options else []
-        )
-        self._controls = pn.Column(
-            pn.pane.Markdown("### Controls", margin=(4, 0, 0, 0)),
-            pn.pane.Markdown("**Time**"),
-            self._time_label_pane,
-            self._time_slider,
-            self._datetime_picker,
-            pn.pane.Markdown("**Colour scale**"),
+        _appearance_card = pn.Card(
             self._clim_input,
-            pn.pane.Markdown("**Colormap**"),
             self._colormap_select,
-            pn.pane.Markdown("**Diff**"),
-            self._show_diff_check,
-            self._diff_colormap_select,
-            *transform_row,
             self._show_channels_check,
             self._show_basemap_check,
-            pn.pane.Markdown("**Contours**"),
+            title="Appearance", collapsed=False,
+            sizing_mode="stretch_width",
+        )
+        _diff_card = pn.Card(
+            self._show_diff_check,
+            self._diff_colormap_select,
+            title="Diff (A − B)", collapsed=False,
+            sizing_mode="stretch_width",
+        )
+        _contour_card = pn.Card(
             self._contours_check,
             self._n_contours_slider,
             self._contour_smooth_slider,
@@ -579,8 +573,30 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._contour_custom_input,
             self._contour_color_check,
             self._contour_labels_check,
+            title="Contours", collapsed=True,
             sizing_mode="stretch_width",
-            max_width=260,
+        )
+        self._contour_card = _contour_card
+        _optional_cards: list = []
+        if self._transform_options:
+            _optional_cards.append(pn.Card(
+                self._transform_select,
+                title="Transform", collapsed=True,
+                sizing_mode="stretch_width",
+            ))
+
+        self._controls = pn.Column(
+            pn.pane.Markdown("### Controls", margin=(4, 0, 2, 0)),
+            self._time_label_pane,
+            self._time_slider,
+            self._datetime_picker,
+            pn.layout.Divider(margin=(4, 0, 4, 0)),
+            _appearance_card,
+            _diff_card,
+            _contour_card,
+            *_optional_cards,
+            sizing_mode="stretch_width",
+            max_width=280,
             margin=(4, 8, 4, 4),
         )
 
@@ -897,6 +913,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_contours_toggle(self, event: param.parameterized.Event) -> None:
         on = bool(event.new)
+        self._contour_card.collapsed = not on
         # Show/hide all contour renderers
         for ctour in (self._ctour_a, self._ctour_b, self._ctour_diff):
             ctour.renderer.visible = on
