@@ -1101,36 +1101,64 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._tile_renderer.visible = bool(event.new)
 
     def _on_transform_change(self, event: param.parameterized.Event) -> None:
-        """Apply a new time-domain transform; preserve current playback position."""
-        # Snapshot the current timestamp BEFORE swapping the reader so we
-        # can restore the closest step in the new (possibly coarser) index.
+        """Apply a new time-domain transform; preserve current playback position.
+
+        The transform may require loading the full HDF5 dataset and running a
+        tidal filter (several seconds).  The heavy work is done in a daemon
+        thread so the IOLoop stays responsive; a loading spinner covers the map
+        while the computation is in progress.
+        """
+        import threading
+
         current_ts = pd.Timestamp(
             self._reader.time_index[self._time_slider.value]
         )
+        new_name = event.new
 
-        new_reader = self._setup_reader(event.new)
-        self._reader = new_reader
+        # Show loading indicator immediately (Panel param — safe from watcher).
+        self._chart_pane.loading = True
+        self._transform_select.disabled = True
 
-        ti = self._reader.time_index
-        n = len(ti)
+        doc = self._bk_figure.document
 
-        # Map the old timestamp to the nearest step in the new index.
-        nearest_idx = int(ti.get_indexer([current_ts], method="nearest")[0])
-        nearest_idx = max(0, min(nearest_idx, n - 1))
+        def _compute() -> None:
+            """Run in a background thread: build reader (triggers lazy cache)."""
+            new_reader = self._setup_reader(new_name)
+            # Accessing time_index triggers TransformedSlicingReader._ensure_cache()
+            # which is the slow step (loads HDF5 + applies filter).
+            ti = new_reader.time_index
+            nearest_idx = max(0, min(
+                int(ti.get_indexer([current_ts], method="nearest")[0]),
+                len(ti) - 1,
+            ))
 
-        # Update widgets without triggering feedback loops.
-        self._syncing = True
-        try:
-            self._time_slider.options = list(range(n))
-            self._time_slider.value = nearest_idx
-            self._datetime_picker.start = ti[0].to_pydatetime()
-            self._datetime_picker.end = ti[-1].to_pydatetime()
-            self._datetime_picker.value = ti[nearest_idx].to_pydatetime()
-        finally:
-            self._syncing = False
+            def _apply() -> None:
+                """Update all Bokeh/Panel state under the document lock."""
+                self._reader = new_reader
+                self._syncing = True
+                try:
+                    self._time_slider.options = list(range(len(ti)))
+                    self._time_slider.value = nearest_idx
+                    self._datetime_picker.start = ti[0].to_pydatetime()
+                    self._datetime_picker.end = ti[-1].to_pydatetime()
+                    self._datetime_picker.value = ti[nearest_idx].to_pydatetime()
+                finally:
+                    self._syncing = False
+                self._time_div.text = (
+                    f"<b>{ti[nearest_idx].strftime('%Y-%m-%d %H:%M')}</b>"
+                )
+                self._load_frame(nearest_idx)
+                # Clear loading indicator last, after the frame is rendered.
+                self._chart_pane.loading = False
+                self._transform_select.disabled = False
 
-        self._time_div.text = f"<b>{ti[nearest_idx].strftime('%Y-%m-%d %H:%M')}</b>"
-        self._load_frame(nearest_idx)
+            if doc is not None:
+                doc.add_next_tick_callback(_apply)
+            else:
+                # No live document (Jupyter / tests) — run synchronously.
+                _apply()
+
+        threading.Thread(target=_compute, daemon=True).start()
 
     def _on_contour_color_toggle(self, event: param.parameterized.Event) -> None:
         """Switch contour line colour between colormap-derived and black."""

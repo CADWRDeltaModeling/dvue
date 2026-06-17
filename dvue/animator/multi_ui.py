@@ -999,31 +999,61 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     # ------------------------------------------------------------------
 
     def _on_transform_change(self, event: param.parameterized.Event) -> None:
+        """Apply a new transform to both readers, showing a loading indicator."""
+        import threading
+
         current_ts = pd.Timestamp(
             self._reader_a.time_index[self._time_slider.value]
         )
-        self._reader_a = self._setup_reader(self._base_reader_a, event.new)
-        self._reader_b = self._setup_reader(self._base_reader_b, event.new)
-        self._diff_reader_cache = None
+        new_name = event.new
 
-        ti = self._reader_a.time_index
-        nearest_idx = max(0, min(
-            int(ti.get_indexer([current_ts], method="nearest")[0]),
-            len(ti) - 1,
-        ))
-        self._syncing = True
-        try:
-            self._time_slider.options = list(range(len(ti)))
-            self._time_slider.value = nearest_idx
-            self._datetime_picker.start = ti[0].to_pydatetime()
-            self._datetime_picker.end = ti[-1].to_pydatetime()
-            self._datetime_picker.value = ti[nearest_idx].to_pydatetime()
-        finally:
-            self._syncing = False
+        # Show loading spinner on all three map panes immediately.
+        for pane in (self._pane_a, self._pane_b, self._pane_diff):
+            pane.loading = True
+        self._transform_select.disabled = True
 
-        ts_str = ti[nearest_idx].strftime("%Y-%m-%d %H:%M")
-        self._time_div.text = f"<b>{ts_str}</b>"
-        self._apply_frame(nearest_idx, ts_str)
+        doc = self._fig_a.document
+
+        def _compute() -> None:
+            """Background thread: build both readers (triggers lazy cache)."""
+            new_reader_a = self._setup_reader(self._base_reader_a, new_name)
+            new_reader_b = self._setup_reader(self._base_reader_b, new_name)
+            # Accessing time_index forces TransformedSlicingReader._ensure_cache()
+            ti = new_reader_a.time_index
+            nearest_idx = max(0, min(
+                int(ti.get_indexer([current_ts], method="nearest")[0]),
+                len(ti) - 1,
+            ))
+
+            def _apply() -> None:
+                self._reader_a = new_reader_a
+                self._reader_b = new_reader_b
+                self._diff_reader_cache = None
+
+                self._syncing = True
+                try:
+                    self._time_slider.options = list(range(len(ti)))
+                    self._time_slider.value = nearest_idx
+                    self._datetime_picker.start = ti[0].to_pydatetime()
+                    self._datetime_picker.end = ti[-1].to_pydatetime()
+                    self._datetime_picker.value = ti[nearest_idx].to_pydatetime()
+                finally:
+                    self._syncing = False
+
+                ts_str = ti[nearest_idx].strftime("%Y-%m-%d %H:%M")
+                self._time_div.text = f"<b>{ts_str}</b>"
+                self._apply_frame(nearest_idx, ts_str)
+
+                for pane in (self._pane_a, self._pane_b, self._pane_diff):
+                    pane.loading = False
+                self._transform_select.disabled = False
+
+            if doc is not None:
+                doc.add_next_tick_callback(_apply)
+            else:
+                _apply()
+
+        threading.Thread(target=_compute, daemon=True).start()
 
     # ------------------------------------------------------------------
     # pn.viewable.Viewer protocol
