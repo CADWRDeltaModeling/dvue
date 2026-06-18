@@ -1233,13 +1233,26 @@ class DataUI(param.Parameterized):
 
         This is the single entry point for all catalog-update-driven table refreshes.
         It is map-filter-aware: if a map filter is currently active, ``_dfcat_before_map_filter``
-        is updated to the new full catalog and the filter is re-applied so the filtered
-        view remains consistent.  Column-structure changes (e.g. the first math ref
-        adding a ``name`` column) are applied before the filter is re-applied so new
-        columns are never silently dropped.
+        is updated to the new view-filtered catalog and the map filter is re-applied so
+        the filtered view remains consistent.  Column-structure changes (e.g. the first
+        math ref adding a ``name`` column) are applied before the filter is re-applied so
+        new columns are never silently dropped.
+
+        ``_dfcat_full`` is always updated first so that math refs (or any other catalog
+        mutations) are never lost when the user subsequently switches views.  The active
+        named view is then re-applied before the map filter so all three state layers
+        (full catalog → named view → map click) compose correctly.
         """
         new_full_df = manager.get_data_catalog()
         new_cols = manager.get_table_columns()
+
+        # Always update the full-catalog snapshot so that subsequent view switches
+        # and the view editor see the live catalog (including newly added math refs).
+        self._dfcat_full = new_full_df
+
+        # Re-apply the currently active named view so the table stays view-consistent
+        # even when a math ref is saved while a named view is open.
+        view_filtered = self._views_manager.filter_dataframe(new_full_df)
 
         # Helper: fix pandas ExtensionDtype columns for Panel/Tabulator.
         def _fix_dtypes(df):
@@ -1247,22 +1260,21 @@ class DataUI(param.Parameterized):
             return df.astype(ext) if ext else df
 
         if self._map_filter_station_ids is not None:
-            # A map filter is active — keep the full catalog in the backup slot and
-            # re-apply the filter so the table still shows only the selected stations.
-            self._dfcat_before_map_filter = new_full_df
+            # Map filter active — store the view-filtered base (not new_full_df) so that
+            # clearing the map filter restores the named view rather than "All".
+            self._dfcat_before_map_filter = view_filtered
             idcol = self._station_id_column
-            full = new_full_df
             ids = self._map_filter_station_ids
-            if idcol and idcol in full.columns:
-                filtered = full[full[idcol].isin(ids)]
+            if idcol and idcol in view_filtered.columns:
+                filtered = view_filtered[view_filtered[idcol].isin(ids)]
             else:
-                filtered = full.loc[full.index.isin(ids)]
+                filtered = view_filtered.loc[view_filtered.index.isin(ids)]
             self._dfcat = filtered
             display_df = _fix_dtypes(filtered.reindex(columns=new_cols))
             self.display_table.param.update(value=display_df, selection=[])
         else:
-            self._dfcat = new_full_df
-            sliced = _fix_dtypes(new_full_df.reindex(columns=new_cols))
+            self._dfcat = view_filtered
+            sliced = _fix_dtypes(view_filtered.reindex(columns=new_cols))
             self.display_table.value = sliced
 
         self.display_table.widths = manager.get_table_column_width_map()
@@ -1698,11 +1710,18 @@ class DataUI(param.Parameterized):
         query_params = loc.query_params or {}
         sel_str = query_params.get("sel", "")
         if sel_str:
-            names = sel_str.split("|")
+            names_set = set(sel_str.split("|"))
             if hasattr(self, "_dfcat") and "name" in self._dfcat.columns:
-                indices = self._dfcat.index[self._dfcat["name"].isin(names)].tolist()
-                if indices and hasattr(self, "display_table"):
-                    self.display_table.selection = indices
+                # Use enumerate to get 0-based positional indices — Tabulator's
+                # `selection` param requires positions, not pandas label indices.
+                # Label indices are correct only when _dfcat has a sequential
+                # 0-based index, which is NOT guaranteed when a named view is
+                # active (view-filtered slices have sparse label indices).
+                positional = [
+                    i for i, n in enumerate(self._dfcat["name"]) if n in names_set
+                ]
+                if positional and hasattr(self, "display_table"):
+                    self.display_table.selection = positional
             # Clear from URL before the watcher is registered so the next
             # startup does not auto-select rows from a stale browser URL.
             loc.update_query(sel="")

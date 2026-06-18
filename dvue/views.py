@@ -333,6 +333,321 @@ def _section(title: str) -> pn.pane.HTML:
     )
 
 
+def open_view_editor(dataui: Any, mgr: "ViewsManager") -> None:
+    """Open a view builder editor in the main display panel.
+
+    The full catalog table (visible above the display panel) acts as the
+    source for adding refs.  The editor shows the current view contents and
+    lets the user:
+
+    * **Add Selected Rows** — adds currently selected rows from the catalog
+      table.
+    * **Add All Filtered** — adds all rows that match the catalog table's
+      active header filters (server-side replication of Tabulator filter state).
+    * **Remove Selected** — removes selected rows from the view contents.
+    * **Clear All** — empties the view.
+    * **Save View** — persists changes and switches to the saved view.
+
+    When the active view is ``"All"``, a blank editor opens so the user can
+    build a brand-new named view.
+    """
+    view_name = mgr.active_view
+    _view_exists = [view_name != "All"]  # mutable flag for closure
+
+    if view_name == "All":
+        existing = mgr.view_names
+        base = "New View"
+        candidate = base
+        n = 1
+        while candidate in existing:
+            candidate = f"{base} {n}"
+            n += 1
+        target_name = [candidate]
+    else:
+        target_name = [view_name]
+
+    vdef = mgr.get_view_def(target_name[0])
+    df_full = dataui._dfcat_full
+    _has_name = "name" in df_full.columns
+
+    if vdef is not None and _has_name:
+        mask = df_full.apply(vdef.matches_row, axis=1)
+        _working: List[str] = list(df_full[mask]["name"].dropna().tolist())
+    else:
+        _working = []
+
+    status = pn.pane.Markdown("", sizing_mode="stretch_width", margin=(4, 0, 0, 0))
+
+    # ── Name input ───────────────────────────────────────────────────────────
+    name_input = pn.widgets.TextInput(
+        name="View name",
+        value="" if view_name == "All" else target_name[0],
+        placeholder="Enter view name…",
+        sizing_mode="stretch_width",
+        margin=(2, 0, 4, 0),
+    )
+
+    # ── View contents table ──────────────────────────────────────────────────
+    _mgr_ref = dataui._dataui_manager
+    _display_cols: List[str] = list(_mgr_ref.get_table_columns())
+    if "name" not in _display_cols:
+        _display_cols = ["name"] + _display_cols
+
+    def _build_contents_df() -> pd.DataFrame:
+        full = dataui._dfcat_full
+        if not _has_name or not _working:
+            existing_cols = [c for c in _display_cols if c in full.columns]
+            return pd.DataFrame(columns=existing_cols)
+        mask = full["name"].isin(set(_working))
+        df = full[mask].copy()
+        try:
+            import geopandas as gpd
+            if isinstance(df, gpd.GeoDataFrame):
+                df = pd.DataFrame(df.drop(columns=["geometry"], errors="ignore"))
+        except ImportError:
+            pass
+        existing_cols = [c for c in _display_cols if c in df.columns]
+        return df[existing_cols].reset_index(drop=True)
+
+    count_md = pn.pane.Markdown(
+        f"**{len(_working)} refs** in this view",
+        sizing_mode="stretch_width",
+        margin=(2, 0, 2, 0),
+    )
+    contents_table = pn.widgets.Tabulator(
+        _build_contents_df(),
+        selectable="checkbox",
+        show_index=False,
+        sizing_mode="stretch_width",
+        height=220,
+        margin=(2, 0, 4, 0),
+    )
+
+    def _refresh_contents() -> None:
+        contents_table.value = _build_contents_df()
+        count_md.object = f"**{len(_working)} refs** in this view"
+
+    # ── Remove selected ──────────────────────────────────────────────────────
+    remove_btn = pn.widgets.Button(
+        name="Remove Selected",
+        button_type="danger",
+        icon="trash",
+        width=160,
+        margin=(2, 4, 2, 0),
+    )
+
+    def _on_remove(event: Any) -> None:
+        sel = contents_table.selection
+        if not sel:
+            status.object = "⚠️ Select rows in the view contents table to remove."
+            return
+        tbl_df = contents_table.value
+        if "name" not in tbl_df.columns:
+            return
+        to_remove = set(tbl_df.iloc[sel]["name"].dropna().tolist())
+        before = len(_working)
+        _working[:] = [n for n in _working if n not in to_remove]
+        _refresh_contents()
+        status.object = f"✓ Removed {before - len(_working)} refs."
+
+    remove_btn.on_click(_on_remove)
+
+    # ── Clear all ────────────────────────────────────────────────────────────
+    clear_btn = pn.widgets.Button(
+        name="Clear All",
+        button_type="light",
+        icon="x",
+        width=100,
+        margin=(2, 0, 2, 4),
+    )
+
+    def _on_clear(event: Any) -> None:
+        _working.clear()
+        _refresh_contents()
+        status.object = "✓ View contents cleared."
+
+    clear_btn.on_click(_on_clear)
+
+    # ── Add from main table selection ────────────────────────────────────────
+    add_sel_btn = pn.widgets.Button(
+        name="Add Selected Rows",
+        button_type="primary",
+        icon="plus",
+        width=160,
+        margin=(2, 4, 2, 0),
+    )
+
+    def _on_add_selected(event: Any) -> None:
+        sel = dataui.display_table.selection
+        if not sel:
+            status.object = "⚠️ Select rows in the catalog table above first."
+            return
+        src = dataui._dfcat
+        if "name" not in src.columns:
+            status.object = "⚠️ Catalog has no 'name' column."
+            return
+        new_names = src.iloc[sel]["name"].dropna().tolist()
+        existing = set(_working)
+        added = [n for n in new_names if n not in existing]
+        _working.extend(added)
+        _refresh_contents()
+        already = len(new_names) - len(added)
+        msg = f"✓ Added {len(added)} refs."
+        if already:
+            msg += f" ({already} already in view.)"
+        status.object = msg
+
+    add_sel_btn.on_click(_on_add_selected)
+
+    # ── Add via header filters ───────────────────────────────────────────────
+    add_filt_btn = pn.widgets.Button(
+        name="Add All Filtered",
+        button_type="default",
+        icon="filter",
+        width=160,
+        margin=(2, 0, 2, 4),
+    )
+
+    def _apply_tabulator_filters(df: pd.DataFrame, filters: list) -> pd.DataFrame:
+        """Replicate Tabulator header-filter logic server-side.
+
+        Handles the filter types that Panel Tabulator emits for string columns:
+        ``"like"`` (default substring), ``"="`` / ``"eq"`` (exact),
+        ``"regex"``, ``"starts"``, ``"ends"``.  Unknown types fall back to
+        substring match.
+        """
+        if not filters:
+            return df
+        mask = pd.Series(True, index=df.index)
+        for f in filters:
+            field = f.get("field")
+            ftype = (f.get("type") or "like").lower()
+            value = f.get("value")
+            if not field or field not in df.columns or value is None or str(value) == "":
+                continue
+            col = df[field].fillna("").astype(str)
+            sv = str(value)
+            if ftype in ("like", "starts", "ends", "contains"):
+                mask &= col.str.contains(sv, case=False, na=False, regex=False)
+            elif ftype in ("=", "==", "eq"):
+                mask &= col.str.lower() == sv.lower()
+            elif ftype == "regex":
+                try:
+                    mask &= col.str.contains(sv, case=False, na=False, regex=True)
+                except Exception:
+                    pass
+            else:
+                mask &= col.str.contains(sv, case=False, na=False, regex=False)
+        return df[mask]
+
+    def _on_add_filtered(event: Any) -> None:
+        filters = dataui.display_table.filters or []
+        if not filters:
+            status.object = "⚠️ No header filters are active in the catalog table above."
+            return
+        src = _apply_tabulator_filters(dataui._dfcat_full, filters)
+        if "name" not in src.columns:
+            status.object = "⚠️ Catalog has no 'name' column."
+            return
+        new_names = src["name"].dropna().tolist()
+        existing = set(_working)
+        added = [n for n in new_names if n not in existing]
+        _working.extend(added)
+        _refresh_contents()
+        already = len(new_names) - len(added)
+        msg = f"✓ Added {len(added)} refs from {len(new_names)} filtered rows."
+        if already:
+            msg += f" ({already} already in view.)"
+        status.object = msg
+
+    add_filt_btn.on_click(_on_add_filtered)
+
+    # ── Save / Cancel ────────────────────────────────────────────────────────
+    save_btn = pn.widgets.Button(
+        name="Save View",
+        button_type="success",
+        icon="device-floppy",
+        width=120,
+        margin=(2, 4, 2, 0),
+    )
+    cancel_btn = pn.widgets.Button(
+        name="Discard",
+        button_type="light",
+        width=100,
+        margin=(2, 0, 2, 4),
+    )
+
+    editor_panel = pn.Column(sizing_mode="stretch_both")
+
+    def _on_save(event: Any) -> None:
+        new_name = name_input.value.strip()
+        if not new_name:
+            status.object = "⚠️ Enter a view name first."
+            return
+        old_name = target_name[0]
+        if not _view_exists[0]:
+            try:
+                mgr.add_view(ViewDefinition(name=new_name, names=list(_working)))
+            except ValueError as exc:
+                status.object = f"⚠️ {exc}"
+                return
+            _view_exists[0] = True
+            target_name[0] = new_name
+        else:
+            if new_name != old_name:
+                try:
+                    mgr.rename_view(old_name, new_name)
+                except (KeyError, ValueError) as exc:
+                    status.object = f"⚠️ {exc}"
+                    return
+                target_name[0] = new_name
+            updated = mgr.get_view_def(new_name)
+            updated.names = list(_working)
+            updated.criteria = {}  # editor always produces names-based views
+            mgr._version += 1
+        mgr.active_view = target_name[0]
+        dataui._refresh_table_from_view()
+        status.object = f"✓ View '{target_name[0]}' saved ({len(_working)} refs)."
+
+    def _on_cancel(event: Any) -> None:
+        editor_panel.objects = [
+            pn.pane.HTML(
+                "<span style='color:#999;font-size:12px'>"
+                "View editor closed. Use the Views sidebar tab to reopen.</span>"
+            )
+        ]
+
+    save_btn.on_click(_on_save)
+    cancel_btn.on_click(_on_cancel)
+
+    # ── Assemble ─────────────────────────────────────────────────────────────
+    editor_panel.objects = [
+        pn.Row(name_input, save_btn, cancel_btn, sizing_mode="stretch_width"),
+        status,
+        _section("Current view contents"),
+        count_md,
+        contents_table,
+        pn.Row(remove_btn, clear_btn),
+        _section("Add from catalog table above"),
+        pn.pane.HTML(
+            "<span style='font-size:11px;color:#666'>"
+            "Select rows in the catalog table above, then click "
+            "<b>Add Selected Rows</b>. Or set header filters on the catalog "
+            "table and click <b>Add All Filtered</b>.</span>",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        ),
+        pn.Row(add_sel_btn, add_filt_btn),
+    ]
+
+    editor_label = (
+        f"View Editor \u2014 {target_name[0]}"
+        if view_name != "All"
+        else "View Editor \u2014 New"
+    )
+    dataui.show_in_display_panel(editor_label, editor_panel)
+
+
 def create_views_tab(dataui: Any) -> pn.Column:
     """Build the **Views** sidebar tab for *dataui*.
 
@@ -662,7 +977,7 @@ def create_views_tab(dataui: Any) -> pn.Column:
         if not sel:
             status.object = "⚠️ No rows selected in the table."
             return
-        df = dataui._dfcat_full
+        df = dataui._dfcat
         if "name" not in df.columns:
             status.object = "⚠️ Catalog has no 'name' column."
             return
@@ -739,7 +1054,7 @@ def create_views_tab(dataui: Any) -> pn.Column:
         if not sel:
             status.object = "⚠️ No rows selected in the table."
             return
-        df = dataui._dfcat_full
+        df = dataui._dfcat
         if "name" not in df.columns:
             status.object = "⚠️ Catalog has no 'name' column."
             return
@@ -794,9 +1109,24 @@ def create_views_tab(dataui: Any) -> pn.Column:
     mgr.param.watch(_on_version_change, "_version")
     mgr.param.watch(_on_active_view_change, "active_view")
 
+    # ── View Editor button ────────────────────────────────────────────────────
+    edit_view_btn = pn.widgets.Button(
+        name="Edit View…",
+        button_type="default",
+        icon="edit",
+        sizing_mode="stretch_width",
+        margin=(2, 0, 8, 0),
+    )
+
+    def _on_edit_view_click(event: Any) -> None:
+        open_view_editor(dataui, mgr)
+
+    edit_view_btn.on_click(_on_edit_view_click)
+
     return pn.Column(
         _section("Views"),
         switcher_row,
+        edit_view_btn,
         editor_section,
         add_section,
         io_section,
