@@ -474,12 +474,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._time_label_pane = pn.pane.Bokeh(
             self._time_div, sizing_mode="stretch_width")
         self._time_slider = pn.widgets.DiscretePlayer(
-            label="", options=list(range(len(ti))), value=0,
+            name="", options=list(range(len(ti))), value=0,
             interval=500, loop_policy="once", show_value=False,
             sizing_mode="stretch_width",
         )
         self._datetime_picker = pn.widgets.DatetimePicker(
-            label="Go to date/time",
+            name="Go to date/time",
             value=ti[0].to_pydatetime(),
             start=ti[0].to_pydatetime(), end=ti[-1].to_pydatetime(),
             sizing_mode="stretch_width",
@@ -489,25 +489,25 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # 11. Style + diff controls
         # ----------------------------------------------------------------
         self._clim_input = pn.widgets.TextInput(
-            label="Color range  (min, max)",
+            name="Color range  (min, max)",
             value=f"{eff_vmin:.4g}, {eff_vmax:.4g}",
             sizing_mode="stretch_width",
         )
         self._colormap_select = pn.widgets.Select(
-            label="Colormap", options=CURATED_COLORMAPS_WITH_SEP, value=colormap,
+            name="Colormap", options=CURATED_COLORMAPS_WITH_SEP, value=colormap,
             sizing_mode="stretch_width",
         )
         self._diff_colormap_select = pn.widgets.Select(
-            label="Diff colormap", options=CURATED_COLORMAPS_WITH_SEP, value=diff_colormap,
+            name="Diff colormap", options=CURATED_COLORMAPS_WITH_SEP, value=diff_colormap,
             sizing_mode="stretch_width", visible=show_diff,
         )
         self._show_diff_check = pn.widgets.Checkbox(
-            label="Show diff (A \u2212 B)", value=show_diff,
+            name="Show diff (A \u2212 B)", value=show_diff,
             sizing_mode="stretch_width",
         )
         _transform_names = ["none"] + list(self._transform_options.keys())
         self._transform_select = pn.widgets.Select(
-            label="Transform", options=_transform_names,
+            name="Transform", options=_transform_names,
             value=initial_transform if initial_transform in _transform_names else "none",
             sizing_mode="stretch_width",
             visible=bool(self._transform_options),
@@ -517,40 +517,40 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # 12. Contour controls (shared for both maps)
         # ----------------------------------------------------------------
         self._contours_check = pn.widgets.Checkbox(
-            label="Show contours", value=False, sizing_mode="stretch_width",
+            name="Show contours", value=False, sizing_mode="stretch_width",
         )
         self._contour_color_check = pn.widgets.Checkbox(
-            label="Color contours (colormap)", value=True,
+            name="Color contours (colormap)", value=True,
             sizing_mode="stretch_width", visible=False,
         )
         self._n_contours_slider = pn.widgets.IntSlider(
-            label="Contour levels", start=2, end=30, step=1, value=8,
+            name="Contour levels", start=2, end=30, step=1, value=8,
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_smooth_slider = pn.widgets.FloatSlider(
-            label="Contour smoothing", start=0.0, end=20.0, step=0.5, value=3.0,
+            name="Contour smoothing", start=0.0, end=20.0, step=0.5, value=3.0,
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_levels_select = pn.widgets.Select(
-            label="Contour level mode",
+            name="Contour level mode",
             options=["linear", "nice", "eq_hist"], value="nice",
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_custom_input = pn.widgets.TextInput(
-            label="Custom levels (comma-separated)",
+            name="Custom levels (comma-separated)",
             placeholder="e.g. 500, 1000, 2000",
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_labels_check = pn.widgets.Checkbox(
-            label="Label contours", value=False,
+            name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
         )
         # Show / hide toggles for channels and basemap (all three figures).
         self._show_channels_check = pn.widgets.Checkbox(
-            label="Show channels", value=True, sizing_mode="stretch_width",
+            name="Show channels", value=True, sizing_mode="stretch_width",
         )
         self._show_basemap_check = pn.widgets.Checkbox(
-            label="Show background map", value=True, sizing_mode="stretch_width",
+            name="Show background map", value=True, sizing_mode="stretch_width",
         )
 
         # ----------------------------------------------------------------
@@ -593,13 +593,13 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # Save config card — at the bottom; filled in by dsm2ui after construction.
         self._animate_meta: dict = {}
         self._config_path_input = pn.widgets.TextInput(
-            label="Save path (.yml)",
+            name="Save path (.yml)",
             placeholder="/path/to/config.yml",
             sizing_mode="stretch_width",
         )
         self._save_config_btn = pn.widgets.Button(
-            label="Save config to YAML",
-            color="primary",
+            name="Save config to YAML",
+            button_type="primary",
             sizing_mode="stretch_width",
         )
         self._save_config_status = pn.pane.Markdown("", sizing_mode="stretch_width")

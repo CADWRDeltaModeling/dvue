@@ -690,7 +690,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         )
         self._time_label_pane = pn.pane.Bokeh(self._time_div, sizing_mode="stretch_width")
         self._time_slider = pn.widgets.DiscretePlayer(
-            label="",
+            name="",
             options=list(range(len(ti))),
             value=0,
             interval=500,            # ms between steps when playing
@@ -701,67 +701,67 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # DatetimePicker — lets the user jump directly to any date/time.
         # Synced bidirectionally with the DiscretePlayer (snaps to nearest step).
         self._datetime_picker = pn.widgets.DatetimePicker(
-            label="Go to date/time",
+            name="Go to date/time",
             value=ti[0].to_pydatetime(),
             start=ti[0].to_pydatetime(),
             end=ti[-1].to_pydatetime(),
             sizing_mode="stretch_width",
         )
         self._clim_input = pn.widgets.TextInput(
-            label="Color range  (min, max)",
+            name="Color range  (min, max)",
             value=f"{init_vmin:.4g}, {init_vmax:.4g}",
             sizing_mode="stretch_width",
         )
         self._colormap_select = pn.widgets.Select(
-            label="Colormap", options=CURATED_COLORMAPS_WITH_SEP, value=colormap,
+            name="Colormap", options=CURATED_COLORMAPS_WITH_SEP, value=colormap,
             sizing_mode="stretch_width",
         )
         self._size_slider = pn.widgets.FloatSlider(
-            label="Size" if self._geom_type == "point" else "Line width",
+            name="Size" if self._geom_type == "point" else "Line width",
             start=1.0, end=50.0, step=0.5, value=size,
             sizing_mode="stretch_width",
         )
         self._contours_check = pn.widgets.Checkbox(
-            label="Show contours", value=False, sizing_mode="stretch_width",
+            name="Show contours", value=False, sizing_mode="stretch_width",
         )
         self._contour_color_check = pn.widgets.Checkbox(
-            label="Color contours (colormap)", value=True,
+            name="Color contours (colormap)", value=True,
             sizing_mode="stretch_width", visible=False,
         )
         self._n_contours_slider = pn.widgets.IntSlider(
-            label="Contour levels", start=2, end=30, step=1, value=8,
+            name="Contour levels", start=2, end=30, step=1, value=8,
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_smooth_slider = pn.widgets.FloatSlider(
-            label="Contour smoothing", start=0.0, end=20.0, step=0.5, value=3.0,
+            name="Contour smoothing", start=0.0, end=20.0, step=0.5, value=3.0,
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_levels_select = pn.widgets.Select(
-            label="Contour level mode",
+            name="Contour level mode",
             options=["linear", "nice", "eq_hist"],
             value="nice",
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_custom_input = pn.widgets.TextInput(
-            label="Custom levels (comma-separated)",
+            name="Custom levels (comma-separated)",
             placeholder="e.g. 500, 1000, 2000",
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_labels_check = pn.widgets.Checkbox(
-            label="Label contours", value=False,
+            name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
         )
         # Channel visibility toggle — always shown.
         self._show_channels_check = pn.widgets.Checkbox(
-            label="Show channels", value=True, sizing_mode="stretch_width",
+            name="Show channels", value=True, sizing_mode="stretch_width",
         )
         self._show_basemap_check = pn.widgets.Checkbox(
-            label="Show background map", value=True, sizing_mode="stretch_width",
+            name="Show background map", value=True, sizing_mode="stretch_width",
         )
         # Transform selector — only shown when transform_options is provided
         _transform_names = ["none"] + list(self._transform_options.keys())
         self._transform_select = pn.widgets.Select(
-            label="Transform",
+            name="Transform",
             options=_transform_names,
             value=initial_transform if initial_transform in _transform_names else "none",
             sizing_mode="stretch_width",
@@ -770,11 +770,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # X2 controls — only shown when an x2_callback is provided.
         _has_x2 = x2_callback is not None
         self._x2_check = pn.widgets.Checkbox(
-            label="Show X2 line", value=False,
+            name="Show X2 line", value=False,
             sizing_mode="stretch_width", visible=_has_x2,
         )
         self._x2_threshold_input = pn.widgets.FloatInput(
-            label="X2 threshold", value=2700.0,
+            name="X2 threshold", value=2700.0,
             sizing_mode="stretch_width", visible=False,
         )
 
@@ -824,13 +824,13 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # Save config card — at the bottom; filled in by dsm2ui after construction.
         self._animate_meta: dict = {}
         self._config_path_input = pn.widgets.TextInput(
-            label="Save path (.yml)",
+            name="Save path (.yml)",
             placeholder="/path/to/config.yml",
             sizing_mode="stretch_width",
         )
         self._save_config_btn = pn.widgets.Button(
-            label="Save config to YAML",
-            color="primary",
+            name="Save config to YAML",
+            button_type="primary",
             sizing_mode="stretch_width",
         )
         self._save_config_status = pn.pane.Markdown("", sizing_mode="stretch_width")
