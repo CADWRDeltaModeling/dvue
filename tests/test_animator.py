@@ -849,27 +849,72 @@ class TestStreamingTransformedSlicingReader:
         assert overlap_1h == 34
         assert overlap_15min == 134
 
-    # ── Integration: TransformSpec from dsm2ui factories ─────────────
+    # ── TransformSpec can be constructed and used directly (no dsm2ui needed) ──
 
     def test_resample_spec_is_TransformSpec(self):
-        from dsm2ui.animate import make_resample_transform
-        from dvue.animator import TransformSpec
-        spec = make_resample_transform("D")
+        """A simple aggregate TransformSpec works end-to-end."""
+        import pandas as _pd
+        from dvue.animator import TransformSpec, StreamingTransformedSlicingReader, InMemorySlicingReader
+        import numpy as _np
+
+        def _resample_daily(df):
+            r = df.resample("D").mean()
+            if r.index.freq is None:
+                r.index.freq = _pd.tseries.frequencies.to_offset("D")
+            return r
+
+        spec = TransformSpec(_resample_daily, "aggregate", lambda _: 0, output_freq="D")
         assert isinstance(spec, TransformSpec)
         assert spec.kind == "aggregate"
         assert spec.output_freq == "D"
 
+        idx = _pd.date_range("2020-01-01", periods=48, freq="h")
+        df = _pd.DataFrame(_np.ones((48, 2)), index=idx, columns=[1, 2])
+        reader = InMemorySlicingReader(df)
+        sr = StreamingTransformedSlicingReader(reader, spec, sample_steps=2)
+        assert len(sr.time_index) == 2   # 48 h → 2 days
+
     def test_rolling_spec_is_TransformSpec(self):
-        from dsm2ui.animate import make_moving_average_transform
-        from dvue.animator import TransformSpec
-        spec = make_moving_average_transform("24h")
+        """A convolution TransformSpec (rolling mean) works end-to-end."""
+        import math, pandas as _pd
+        from dvue.animator import TransformSpec, StreamingTransformedSlicingReader, InMemorySlicingReader
+        import numpy as _np
+
+        window_nanos = int(_pd.to_timedelta("4h").total_seconds() * 1e9)
+
+        def _rolling(df):
+            r = df.rolling("4h", center=True, min_periods=1).mean()
+            r.index.freq = df.index.freq
+            return r
+
+        spec = TransformSpec(
+            _rolling, "convolution",
+            lambda fn: math.ceil(window_nanos / 2 / fn),
+        )
         assert isinstance(spec, TransformSpec)
         assert spec.kind == "convolution"
         assert spec.output_freq is None
 
-    def test_godin_spec_is_TransformSpec(self):
-        from dsm2ui.animate import make_godin_transform
+        idx = _pd.date_range("2020-01-01", periods=24, freq="h")
+        df = _pd.DataFrame(_np.ones((24, 2)), index=idx, columns=[1, 2])
+        reader = InMemorySlicingReader(df)
+        sr = StreamingTransformedSlicingReader(reader, spec, sample_steps=4)
+        assert len(sr.time_index) == 24  # convolution: same length
+
+    def test_godin_spec_overlap_formula(self):
+        """The Godin overlap formula (33.5h per side) gives correct values."""
+        import math
         from dvue.animator import TransformSpec
-        spec = make_godin_transform()
+
+        WARMUP_NANOS = int(33.5 * 3600 * 1e9)
+        spec = TransformSpec(
+            lambda df: df,  # dummy fn
+            "convolution",
+            lambda fn: math.ceil(WARMUP_NANOS / fn),
+        )
         assert isinstance(spec, TransformSpec)
         assert spec.kind == "convolution"
+        nanos_1h = 3600 * int(1e9)
+        nanos_15min = 900 * int(1e9)
+        assert spec.get_overlap(nanos_1h) == 34
+        assert spec.get_overlap(nanos_15min) == 134
