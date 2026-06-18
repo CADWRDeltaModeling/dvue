@@ -40,7 +40,8 @@ from bokeh.plotting import figure as bk_figure
 from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader
 from .ui import (
     CURATED_COLORMAPS,
-    CURATED_COLORMAPS_GROUPS,
+    CURATED_COLORMAPS_WITH_SEP,
+    _COLORMAP_SEPARATOR,
     _CARTO_LIGHT_URL,
     _CARTO_LIGHT_ATTR,
     _cmap_to_palette,
@@ -493,11 +494,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._colormap_select = pn.widgets.Select(
-            name="Colormap", options=CURATED_COLORMAPS_GROUPS, value=colormap,
+            name="Colormap", options=CURATED_COLORMAPS_WITH_SEP, value=colormap,
             sizing_mode="stretch_width",
         )
         self._diff_colormap_select = pn.widgets.Select(
-            name="Diff colormap", options=CURATED_COLORMAPS_GROUPS, value=diff_colormap,
+            name="Diff colormap", options=CURATED_COLORMAPS_WITH_SEP, value=diff_colormap,
             sizing_mode="stretch_width", visible=show_diff,
         )
         self._show_diff_check = pn.widgets.Checkbox(
@@ -977,10 +978,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._mapper_diff.palette = pal
 
     def _on_colormap_change(self, event: param.parameterized.Event) -> None:
-        self.colormap = event.new
+        if event.new in CURATED_COLORMAPS:   # ignore separator clicks
+            self.colormap = event.new
 
     def _on_diff_colormap_widget_change(self, event: param.parameterized.Event) -> None:
-        self.diff_colormap = event.new
+        if event.new in CURATED_COLORMAPS:   # ignore separator clicks
+            self.diff_colormap = event.new
 
     def _on_clim_text_change(self, event: param.parameterized.Event) -> None:
         try:

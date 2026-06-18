@@ -56,13 +56,14 @@ CURATED_COLORMAPS: list[str] = [
     "seismic",
 ]
 
-# Grouped dict used by pn.widgets.Select for a labelled optgroup dropdown.
-# The group labels appear as non-selectable section headers in the browser.
-CURATED_COLORMAPS_GROUPS: dict[str, list[str]] = {
-    "Sequential": ["viridis", "plasma", "inferno", "magma",
-                   "Blues", "YlOrRd", "turbo", "rainbow"],
-    "─── Diverging ───": ["coolwarm", "RdBu_r", "RdYlBu_r", "PiYG", "bwr", "seismic"],
-}
+# Flat list for pn.widgets.Select that includes a visual separator.
+# The separator string is not a valid colormap — callbacks guard against it.
+_COLORMAP_SEPARATOR = "── Diverging ──"
+CURATED_COLORMAPS_WITH_SEP: list = [
+    "viridis", "plasma", "inferno", "magma", "Blues", "YlOrRd", "turbo", "rainbow",
+    _COLORMAP_SEPARATOR,
+    "coolwarm", "RdBu_r", "RdYlBu_r", "PiYG", "bwr", "seismic",
+]
 
 # ---------------------------------------------------------------------------
 # Tile URL constant (WMTSTileSource is instantiated inside __init__ so it
@@ -712,7 +713,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._colormap_select = pn.widgets.Select(
-            name="Colormap", options=CURATED_COLORMAPS_GROUPS, value=colormap,
+            name="Colormap", options=CURATED_COLORMAPS_WITH_SEP, value=colormap,
             sizing_mode="stretch_width",
         )
         self._size_slider = pn.widgets.FloatSlider(
@@ -1119,7 +1120,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._update_contour_labels(xs, ys, lvls)
 
     def _on_colormap_widget_change(self, event: param.parameterized.Event) -> None:
-        self.colormap = event.new
+        if event.new in CURATED_COLORMAPS:   # ignore separator clicks
+            self.colormap = event.new
 
     def _on_size_widget_change(self, event: param.parameterized.Event) -> None:
         self.size = float(event.new)
