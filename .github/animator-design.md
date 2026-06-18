@@ -89,12 +89,10 @@ cursor outside buffer      → load chunk centred on cursor
 
 ---
 
-## 3b. TransformedSlicingReader (`dvue/animator/reader.py`)
+## 3b. TransformedSlicingReader (`dvue/animator/reader.py`) — legacy / custom use
 
-Wraps any `SlicingReader` and applies a **time-domain transform** once on first
-access, then caches the result.  The transform sees the full raw dataset, so
-cross-boundary operations (rolling average warmup, tidal filter warmup) work
-correctly.
+Wraps any `SlicingReader` and applies a **time-domain transform once on first
+access**, then caches the entire result in RAM.
 
 ```python
 TransformedSlicingReader(
@@ -104,39 +102,109 @@ TransformedSlicingReader(
 )
 ```
 
-- Lazy: raw data is fetched from `inner.get_slice_range(0, N)` **once** on first
-  `get_slice` / `time_index` / `vmin` / `vmax` call.
-- Output `DatetimeIndex` may have a different `freq` and length (resampling) or
-  the same length (rolling, filter).
-- Leading NaN rows (filter warmup) are discarded according to `warmup_steps`.
-- Works as inner reader for `BufferedSlicingReader`.
+- Lazy: full dataset loaded once; subsequent `get_slice` calls are RAM lookups.
+- Kept for **backward compatibility** with code that passes a bare callable.
+- **Not recommended for large files** — for a 100-year hourly study this loads
+  the entire dataset (~7 GB) at startup.
+- Use `StreamingTransformedSlicingReader` (§3b-stream) instead for all DSM2
+  built-in transforms.
+
+---
+
+## 3b-stream. TransformSpec + StreamingTransformedSlicingReader
+
+### TransformSpec
+
+A descriptor object (not a bare callable) that carries the metadata needed to
+apply a transform **per-chunk** without loading the full dataset.
+
+```python
+TransformSpec(
+    transform_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    kind: str,          # "convolution" or "aggregate"
+    get_overlap: Callable[[int], int],   # (freq_nanos) → overlap_steps
+    output_freq: str | None,             # e.g. "D" for aggregate; None for convolution
+)
+```
+
+| `kind` | Meaning | Output length |
+|---|---|---|
+| `"convolution"` | Rolling mean, Godin filter — each output step depends on a bounded neighbourhood of input steps | Same as input |
+| `"aggregate"` | Resample / bin — each output step is derived from a contiguous range of input steps | Shorter (coarser freq) |
+
+`get_overlap(freq_nanos)` returns the number of raw steps to add on **each side** of
+a requested chunk to avoid boundary NaN (filter warmup, rolling edge effects):
+
+| Transform | 15-min data | 1-h data |
+|---|---|---|
+| Daily mean (resample) | 0 | 0 |
+| Rolling 24 h | 48 | 12 |
+| Rolling 14 D | 672 | 168 |
+| Godin filter | 134 | 34 |
+
+All three DSM2 transform factories (`make_resample_transform`,
+`make_moving_average_transform`, `make_godin_transform`) return a
+`TransformSpec`.
+
+### StreamingTransformedSlicingReader
+
+Servicing strategy — called by `BufferedSlicingReader.get_slice_range(i, j)`:
+
+```
+convolution (rolling, Godin)
+  raw_start = max(0, i - overlap)
+  raw_end   = min(N, j + overlap)
+  raw_df    = inner.get_slice_range(raw_start, raw_end)   ← one HDF5 read
+  full_out  = transform_fn(raw_df)
+  return full_out.iloc[left_pad : left_pad + (j - i)]
+
+aggregate (resample)
+  raw_start = searchsorted(out_time[i])
+  raw_end   = searchsorted(out_time[j-1] + out_freq)
+  raw_df    = inner.get_slice_range(raw_start, raw_end)   ← one HDF5 read
+  return transform_fn(raw_df).reindex(out_time[i:j])
+```
+
+**At init (zero HDF5 reads):**
+- `time_index`: computed from inner's `time_index` metadata via
+  datetime arithmetic — no data fetched.
+- `vmin`/`vmax`: sample `sample_steps` (default 200) output frames from
+  the centre of the file.
+
+**Recommended reader stack for DSM2 transforms:**
+
+```
+GeoAnimatorManager
+  └── BufferedSlicingReader (chunk=200 output frames)
+      └── StreamingTransformedSlicingReader
+          └── HydroH5FlowReader
+```
+
+This is what `GeoAnimatorManager._setup_reader()` builds automatically when
+the transform option value is a `TransformSpec` (i.e. any DSM2 built-in
+transform).
 
 ### Built-in transforms (in `dsm2ui.animate`)
 
-| Factory | Effect |
-|---|---|
-| `make_resample_transform(freq, agg)` | `df.resample(freq).mean()` — coarser timestep |
-| `make_moving_average_transform(window)` | Centred rolling mean, same timestep |
-| `make_godin_transform()` | Godin tidal filter via vtools3 (requires `conda install vtools3`) |
-| `apply_godin(inner)` | Convenience: wraps with Godin + correct warmup calculation |
-
-### Composition pattern
-
-```python
-# Raw HDF5 → daily mean → buffered
-BufferedSlicingReader(
-    TransformedSlicingReader(raw_reader, make_resample_transform("D")),
-    chunk_size=200,
-)
-```
+| Factory | Returns | Effect |
+|---|---|---|
+| `make_resample_transform(freq, agg)` | `TransformSpec(kind="aggregate")` | `df.resample(freq).mean()` — coarser timestep |
+| `make_moving_average_transform(window)` | `TransformSpec(kind="convolution")` | Centred rolling mean, same timestep |
+| `make_godin_transform()` | `TransformSpec(kind="convolution")` | Godin tidal filter via vtools3 |
+| `apply_godin(inner)` | `StreamingTransformedSlicingReader` | Convenience wrapper — streaming Godin, correct overlap |
 
 ### In-UI transform switching
 
 `GeoAnimatorManager` stores `_base_reader` (raw) and exposes a `Transform` dropdown
-when `transform_options: dict` is passed.  On change, `_setup_reader(name)` re-wraps
-`_base_reader` → `TransformedSlicingReader` (if not "none") → `BufferedSlicingReader`.
-The current timestamp is preserved: the nearest step in the new (possibly coarser)
-time index is restored automatically.
+when `transform_options: dict` is passed.  On change, `_setup_reader(name)`:
+- Looks up the value: `TransformSpec` → `StreamingTransformedSlicingReader`;
+  bare callable → legacy `TransformedSlicingReader` (backward compat).
+- Wraps the result with `BufferedSlicingReader`.
+- Shows a loading spinner (`chart_pane.loading = True`) while a background
+  thread primes the vmin/vmax sample; clears the spinner when the first frame
+  is rendered.
+- The current timestamp is preserved: the nearest step in the new index is
+  restored automatically.
 
 ---
 
@@ -525,6 +593,7 @@ mgr = GeoAnimatorManager(reader, gdf, x2_callback=my_isoline_callback)
 - **Wrong HDF5 file type** — `_DSM2BaseH5Reader` raises `ValueError` with a targeted hint ("try 'dsm2ui animate qual'") when the requested dataset path does not exist. ✅
 - **Invalid shapefile geometry** — rows with non-finite coordinates are dropped (with warning) before `.simplify()`. ✅
 - **Multi-file comparison** — `MultiGeoAnimatorManager` + `DiffSlicingReader`; shared viewport Range1d; shared contour controls; Show channels/basemap; CLI `dsm2ui animate hydro A.h5 B.h5 [--diff]`. ✅
+- **Streaming transforms** — `TransformSpec` + `StreamingTransformedSlicingReader`; all DSM2 transform factories return `TransformSpec`; startup is near-instant for multi-year files (vmin/vmax from 200 central frames; transform applied per-chunk). ✅
 - **Datashader** — for >10k features, wrap with `datashade()`.  Not in v1.
 - **Irregular time index** — explicitly rejected.
 - **GTM cell concentration** — not yet supported.

@@ -674,3 +674,245 @@ class TransformedSlicingReader(SlicingReader):
     def __exit__(self, *args):
         self.close()
 
+
+# ---------------------------------------------------------------------------
+# Streaming transform — applies transform per-chunk, no full-file load
+# ---------------------------------------------------------------------------
+
+class TransformSpec:
+    """Describes a time-domain transform for :class:`StreamingTransformedSlicingReader`.
+
+    Unlike a bare callable, a ``TransformSpec`` carries the metadata needed
+    to serve single animation frames without pre-loading the entire dataset:
+
+    - *kind* — whether the output is the same length as the input
+      (``"convolution"``: rolling, tidal filter) or shorter
+      (``"aggregate"``: resample).
+    - *get_overlap* — how many raw steps on each side of the requested
+      window are needed to produce valid edge output.
+    - *output_freq* — the output pandas frequency string for aggregate
+      transforms (e.g. ``"D"`` for daily resample); ``None`` for
+      convolution transforms.
+
+    Parameters
+    ----------
+    transform_fn : callable
+        ``(df: pd.DataFrame) -> pd.DataFrame``.  Applied to a raw chunk
+        (with overlap padding on each side) to produce the transformed
+        output.  Must return a DataFrame with a regular DatetimeIndex.
+    kind : {"convolution", "aggregate"}
+        ``"convolution"`` — output has the same temporal length as the
+        input (rolling mean, Godin filter).  The output index matches the
+        input index step-for-step.
+        ``"aggregate"`` — output is shorter (e.g. resample to daily).
+    get_overlap : callable
+        ``(freq_nanos: int) -> int`` — given the **input** time-step in
+        nanoseconds, return the number of raw steps to add on each side of
+        any requested window to avoid boundary artefacts (NaN edges from
+        filter warmup, or missing context for centred rolling).
+        Return ``0`` for aggregate transforms that have no warmup.
+    output_freq : str or None, optional
+        Pandas offset string for aggregate transforms (e.g. ``"D"``).
+        Must be ``None`` for convolution transforms.
+
+    Examples
+    --------
+    See :func:`~dsm2ui.animate.make_resample_transform`,
+    :func:`~dsm2ui.animate.make_moving_average_transform`, and
+    :func:`~dsm2ui.animate.make_godin_transform` for production examples.
+    """
+
+    def __init__(self, transform_fn, kind: str, get_overlap, output_freq=None):
+        if kind not in ("convolution", "aggregate"):
+            raise ValueError(f"kind must be 'convolution' or 'aggregate', got {kind!r}")
+        self.transform_fn = transform_fn
+        self.kind = kind
+        self.get_overlap = get_overlap   # callable(freq_nanos: int) -> int
+        self.output_freq = output_freq
+
+
+class StreamingTransformedSlicingReader(SlicingReader):
+    """Apply a time-domain transform lazily, one chunk at a time.
+
+    Unlike :class:`TransformedSlicingReader`, this class **never loads the
+    full dataset at startup**.  Each :meth:`get_slice_range` call fetches
+    only the raw steps needed for that window (plus an overlap border to
+    avoid boundary artefacts), applies the transform function, and returns
+    the trimmed result.
+
+    This makes startup near-instant for large tidefiles — ``time_index`` is
+    derived from the inner reader's metadata, and ``vmin``/``vmax`` are
+    estimated from a small sample in the middle of the file.
+
+    Architecture
+    ------------
+    The recommended stack is::
+
+        BufferedSlicingReader(chunk=200)   ← buffers output frames (after transform)
+          └── StreamingTransformedSlicingReader
+              └── HydroH5FlowReader       ← single HDF5 read per chunk
+
+    Each 200-frame buffer refill causes one HDF5 read of
+    ``200 + 2 × overlap`` raw steps and one transform call on that chunk.
+    For a 100-year hourly file this reads < 0.03 % of the data per chunk.
+
+    Parameters
+    ----------
+    inner : SlicingReader
+        The raw data source (e.g. :class:`~dsm2ui.animate.HydroH5FlowReader`).
+    spec : TransformSpec
+        Describes the transform and its overlap requirements.
+    sample_steps : int, optional
+        Number of **output** frames to sample from the middle of the file
+        for ``vmin``/``vmax`` estimation.  Default ``200``.
+
+    Notes
+    -----
+    For the Godin filter the overlap is ~33.5 h worth of raw steps on each
+    side.  At 1-h data that is ~34 steps; at 15-min it is ~134 steps.
+    The boundary output rows (within ``overlap`` steps of the start/end of
+    the whole file) will contain NaN — this is correct behaviour, not a bug.
+    """
+
+    def __init__(
+        self,
+        inner: SlicingReader,
+        spec: "TransformSpec",
+        sample_steps: int = 200,
+    ) -> None:
+        import math as _math
+
+        self._inner = inner
+        self._spec = spec
+
+        raw_ti = inner.time_index
+        n_raw = len(raw_ti)
+        try:
+            freq_nanos = int(pd.tseries.frequencies.to_offset(raw_ti.freq).nanos)
+        except AttributeError:
+            freq_nanos = int(pd.Timedelta(raw_ti.freq).total_seconds() * 1e9)
+
+        self._overlap: int = spec.get_overlap(freq_nanos)
+
+        # ── Compute output time index (no HDF5 read) ──────────────────
+        if spec.output_freq is not None:
+            # Aggregate: derive output dates from inner's date range.
+            # Use a tiny dummy Series (2 timestamps) to let pandas resample
+            # compute alignment correctly, then extrapolate to the full range.
+            dummy = pd.Series(0.0, index=raw_ti[[0, -1]])
+            out_freq_offset = pd.tseries.frequencies.to_offset(spec.output_freq)
+            # Build the complete output DatetimeIndex via date_range arithmetic
+            # (pandas date_range is pure datetime math, no data I/O).
+            out_start = raw_ti[0].floor(spec.output_freq)
+            out_end = raw_ti[-1].floor(spec.output_freq)
+            out_ti = pd.date_range(out_start, out_end, freq=spec.output_freq)
+            if out_ti.freq is None:
+                out_ti = out_ti.copy()
+                out_ti.freq = out_freq_offset
+        else:
+            # Convolution: output has the same time index as input.
+            out_ti = raw_ti
+
+        # ── Estimate vmin/vmax from a central sample (no full-file load) ──
+        n_out = len(out_ti)
+        mid_out = n_out // 2
+        s_start = max(0, mid_out - sample_steps // 2)
+        s_end = min(n_out, s_start + sample_steps)
+
+        super().__init__(out_ti)   # sets self._time_index before get_slice_range
+
+        try:
+            sample_df = self.get_slice_range(s_start, s_end)
+            vals = sample_df.to_numpy(dtype=float, na_value=np.nan)
+            finite = vals[np.isfinite(vals)]
+            if len(finite):
+                self._vmin = float(np.nanmin(finite))
+                self._vmax = float(np.nanmax(finite))
+            else:
+                self._vmin, self._vmax = inner.vmin, inner.vmax
+        except Exception:
+            self._vmin, self._vmax = inner.vmin, inner.vmax
+
+    # ------------------------------------------------------------------
+    # SlicingReader interface
+    # ------------------------------------------------------------------
+
+    @property
+    def vmin(self) -> float:
+        return self._vmin
+
+    @property
+    def vmax(self) -> float:
+        return self._vmax
+
+    def get_slice_range(self, start_out: int, end_out: int) -> pd.DataFrame:
+        n_raw = len(self._inner.time_index)
+        n_out = len(self._time_index)
+        start_out = max(0, min(start_out, n_out))
+        end_out = max(start_out, min(end_out, n_out))
+        if start_out >= end_out:
+            return pd.DataFrame(index=self._time_index[start_out:end_out])
+
+        if self._spec.kind == "aggregate":
+            # Map output index range → raw timestamp range via searchsorted.
+            # This handles any alignment correctly regardless of start time.
+            out_start_ts = self._time_index[start_out]
+            out_freq = pd.tseries.frequencies.to_offset(self._spec.output_freq)
+            # Upper bound: first raw step AFTER the last requested output bin.
+            last_out_ts = self._time_index[end_out - 1]
+            raw_upper_ts = last_out_ts + out_freq
+
+            raw_ti = self._inner.time_index
+            raw_start = int(raw_ti.searchsorted(out_start_ts, side="left"))
+            raw_end = int(raw_ti.searchsorted(raw_upper_ts, side="left"))
+            raw_end = min(n_raw, raw_end)
+
+            if raw_start >= raw_end:
+                return pd.DataFrame(
+                    np.nan,
+                    index=self._time_index[start_out:end_out],
+                    columns=[],
+                )
+
+            raw_df = self._inner.get_slice_range(raw_start, raw_end)
+            transformed = self._spec.transform_fn(raw_df)
+            # Trim to exactly the requested output rows (reindex by timestamp).
+            want = self._time_index[start_out:end_out]
+            result = transformed.reindex(want)
+            if result.index.freq is None:
+                result.index.freq = self._time_index.freq
+            return result
+
+        else:  # convolution — output same length as input
+            raw_start = max(0, start_out - self._overlap)
+            raw_end = min(n_raw, end_out + self._overlap)
+            left_pad = start_out - raw_start   # actual overlap added on left
+
+            raw_df = self._inner.get_slice_range(raw_start, raw_end)
+            transformed = self._spec.transform_fn(raw_df)
+
+            n_needed = end_out - start_out
+            result = transformed.iloc[left_pad: left_pad + n_needed]
+            # Restore the canonical output timestamps (transform may not
+            # have them if the raw index had a different epoch).
+            result = result.copy()
+            result.index = self._time_index[start_out:end_out]
+            return result
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        i = int(self._time_index.get_indexer([timestamp], method="nearest")[0])
+        chunk = self.get_slice_range(i, i + 1)
+        if len(chunk) == 0:
+            return pd.Series(dtype=float)
+        return chunk.iloc[0].astype(float)
+
+    def close(self) -> None:
+        if hasattr(self._inner, "close"):
+            self._inner.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+

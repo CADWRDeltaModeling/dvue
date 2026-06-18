@@ -29,24 +29,40 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure as bk_figure
 
-from .reader import SlicingReader, BufferedSlicingReader, TransformedSlicingReader
+from .reader import (SlicingReader, BufferedSlicingReader, TransformedSlicingReader,
+                     StreamingTransformedSlicingReader, TransformSpec)
 
 # ---------------------------------------------------------------------------
 # Curated colormaps (subset that works well with numeric data on maps)
 # ---------------------------------------------------------------------------
 
+# Flat list used by param.Selector for validation.
 CURATED_COLORMAPS: list[str] = [
+    # Sequential — single-hue / perceptually uniform
     "viridis",
     "plasma",
     "inferno",
     "magma",
-    "rainbow",
-    "coolwarm",
-    "RdBu_r",
     "Blues",
     "YlOrRd",
     "turbo",
+    "rainbow",
+    # Diverging — two-hue, centred on a neutral midpoint
+    "coolwarm",
+    "RdBu_r",
+    "RdYlBu_r",
+    "PiYG",
+    "bwr",
+    "seismic",
 ]
+
+# Grouped dict used by pn.widgets.Select for a labelled optgroup dropdown.
+# The group labels appear as non-selectable section headers in the browser.
+CURATED_COLORMAPS_GROUPS: dict[str, list[str]] = {
+    "Sequential": ["viridis", "plasma", "inferno", "magma",
+                   "Blues", "YlOrRd", "turbo", "rainbow"],
+    "─── Diverging ───": ["coolwarm", "RdBu_r", "RdYlBu_r", "PiYG", "bwr", "seismic"],
+}
 
 # ---------------------------------------------------------------------------
 # Tile URL constant (WMTSTileSource is instantiated inside __init__ so it
@@ -696,7 +712,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._colormap_select = pn.widgets.Select(
-            name="Colormap", options=CURATED_COLORMAPS, value=colormap,
+            name="Colormap", options=CURATED_COLORMAPS_GROUPS, value=colormap,
             sizing_mode="stretch_width",
         )
         self._size_slider = pn.widgets.FloatSlider(
@@ -1116,11 +1132,19 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         return ["black"] * len(lvls)
 
     def _setup_reader(self, transform_name: str) -> "SlicingReader":
-        """Wrap ``_base_reader`` with an optional transform then buffer it."""
+        """Wrap ``_base_reader`` with an optional transform then buffer it.
+
+        When the transform option value is a :class:`TransformSpec` the
+        streaming implementation is used (no full-file load at startup).
+        A bare callable falls back to the legacy :class:`TransformedSlicingReader`.
+        """
         reader = self._base_reader
         if transform_name and transform_name != "none" and transform_name in self._transform_options:
-            fn = self._transform_options[transform_name]
-            reader = TransformedSlicingReader(reader, fn)
+            spec_or_fn = self._transform_options[transform_name]
+            if isinstance(spec_or_fn, TransformSpec):
+                reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
+            else:
+                reader = TransformedSlicingReader(reader, spec_or_fn)
         return BufferedSlicingReader(reader, chunk_size=self._buffer_chunk_size)
 
     # ------------------------------------------------------------------

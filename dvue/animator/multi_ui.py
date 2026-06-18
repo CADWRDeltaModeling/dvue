@@ -40,6 +40,7 @@ from bokeh.plotting import figure as bk_figure
 from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader
 from .ui import (
     CURATED_COLORMAPS,
+    CURATED_COLORMAPS_GROUPS,
     _CARTO_LIGHT_URL,
     _CARTO_LIGHT_ATTR,
     _cmap_to_palette,
@@ -51,6 +52,9 @@ from .ui import (
     _level_colors,
     _nice_decimal_places,
     _format_level,
+    TransformSpec,
+    StreamingTransformedSlicingReader,
+    TransformedSlicingReader,
 )
 
 
@@ -489,11 +493,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._colormap_select = pn.widgets.Select(
-            name="Colormap", options=CURATED_COLORMAPS, value=colormap,
+            name="Colormap", options=CURATED_COLORMAPS_GROUPS, value=colormap,
             sizing_mode="stretch_width",
         )
         self._diff_colormap_select = pn.widgets.Select(
-            name="Diff colormap", options=CURATED_COLORMAPS, value=diff_colormap,
+            name="Diff colormap", options=CURATED_COLORMAPS_GROUPS, value=diff_colormap,
             sizing_mode="stretch_width", visible=show_diff,
         )
         self._show_diff_check = pn.widgets.Checkbox(
@@ -753,8 +757,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         reader = base
         if (transform_name and transform_name != "none"
                 and transform_name in self._transform_options):
-            from .reader import TransformedSlicingReader
-            reader = TransformedSlicingReader(reader, self._transform_options[transform_name])
+            spec_or_fn = self._transform_options[transform_name]
+            if isinstance(spec_or_fn, TransformSpec):
+                reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
+            else:
+                from .reader import TransformedSlicingReader as _TFR
+                reader = _TFR(reader, spec_or_fn)
         return BufferedSlicingReader(reader, chunk_size=self._buffer_chunk_size)
 
     def _get_diff_reader(self) -> SlicingReader:

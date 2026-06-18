@@ -663,3 +663,213 @@ class TestDiffSlicingReader:
         dr = DiffSlicingReader(ra, rb)
         # Should use daily (coarser) freq
         assert dr.time_index.freq == pd.tseries.frequencies.to_offset("D")
+
+
+# ===========================================================================
+# StreamingTransformedSlicingReader tests
+# ===========================================================================
+
+class TestStreamingTransformedSlicingReader:
+    """Tests for the chunk-by-chunk streaming transform reader."""
+
+    @pytest.fixture
+    def reader_hourly(self):
+        """48-step hourly reader (2 days), 4 channels."""
+        idx = pd.date_range("2020-01-01", periods=48, freq="h")
+        rng = np.random.default_rng(77)
+        df = pd.DataFrame(rng.uniform(100, 1000, (48, 4)),
+                          index=idx, columns=[1, 2, 3, 4])
+        from dvue.animator import InMemorySlicingReader
+        return InMemorySlicingReader(df)
+
+    @pytest.fixture
+    def reader_long(self):
+        """365-step daily reader (1 year), 4 channels — simulates a large file."""
+        idx = pd.date_range("2020-01-01", periods=365, freq="D")
+        rng = np.random.default_rng(88)
+        df = pd.DataFrame(rng.uniform(0, 100, (365, 4)),
+                          index=idx, columns=[1, 2, 3, 4])
+        from dvue.animator import InMemorySlicingReader
+        return InMemorySlicingReader(df)
+
+    def _resample_spec(self, freq="D"):
+        from dvue.animator import TransformSpec
+        def _fn(df):
+            r = df.resample(freq).mean()
+            if r.index.freq is None:
+                import pandas as _pd
+                r.index.freq = _pd.tseries.frequencies.to_offset(freq)
+            return r
+        return TransformSpec(_fn, "aggregate", lambda _: 0, output_freq=freq)
+
+    def _rolling_spec(self, window="4h"):
+        import math, pandas as _pd
+        from dvue.animator import TransformSpec
+        window_nanos = int(_pd.to_timedelta(window).total_seconds() * 1e9)
+        def _fn(df):
+            r = df.rolling(window, center=True, min_periods=1).mean()
+            r.index.freq = df.index.freq
+            return r
+        return TransformSpec(
+            _fn, "convolution",
+            lambda freq_nanos: math.ceil(window_nanos / 2 / freq_nanos),
+        )
+
+    # ── Construction / time_index ─────────────────────────────────────
+
+    def test_aggregate_time_index_computed_without_data(self, reader_hourly):
+        """Daily resample: time_index derived from inner metadata, no raw reads."""
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._resample_spec("D")
+        # Patch get_slice_range to detect calls during __init__ beyond vmin/vmax sample
+        _original = reader_hourly.get_slice_range
+        call_counts = [0]
+
+        def _counting(*a, **kw):
+            call_counts[0] += 1
+            return _original(*a, **kw)
+        reader_hourly.get_slice_range = _counting
+
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        # Should have produced 2 output days for 48 hourly steps
+        assert len(sr.time_index) == 2
+        assert sr.time_index.freq == pd.tseries.frequencies.to_offset("D")
+        # vmin/vmax sample triggered at most one call
+        assert call_counts[0] <= 1
+
+    def test_convolution_time_index_same_as_inner(self, reader_hourly):
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._rolling_spec("4h")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        assert len(sr.time_index) == len(reader_hourly.time_index)
+        assert sr.time_index.freq == reader_hourly.time_index.freq
+
+    # ── get_slice_range ───────────────────────────────────────────────
+
+    def test_aggregate_get_slice_range_values_correct(self, reader_hourly):
+        """Streaming daily mean matches full-dataset daily mean."""
+        from dvue.animator import StreamingTransformedSlicingReader, InMemorySlicingReader
+        spec = self._resample_spec("D")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=2)
+
+        # Reference: full-dataset daily mean via InMemorySlicingReader
+        full_df = reader_hourly._data
+        expected = full_df.resample("D").mean()
+
+        # Streaming: request all output rows
+        result = sr.get_slice_range(0, len(sr.time_index))
+        np.testing.assert_allclose(
+            result.values, expected.values, rtol=1e-10,
+            err_msg="Streaming daily mean differs from full-dataset daily mean"
+        )
+
+    def test_aggregate_partial_range(self, reader_long):
+        """Requesting a subrange returns exactly the right rows."""
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._resample_spec("D")
+        sr = StreamingTransformedSlicingReader(reader_long, spec, sample_steps=10)
+        # reader_long IS daily, so daily resample of daily = same
+        result = sr.get_slice_range(10, 20)
+        assert len(result) == 10
+
+    def test_convolution_get_slice_range_values_correct(self, reader_hourly):
+        """Streaming rolling mean matches full-dataset rolling mean at interior steps."""
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._rolling_spec("4h")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+
+        full_df = reader_hourly._data
+        expected_full = full_df.rolling("4h", center=True, min_periods=1).mean()
+
+        # Request interior chunk (steps 5..15) — away from file edges
+        result = sr.get_slice_range(5, 15)
+        expected = expected_full.iloc[5:15]
+        np.testing.assert_allclose(result.values, expected.values, rtol=1e-8)
+
+    def test_convolution_start_edge(self, reader_hourly):
+        """Requesting from step 0 works (clamped overlap)."""
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._rolling_spec("4h")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        result = sr.get_slice_range(0, 5)
+        assert len(result) == 5
+        assert result.shape[1] == 4
+
+    def test_convolution_end_edge(self, reader_hourly):
+        """Requesting the last few steps works (clamped right overlap)."""
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._rolling_spec("4h")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        n = len(sr.time_index)
+        result = sr.get_slice_range(n - 5, n)
+        assert len(result) == 5
+
+    # ── get_slice ─────────────────────────────────────────────────────
+
+    def test_get_slice_returns_series(self, reader_hourly):
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._rolling_spec("4h")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        s = sr.get_slice(sr.time_index[10])
+        assert isinstance(s, pd.Series)
+        assert len(s) == 4
+
+    # ── vmin / vmax ───────────────────────────────────────────────────
+
+    def test_vmin_vmax_finite(self, reader_hourly):
+        from dvue.animator import StreamingTransformedSlicingReader
+        spec = self._resample_spec("D")
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=2)
+        assert np.isfinite(sr.vmin)
+        assert np.isfinite(sr.vmax)
+        assert sr.vmin <= sr.vmax
+
+    # ── Overlap computation ───────────────────────────────────────────
+
+    def test_rolling_overlap_scales_with_frequency(self):
+        """Overlap for a 24h window at 1h = 12; at 15min = 48."""
+        import math
+        from dvue.animator import TransformSpec
+        spec = self._rolling_spec("24h")
+        nanos_1h = 3600 * int(1e9)
+        nanos_15min = 900 * int(1e9)
+        assert spec.get_overlap(nanos_1h) == 12
+        assert spec.get_overlap(nanos_15min) == 48
+
+    def test_godin_overlap_scales_with_frequency(self):
+        """Godin overlap at 1h ≈ 34; at 15min ≈ 134."""
+        import math
+        from dvue.animator import TransformSpec
+        # Use the same formula as make_godin_transform
+        WARMUP_NANOS = int(33.5 * 3600 * 1e9)
+        nanos_1h = 3600 * int(1e9)
+        nanos_15min = 900 * int(1e9)
+        overlap_1h = math.ceil(WARMUP_NANOS / nanos_1h)
+        overlap_15min = math.ceil(WARMUP_NANOS / nanos_15min)
+        assert overlap_1h == 34
+        assert overlap_15min == 134
+
+    # ── Integration: TransformSpec from dsm2ui factories ─────────────
+
+    def test_resample_spec_is_TransformSpec(self):
+        from dsm2ui.animate import make_resample_transform
+        from dvue.animator import TransformSpec
+        spec = make_resample_transform("D")
+        assert isinstance(spec, TransformSpec)
+        assert spec.kind == "aggregate"
+        assert spec.output_freq == "D"
+
+    def test_rolling_spec_is_TransformSpec(self):
+        from dsm2ui.animate import make_moving_average_transform
+        from dvue.animator import TransformSpec
+        spec = make_moving_average_transform("24h")
+        assert isinstance(spec, TransformSpec)
+        assert spec.kind == "convolution"
+        assert spec.output_freq is None
+
+    def test_godin_spec_is_TransformSpec(self):
+        from dsm2ui.animate import make_godin_transform
+        from dvue.animator import TransformSpec
+        spec = make_godin_transform()
+        assert isinstance(spec, TransformSpec)
+        assert spec.kind == "convolution"

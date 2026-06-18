@@ -198,6 +198,9 @@ Custom levels:  500, 1000, 2000, 3000
 
 ### Applying transforms programmatically
 
+All transform factories return a `TransformSpec` which is used automatically by
+`GeoAnimatorManager._setup_reader()`.  You can also use it directly:
+
 ```python
 from dsm2ui.animate import (
     HydroH5FlowReader,
@@ -205,23 +208,35 @@ from dsm2ui.animate import (
     make_moving_average_transform,
     apply_godin,
 )
-from dvue.animator import TransformedSlicingReader, BufferedSlicingReader
+from dvue.animator import StreamingTransformedSlicingReader, BufferedSlicingReader
 
 raw = HydroH5FlowReader("hist_fc_mss.h5")
 
-# Daily average
-daily = TransformedSlicingReader(raw, make_resample_transform("D"))
+# Daily average (aggregate: no overlap needed; coarser time index)
+daily_spec = make_resample_transform("D")
+daily = StreamingTransformedSlicingReader(raw, daily_spec)
 
-# 14-day rolling mean
-rolling = TransformedSlicingReader(raw, make_moving_average_transform("14D"))
+# 14-day rolling mean (convolution: 168-step overlap at 1-h data)
+rolling_spec = make_moving_average_transform("14D")
+rolling = StreamingTransformedSlicingReader(raw, rolling_spec)
 
-# Godin tidal filter (removes tidal oscillation, needs vtools3)
-godin = apply_godin(raw)
+# Godin tidal filter — convenience wrapper handles overlap automatically
+godin = apply_godin(raw)    # returns StreamingTransformedSlicingReader
 
-# Always buffer after transforming
+# Always buffer the output for smooth playback
 buffered = BufferedSlicingReader(godin, chunk_size=200)
 mgr = GeoAnimatorManager(buffered, gdf, title="Tidally filtered flow")
 ```
+
+> **Large files** — `StreamingTransformedSlicingReader` never loads the
+> full dataset.  For a 100-year hourly study (876 k steps × 519 channels),
+> startup is near-instant: `time_index` is derived from metadata alone, and
+> `vmin`/`vmax` are estimated from 200 frames at the centre of the file.
+> Each 200-frame animation buffer refill reads ≈200–270 raw steps from HDF5.
+
+> **Legacy callable** — passing a bare `callable` (not a `TransformSpec`)
+> to `TransformedSlicingReader` still works; it loads the full dataset on
+> first access.  Use `TransformSpec` for any new code.
 
 ---
 
