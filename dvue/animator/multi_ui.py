@@ -363,10 +363,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # ----------------------------------------------------------------
         # 4. Contour grids (centroids + raster + clip zone) — built once
         # ----------------------------------------------------------------
-        cx_a, cy_a, gx_a, gy_a, cz_a = _make_contour_grid(
+        cx_a, cy_a, gx_a, gy_a, cz_a, _cell_size_a = _make_contour_grid(
             self._gdf_a_proj, self._geom_type_a)
-        cx_b, cy_b, gx_b, gy_b, cz_b = _make_contour_grid(
+        cx_b, cy_b, gx_b, gy_b, cz_b, _cell_size_b = _make_contour_grid(
             self._gdf_b_proj, self._geom_type_b)
+        _default_clip_km = 4.0
 
         # ----------------------------------------------------------------
         # 5. Effective colour-scale bounds
@@ -551,7 +552,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_label_spacing_slider = pn.widgets.IntSlider(
-            name="Label spacing", start=5, end=200, value=30, step=5,
+            name="Label spacing", start=5, end=200, value=150, step=5,
+            sizing_mode="stretch_width", visible=False,
+        )
+        self._contour_clip_slider = pn.widgets.FloatSlider(
+            name="Contour clip radius (km)", start=0.5, end=15.0,
+            value=_default_clip_km, step=0.5,
             sizing_mode="stretch_width", visible=False,
         )
         # Show / hide toggles for channels and basemap (all three figures).
@@ -591,6 +597,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._contour_color_check,
             self._contour_labels_check,
             self._contour_label_spacing_slider,
+            self._contour_clip_slider,
             title="Contours", collapsed=True,
             sizing_mode="stretch_width",
         )
@@ -677,6 +684,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._contour_custom_input.param.watch(self._on_contour_custom_change, "value")
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
         self._contour_label_spacing_slider.param.watch(self._on_label_spacing_change, "value")
+        self._contour_clip_slider.param.watch(self._on_contour_clip_change, "value")
         self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
         self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
         if self._transform_options:
@@ -724,6 +732,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 "color": self._contour_color_check.value,
                 "labels": self._contour_labels_check.value,
                 "label_spacing": self._contour_label_spacing_slider.value,
+                "clip_radius_km": self._contour_clip_slider.value,
             },
             "diff": {
                 "show": self.show_diff,
@@ -1149,6 +1158,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def _on_contour_labels_toggle(self, event: param.parameterized.Event) -> None:
         on = bool(event.new)
         self._contour_label_spacing_slider.visible = on
+        self._contour_clip_slider.visible = on
         for ctour in (self._ctour_a, self._ctour_b, self._ctour_diff):
             ctour.label_renderer.visible = on
         if on:
@@ -1169,6 +1179,20 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             lvls = ctour.source.data.get("level", [])
             if xs:
                 ctour.label_source.data = self._label_positions(xs, ys, lvls)
+
+    def _on_contour_clip_change(self, event: param.parameterized.Event) -> None:
+        """Rebuild contour clip zones with the new radius and recompute."""
+        buffer_m = event.new * 1000.0
+        try:
+            from shapely.ops import unary_union
+            cz_a = unary_union(self._gdf_a_proj.geometry).buffer(buffer_m)
+            cz_b = unary_union(self._gdf_b_proj.geometry).buffer(buffer_m)
+            self._ctour_a.clip_zone    = cz_a
+            self._ctour_b.clip_zone    = cz_b
+            self._ctour_diff.clip_zone = cz_a   # diff uses map-A geometry
+        except Exception:
+            pass
+        self._refresh_contours()
 
     def _refresh_contours(self) -> None:
         """Recompute contours for the currently-visible maps."""

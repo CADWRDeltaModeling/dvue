@@ -314,7 +314,7 @@ def _make_contour_grid(
         clip_zone = unary_union(gdf_proj.geometry).buffer(_buf_radius)
     except Exception:
         clip_zone = None
-    return centroids_x, centroids_y, grid_x, grid_y, clip_zone
+    return centroids_x, centroids_y, grid_x, grid_y, clip_zone, _cell_size
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +506,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._centroids_x, self._centroids_y,
             self._grid_x, self._grid_y,
             self._contour_clip_zone,
+            _cell_size,
         ) = _make_contour_grid(self._gdf_proj, self._geom_type)
+        _default_clip_km = 4.0
 
         # ----------------------------------------------------------------
         # 4. Effective vmin/vmax and initial frame values.
@@ -752,7 +754,12 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width", visible=False,
         )
         self._contour_label_spacing_slider = pn.widgets.IntSlider(
-            name="Label spacing", start=5, end=200, value=30, step=5,
+            name="Label spacing", start=5, end=200, value=150, step=5,
+            sizing_mode="stretch_width", visible=False,
+        )
+        self._contour_clip_slider = pn.widgets.FloatSlider(
+            name="Contour clip radius (km)", start=0.5, end=15.0,
+            value=_default_clip_km, step=0.5,
             sizing_mode="stretch_width", visible=False,
         )
         # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
@@ -809,6 +816,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._contour_color_check,
             self._contour_labels_check,
             self._contour_label_spacing_slider,
+            self._contour_clip_slider,
             title="Contours", collapsed=True,
             sizing_mode="stretch_width",
         )
@@ -888,6 +896,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_custom_input.param.watch(self._on_contour_custom_levels_change, "value")
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
         self._contour_label_spacing_slider.param.watch(self._on_label_spacing_change, "value")
+        self._contour_clip_slider.param.watch(self._on_contour_clip_change, "value")
         self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
         self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
         if self._transform_options:
@@ -1204,6 +1213,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 "color": self._contour_color_check.value,
                 "labels": self._contour_labels_check.value,
                 "label_spacing": self._contour_label_spacing_slider.value,
+                "clip_radius_km": self._contour_clip_slider.value,
             },
             "diff": {"show": False, "colormap": "coolwarm"},
         }
@@ -1325,6 +1335,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_color_check.visible = on
         self._contour_labels_check.visible = on
         self._contour_label_spacing_slider.visible = on
+        self._contour_clip_slider.visible = on
         if on:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
@@ -1402,6 +1413,25 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._contour_label_source.data = (
                 self._compute_label_positions(xs, ys, lvls)
             )
+
+    def _on_contour_clip_change(self, event: param.parameterized.Event) -> None:
+        """Rebuild the contour clip zone with the new radius and recompute."""
+        buffer_m = event.new * 1000.0
+        try:
+            from shapely.ops import unary_union
+            self._contour_clip_zone = unary_union(
+                self._gdf_proj.geometry
+            ).buffer(buffer_m)
+        except Exception:
+            self._contour_clip_zone = None
+        if self._contour_renderer.visible:
+            current_values = self._bk_source.data["_value"]
+            xs, ys, lvls = self._compute_contours(list(current_values))
+            colors = self._contour_colors(lvls)
+            self._contour_source.data = {
+                "xs": xs, "ys": ys, "level": lvls, "color": colors
+            }
+            self._update_contour_labels(xs, ys, lvls)
 
     def _on_x2_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide the X2 isohaline line."""
