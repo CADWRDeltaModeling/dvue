@@ -308,7 +308,7 @@ def _make_contour_grid(
         np.linspace(bounds[1], bounds[3], ny),
     )
     _cell_size = max(span_x / nx, span_y / ny)
-    _buf_radius = _cell_size * 10.0
+    _buf_radius = _cell_size * 3.0   # ~1.5 km for the Delta at 200-grid resolution
     try:
         from shapely.ops import unary_union
         clip_zone = unary_union(gdf_proj.geometry).buffer(_buf_radius)
