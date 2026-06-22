@@ -550,12 +550,19 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
         )
-        # Show / hide toggles for channels and basemap (all three figures).
-        self._show_channels_check = pn.widgets.Checkbox(
-            name="Show channels", value=True, sizing_mode="stretch_width",
+        self._contour_label_spacing_slider = pn.widgets.IntSlider(
+            name="Label spacing", start=5, end=200, value=30, step=5,
+            sizing_mode="stretch_width", visible=False,
         )
-        self._show_basemap_check = pn.widgets.Checkbox(
-            name="Show background map", value=True, sizing_mode="stretch_width",
+        # Show / hide toggles for channels and basemap (all three figures).
+        # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
+        self._channels_alpha_slider = pn.widgets.IntSlider(
+            name="Channel lines opacity", start=0, end=100, value=100, step=5,
+            sizing_mode="stretch_width",
+        )
+        self._basemap_alpha_slider = pn.widgets.IntSlider(
+            name="Background map opacity", start=0, end=100, value=100, step=5,
+            sizing_mode="stretch_width",
         )
 
         # ----------------------------------------------------------------
@@ -564,8 +571,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         _appearance_card = pn.Card(
             self._clim_input,
             self._colormap_select,
-            self._show_channels_check,
-            self._show_basemap_check,
+            self._channels_alpha_slider,
+            self._basemap_alpha_slider,
             title="Appearance", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -583,6 +590,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._contour_custom_input,
             self._contour_color_check,
             self._contour_labels_check,
+            self._contour_label_spacing_slider,
             title="Contours", collapsed=True,
             sizing_mode="stretch_width",
         )
@@ -668,8 +676,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._contour_levels_select.param.watch(self._on_contour_levels_change, "value")
         self._contour_custom_input.param.watch(self._on_contour_custom_change, "value")
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
-        self._show_channels_check.param.watch(self._on_show_channels_toggle, "value")
-        self._show_basemap_check.param.watch(self._on_show_basemap_toggle, "value")
+        self._contour_label_spacing_slider.param.watch(self._on_label_spacing_change, "value")
+        self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
+        self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
         self._save_config_btn.on_click(self._on_save_config)
@@ -704,8 +713,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "vmin": self.vmin,
             "vmax": self.vmax,
             "size": self.size,
-            "show_channels": self._show_channels_check.value,
-            "show_basemap": self._show_basemap_check.value,
+            "show_channels": self._channels_alpha_slider.value,
+            "show_basemap":  self._basemap_alpha_slider.value,
             "contours": {
                 "enabled": self._contours_check.value,
                 "n_levels": self._n_contours_slider.value,
@@ -714,6 +723,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 "custom_levels": self._contour_custom_input.value,
                 "color": self._contour_color_check.value,
                 "labels": self._contour_labels_check.value,
+                "label_spacing": self._contour_label_spacing_slider.value,
             },
             "diff": {
                 "show": self.show_diff,
@@ -829,21 +839,35 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             ctour.label_source.data = self._label_positions(xs, ys, lvls)
 
     def _label_positions(self, xs_list, ys_list, lvls) -> dict:
-        """Compute one label anchor per unique level (midpoint of longest path)."""
-        best: dict = {}
+        """Label every contour segment, repeating along long segments.
+
+        Every segment of \u2265 2 points gets a label at its midpoint.  Segments
+        longer than *label_spacing* points also get additional evenly-spaced
+        labels so that a label stays visible across a wide range of zoom levels.
+        The Label spacing slider controls how far apart the repeated labels are.
+        """
+        spacing = self._contour_label_spacing_slider.value
+        n_dec = _nice_decimal_places(sorted(set(lvls)))
+        lx, ly, lt = [], [], []
         for xs, ys, lvl in zip(xs_list, ys_list, lvls):
             n = len(xs)
             if n < 2:
                 continue
-            if lvl not in best or n > best[lvl][2]:
-                mid = n // 2
-                best[lvl] = (xs[mid], ys[mid], n)
-        lx, ly, lt = [], [], []
-        n_dec = _nice_decimal_places(sorted(best.keys()))
-        for lvl, (mx, my, _) in sorted(best.items()):
-            lx.append(mx)
-            ly.append(my)
-            lt.append(_format_level(lvl, n_dec))
+            text = _format_level(lvl, n_dec)
+            if n <= spacing:
+                # Short segment: one label at the midpoint
+                lx.append(xs[n // 2])
+                ly.append(ys[n // 2])
+                lt.append(text)
+            else:
+                # Long segment: distribute labels every `spacing` points
+                n_labels = max(1, n // spacing)
+                step = n // (n_labels + 1)
+                for k in range(1, n_labels + 1):
+                    idx = min(k * step, n - 1)
+                    lx.append(xs[idx])
+                    ly.append(ys[idx])
+                    lt.append(text)
         return {"x": lx, "y": ly, "text": lt}
 
     # ------------------------------------------------------------------
@@ -1019,15 +1043,36 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self.vmax = max(parts)
             self._on_style_change()
 
-    def _on_show_channels_toggle(self, event: param.parameterized.Event) -> None:
-        """Show/hide channel data renderers on all three figures."""
-        for r in self._all_data_renderers:
-            r.visible = bool(event.new)
+    def _on_channels_alpha_change(self, event: param.parameterized.Event) -> None:
+        """Apply channel line opacity (0–100) to all three map renderers."""
+        alpha = event.new / 100.0
 
-    def _on_show_basemap_toggle(self, event: param.parameterized.Event) -> None:
-        """Show/hide tile (basemap) renderers on all three figures."""
-        for r in self._all_tile_renderers:
-            r.visible = bool(event.new)
+        def _apply():
+            for r in self._all_data_renderers:
+                try:
+                    r.glyph.line_alpha = alpha
+                except AttributeError:
+                    r.visible = (alpha > 0)
+
+        doc = self._active_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _on_basemap_alpha_change(self, event: param.parameterized.Event) -> None:
+        """Apply background map opacity (0–100) to all three tile renderers."""
+        alpha = event.new / 100.0
+
+        def _apply():
+            for r in self._all_tile_renderers:
+                r.alpha = alpha
+
+        doc = self._active_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
 
     # ------------------------------------------------------------------
     # Callbacks — diff toggle
@@ -1103,6 +1148,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_contour_labels_toggle(self, event: param.parameterized.Event) -> None:
         on = bool(event.new)
+        self._contour_label_spacing_slider.visible = on
         for ctour in (self._ctour_a, self._ctour_b, self._ctour_diff):
             ctour.label_renderer.visible = on
         if on:
@@ -1112,6 +1158,17 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 lvls = ctour.source.data["level"]
                 if xs:
                     ctour.label_source.data = self._label_positions(xs, ys, lvls)
+
+    def _on_label_spacing_change(self, event: param.parameterized.Event) -> None:
+        """Re-place contour labels with the new spacing value."""
+        if not self._contour_labels_check.value:
+            return
+        for ctour in (self._ctour_a, self._ctour_b, self._ctour_diff):
+            xs   = ctour.source.data.get("xs", [])
+            ys   = ctour.source.data.get("ys", [])
+            lvls = ctour.source.data.get("level", [])
+            if xs:
+                ctour.label_source.data = self._label_positions(xs, ys, lvls)
 
     def _refresh_contours(self) -> None:
         """Recompute contours for the currently-visible maps."""

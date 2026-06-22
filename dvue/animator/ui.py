@@ -751,12 +751,18 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             name="Label contours", value=False,
             sizing_mode="stretch_width", visible=False,
         )
-        # Channel visibility toggle — always shown.
-        self._show_channels_check = pn.widgets.Checkbox(
-            name="Show channels", value=True, sizing_mode="stretch_width",
+        self._contour_label_spacing_slider = pn.widgets.IntSlider(
+            name="Label spacing", start=5, end=200, value=30, step=5,
+            sizing_mode="stretch_width", visible=False,
         )
-        self._show_basemap_check = pn.widgets.Checkbox(
-            name="Show background map", value=True, sizing_mode="stretch_width",
+        # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
+        self._channels_alpha_slider = pn.widgets.IntSlider(
+            name="Channel lines opacity", start=0, end=100, value=100, step=5,
+            sizing_mode="stretch_width",
+        )
+        self._basemap_alpha_slider = pn.widgets.IntSlider(
+            name="Background map opacity", start=0, end=100, value=100, step=5,
+            sizing_mode="stretch_width",
         )
         # Transform selector — only shown when transform_options is provided
         _transform_names = ["none"] + list(self._transform_options.keys())
@@ -789,8 +795,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._clim_input,
             self._colormap_select,
             *_size_widgets,
-            self._show_channels_check,
-            self._show_basemap_check,
+            self._channels_alpha_slider,
+            self._basemap_alpha_slider,
             title="Appearance", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -802,6 +808,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._contour_custom_input,
             self._contour_color_check,
             self._contour_labels_check,
+            self._contour_label_spacing_slider,
             title="Contours", collapsed=True,
             sizing_mode="stretch_width",
         )
@@ -880,8 +887,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_levels_select.param.watch(self._on_contour_levels_change, "value")
         self._contour_custom_input.param.watch(self._on_contour_custom_levels_change, "value")
         self._contour_labels_check.param.watch(self._on_contour_labels_toggle, "value")
-        self._show_channels_check.param.watch(self._on_show_channels_toggle, "value")
-        self._show_basemap_check.param.watch(self._on_show_basemap_toggle, "value")
+        self._contour_label_spacing_slider.param.watch(self._on_label_spacing_change, "value")
+        self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
+        self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
         if x2_callback is not None:
@@ -1185,8 +1193,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             "vmin": self.vmin,
             "vmax": self.vmax,
             "size": self.size,
-            "show_channels": self._show_channels_check.value,
-            "show_basemap": self._show_basemap_check.value,
+            "show_channels": self._channels_alpha_slider.value,
+            "show_basemap":  self._basemap_alpha_slider.value,
             "contours": {
                 "enabled": self._contours_check.value,
                 "n_levels": self._n_contours_slider.value,
@@ -1195,6 +1203,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 "custom_levels": self._contour_custom_input.value,
                 "color": self._contour_color_check.value,
                 "labels": self._contour_labels_check.value,
+                "label_spacing": self._contour_label_spacing_slider.value,
             },
             "diff": {"show": False, "colormap": "coolwarm"},
         }
@@ -1225,11 +1234,17 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         except Exception as exc:
             self._save_config_status.object = f"\u2717 {exc}"
 
-    def _on_show_channels_toggle(self, event: param.parameterized.Event) -> None:
-        self._data_renderer.visible = bool(event.new)
+    def _on_channels_alpha_change(self, event: param.parameterized.Event) -> None:
+        """Apply channel line opacity (0–100) to the map renderer."""
+        alpha = event.new / 100.0
+        try:
+            self._data_renderer.glyph.line_alpha = alpha
+        except AttributeError:
+            self._data_renderer.visible = (alpha > 0)
 
-    def _on_show_basemap_toggle(self, event: param.parameterized.Event) -> None:
-        self._tile_renderer.visible = bool(event.new)
+    def _on_basemap_alpha_change(self, event: param.parameterized.Event) -> None:
+        """Apply background map opacity (0–100) to the tile renderer."""
+        self._tile_renderer.alpha = event.new / 100.0
 
     def _on_transform_change(self, event: param.parameterized.Event) -> None:
         """Apply a new time-domain transform; preserve current playback position.
@@ -1309,6 +1324,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_custom_input.visible = on
         self._contour_color_check.visible = on
         self._contour_labels_check.visible = on
+        self._contour_label_spacing_slider.visible = on
         if on:
             current_values = self._bk_source.data["_value"]
             xs, ys, lvls = self._compute_contours(list(current_values))
@@ -1374,6 +1390,18 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 )
         else:
             self._contour_label_source.data = {"x": [], "y": [], "text": []}
+
+    def _on_label_spacing_change(self, event: param.parameterized.Event) -> None:
+        """Re-place contour labels with the updated spacing."""
+        if not self._contour_label_renderer.visible:
+            return
+        xs   = self._contour_source.data.get("xs", [])
+        ys   = self._contour_source.data.get("ys", [])
+        lvls = self._contour_source.data.get("level", [])
+        if xs:
+            self._contour_label_source.data = (
+                self._compute_label_positions(xs, ys, lvls)
+            )
 
     def _on_x2_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide the X2 isohaline line."""
