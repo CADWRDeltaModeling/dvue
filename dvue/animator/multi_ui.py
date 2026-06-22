@@ -364,9 +364,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # 4. Contour grids (centroids + raster + clip zone) — built once
         # ----------------------------------------------------------------
         cx_a, cy_a, gx_a, gy_a, cz_a, _cell_size_a = _make_contour_grid(
-            self._gdf_a_proj, self._geom_type_a)
+            self._gdf_a_proj, self._geom_type_a, buffer_m=4000.0)
         cx_b, cy_b, gx_b, gy_b, cz_b, _cell_size_b = _make_contour_grid(
-            self._gdf_b_proj, self._geom_type_b)
+            self._gdf_b_proj, self._geom_type_b, buffer_m=4000.0)
         _default_clip_km = 4.0
 
         # ----------------------------------------------------------------

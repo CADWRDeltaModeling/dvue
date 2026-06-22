@@ -276,11 +276,17 @@ def _run_contour_computation(
 def _make_contour_grid(
     gdf_proj: "gpd.GeoDataFrame",
     geom_type: str,
+    buffer_m: float = None,
 ) -> tuple:
     """Build the contour interpolation grid + clip zone for a projected GDF.
 
-    Returns ``(centroids_x, centroids_y, grid_x, grid_y, clip_zone)``.
+    Returns ``(centroids_x, centroids_y, grid_x, grid_y, clip_zone, cell_size)``.
     All coordinates are in the GDF's CRS (expected EPSG:3857).
+
+    Parameters
+    ----------
+    buffer_m : float or None
+        Clip zone buffer radius in metres.  Defaults to ``cell_size * 3``.
     """
     if geom_type == "point":
         centroids_x = gdf_proj.geometry.x.values.copy()
@@ -308,7 +314,7 @@ def _make_contour_grid(
         np.linspace(bounds[1], bounds[3], ny),
     )
     _cell_size = max(span_x / nx, span_y / ny)
-    _buf_radius = _cell_size * 3.0   # ~1.5 km for the Delta at 200-grid resolution
+    _buf_radius = buffer_m if buffer_m is not None else _cell_size * 3.0
     try:
         from shapely.ops import unary_union
         clip_zone = unary_union(gdf_proj.geometry).buffer(_buf_radius)
@@ -507,7 +513,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._grid_x, self._grid_y,
             self._contour_clip_zone,
             _cell_size,
-        ) = _make_contour_grid(self._gdf_proj, self._geom_type)
+        ) = _make_contour_grid(self._gdf_proj, self._geom_type, buffer_m=4000.0)
         _default_clip_km = 4.0
 
         # ----------------------------------------------------------------
