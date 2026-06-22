@@ -141,7 +141,7 @@ def _build_bokeh_map(
     """
     source = ColumnDataSource({
         "xs": bk_xs, "ys": bk_ys,
-        "_value": init_values, "geo_id": geo_ids,
+        "_value": init_values, "_color_value": list(init_values), "geo_id": geo_ids,
     })
     mapper = LinearColorMapper(
         palette=_cmap_to_palette(colormap),
@@ -178,7 +178,7 @@ def _build_bokeh_map(
     )
     p.add_tools(data_hover)
 
-    color_field = {"field": "_value", "transform": mapper}
+    color_field = {"field": "_color_value", "transform": mapper}
     if geom_type == "point":
         data_renderer = p.scatter(
             x="xs", y="ys", source=source,
@@ -234,6 +234,7 @@ def _build_bokeh_map(
         fig=p,
         source=source,
         mapper=mapper,
+        colorbar=colorbar,
         data_renderer=data_renderer,
         tile_renderer=tile_renderer,
         contour_source=contour_source,
@@ -426,6 +427,10 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
         self._fig_a = ma.fig;  self._src_a = ma.source;  self._mapper_a = ma.mapper
         self._fig_b = mb.fig;  self._src_b = mb.source;  self._mapper_b = mb.mapper
+        self._colorbar_a = ma.colorbar
+        self._colorbar_b = mb.colorbar
+        self._colorbar_a = ma.colorbar
+        self._colorbar_b = mb.colorbar
         self._fig_diff = md.fig;  self._src_diff = md.source
         self._mapper_diff = md.mapper
         # Keep renderer references so show/hide checkboxes can toggle them.
@@ -669,6 +674,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._transform_select.param.watch(self._on_transform_change, "value")
         self._save_config_btn.on_click(self._on_save_config)
 
+        self._color_norm_boundaries: "list[float] | None" = None  # unused placeholder
+
     # ------------------------------------------------------------------
     # Reader setup
     # ------------------------------------------------------------------
@@ -846,7 +853,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def _update_map_a(self, idx: int, ts: pd.Timestamp) -> None:
         series = self._reader_a.get_slice_nearest(ts)
         vals = series.reindex(self._geo_ids_a).fillna(np.nan).tolist()
-        self._src_a.patch({"_value": [(slice(None), vals)]})
+        cvals = vals
+        self._src_a.patch({
+            "_value": [(slice(None), vals)],
+            "_color_value": [(slice(None), cvals)],
+        })
         self._fig_a.title.text = (
             f"{self._title_a} \u2014 {ts.strftime('%Y-%m-%d %H:%M')}"
         )
@@ -858,7 +869,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def _update_map_b(self, idx: int, ts: pd.Timestamp) -> None:
         series = self._reader_b.get_slice_nearest(ts)
         vals = series.reindex(self._geo_ids_b).fillna(np.nan).tolist()
-        self._src_b.patch({"_value": [(slice(None), vals)]})
+        cvals = vals
+        self._src_b.patch({
+            "_value": [(slice(None), vals)],
+            "_color_value": [(slice(None), cvals)],
+        })
         self._fig_b.title.text = (
             f"{self._title_b} \u2014 {ts.strftime('%Y-%m-%d %H:%M')}"
         )
@@ -956,11 +971,15 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _apply_bokeh_style(self) -> None:
         eff_vmin, eff_vmax = self._current_clim()
+        from bokeh.models import BasicTicker, BasicTickFormatter
         pal = _cmap_to_palette(self.colormap)
         for mapper in (self._mapper_a, self._mapper_b):
             mapper.palette = pal
-            mapper.low = eff_vmin
+            mapper.low  = eff_vmin
             mapper.high = eff_vmax
+        for cb in (self._colorbar_a, self._colorbar_b):
+            cb.ticker    = BasicTicker(desired_num_ticks=6)
+            cb.formatter = BasicTickFormatter()
         # If contours are visible, refresh them (colours may have changed).
         if self._ctour_a.renderer.visible:
             idx = self._time_slider.value
@@ -987,11 +1006,18 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_clim_text_change(self, event: param.parameterized.Event) -> None:
         try:
-            parts = [p.strip() for p in event.new.split(",")]
-            if len(parts) == 2:
-                self.vmin, self.vmax = float(parts[0]), float(parts[1])
+            parts = [float(p.strip()) for p in event.new.split(",") if p.strip()]
         except ValueError:
-            pass
+            return
+        if len(parts) == 2:
+            self._color_norm_boundaries = None
+            self.vmin, self.vmax = parts[0], parts[1]
+        elif len(parts) > 2:
+            # More than 2 values: treat as vmin / vmax using first and last
+            self._color_norm_boundaries = None
+            self.vmin = min(parts)
+            self.vmax = max(parts)
+            self._on_style_change()
 
     def _on_show_channels_toggle(self, event: param.parameterized.Event) -> None:
         """Show/hide channel data renderers on all three figures."""
