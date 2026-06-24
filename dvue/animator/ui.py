@@ -295,8 +295,14 @@ def _make_contour_grid(
         cx_list, cy_list = [], []
         for geom in gdf_proj.geometry:
             c = geom.centroid
-            cx_list.append(c.x)
-            cy_list.append(c.y)
+            if c.is_empty:
+                # Degenerate geometry (NaN/inf coords from a bad CRS conversion).
+                # Use NaN so the centroid array stays the same length as geo_ids.
+                cx_list.append(float("nan"))
+                cy_list.append(float("nan"))
+            else:
+                cx_list.append(c.x)
+                cy_list.append(c.y)
         centroids_x = np.array(cx_list)
         centroids_y = np.array(cy_list)
 

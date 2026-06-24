@@ -284,7 +284,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     vmin: Optional[float] = param.Number(default=None, allow_None=True)
     vmax: Optional[float] = param.Number(default=None, allow_None=True)
     colormap: str = param.Selector(default="rainbow", objects=CURATED_COLORMAPS)
-    diff_colormap: str = param.Selector(default="coolwarm", objects=CURATED_COLORMAPS)
     size: float = param.Number(default=6.0, bounds=(1.0, 50.0))
     show_diff: bool = param.Boolean(
         default=False, doc="Show A−B diff map instead of side-by-side."
@@ -307,7 +306,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         title_b: str = "Study B",
         geo_id_column: str = "geo_id",
         colormap: str = "rainbow",
-        diff_colormap: str = "coolwarm",
         vmin=None,
         vmax=None,
         size: float = 6.0,
@@ -421,7 +419,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         md = _build_bokeh_map(
             self._gdf_a_proj, self._geo_ids_a, bk_xs_a, bk_ys_a,
             self._geom_type_a, [np.nan] * len(self._geo_ids_a),
-            diff_colormap, -1.0, 1.0, size, map_height,
+            colormap, eff_vmin, eff_vmax, size, map_height,
             f"{title_a} \u2212 {title_b} \u2014 {ts0}", geo_id_column,
             shared_x_range=shared_x, shared_y_range=shared_y,
         )
@@ -504,8 +502,13 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._diff_colormap_select = pn.widgets.Select(
-            name="Diff colormap", options=CURATED_COLORMAPS_WITH_SEP, value=diff_colormap,
-            sizing_mode="stretch_width", visible=show_diff,
+            name="Diff colormap", options=CURATED_COLORMAPS_WITH_SEP, value="coolwarm",
+            sizing_mode="stretch_width", visible=False,
+        )
+        self._size_slider = pn.widgets.FloatSlider(
+            name="Line width",
+            start=1.0, end=50.0, step=0.5, value=size,
+            sizing_mode="stretch_width",
         )
         self._show_diff_check = pn.widgets.Checkbox(
             name="Show diff (A \u2212 B)", value=show_diff,
@@ -577,6 +580,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         _appearance_card = pn.Card(
             self._clim_input,
             self._colormap_select,
+            self._size_slider,
             self._channels_alpha_slider,
             self._basemap_alpha_slider,
             title="Appearance", collapsed=False,
@@ -584,7 +588,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         )
         _diff_card = pn.Card(
             self._show_diff_check,
-            self._diff_colormap_select,
             title="Diff (A − B)", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -660,7 +663,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # ----------------------------------------------------------------
         super().__init__(
             vmin=vmin, vmax=vmax,
-            colormap=colormap, diff_colormap=diff_colormap,
+            colormap=colormap,
             size=size, show_diff=show_diff,
             **params,
         )
@@ -671,10 +674,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._time_slider.param.watch(self._on_slider_change, "value")
         self._datetime_picker.param.watch(self._on_datetime_picker_change, "value")
         self.param.watch(self._on_style_change, ["vmin", "vmax", "colormap", "size"])
-        self.param.watch(self._on_diff_colormap_change, ["diff_colormap"])
         self._clim_input.param.watch(self._on_clim_text_change, "value")
         self._colormap_select.param.watch(self._on_colormap_change, "value")
-        self._diff_colormap_select.param.watch(self._on_diff_colormap_widget_change, "value")
+        self._size_slider.param.watch(self._on_size_widget_change, "value")
         self._show_diff_check.param.watch(self._on_diff_toggle, "value")
         self._contours_check.param.watch(self._on_contours_toggle, "value")
         self._contour_color_check.param.watch(self._on_contour_color_toggle, "value")
@@ -736,7 +738,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             },
             "diff": {
                 "show": self.show_diff,
-                "colormap": self.diff_colormap,
             },
             "x2": {"enabled": False, "threshold": 2700.0},
         }
@@ -923,22 +924,19 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "xs": self._src_a.data["xs"],
             "ys": self._src_a.data["ys"],
             "_value": vals,
+            "_color_value": vals,
             "geo_id": self._geo_ids_a,
         }
         ts_str = ts.strftime("%Y-%m-%d %H:%M")
         self._fig_diff.title.text = (
             f"{self._title_a} \u2212 {self._title_b} \u2014 {ts_str}"
         )
-        d = self._diff_reader_cache
-        if d is not None:
-            absmax = max(abs(d.vmin), abs(d.vmax), 1e-9)
-            self._mapper_diff.low = -absmax
-            self._mapper_diff.high = absmax
+        eff_vmin, eff_vmax = self._current_clim()
+        self._mapper_diff.low  = eff_vmin
+        self._mapper_diff.high = eff_vmax
         if self._ctour_diff.renderer.visible:
-            absmax = max(
-                abs(self._mapper_diff.low), abs(self._mapper_diff.high), 1e-9)
             self._recompute_contours(
-                self._ctour_diff, vals, -absmax, absmax, self.diff_colormap)
+                self._ctour_diff, vals, eff_vmin, eff_vmax, self.colormap)
 
     def _apply_frame(self, idx: int, ts_str: str) -> None:
         """All Bokeh mutations for one frame step — must run under document lock."""
@@ -1002,17 +1000,35 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         else:
             self._apply_bokeh_style()
 
+    def _on_size_widget_change(self, event: param.parameterized.Event) -> None:
+        self.size = float(event.new)
+
     def _apply_bokeh_style(self) -> None:
         eff_vmin, eff_vmax = self._current_clim()
         from bokeh.models import BasicTicker, BasicTickFormatter
         pal = _cmap_to_palette(self.colormap)
-        for mapper in (self._mapper_a, self._mapper_b):
+        for mapper in (self._mapper_a, self._mapper_b, self._mapper_diff):
             mapper.palette = pal
             mapper.low  = eff_vmin
             mapper.high = eff_vmax
         for cb in (self._colorbar_a, self._colorbar_b):
             cb.ticker    = BasicTicker(desired_num_ticks=6)
             cb.formatter = BasicTickFormatter()
+        # Apply line width to all three figures' data renderers.
+        new_size = float(self.size)
+        _skip = {
+            id(self._ctour_a.renderer), id(self._ctour_b.renderer),
+            id(self._ctour_diff.renderer),
+        }
+        for fig in (self._fig_a, self._fig_b, self._fig_diff):
+            for r in fig.renderers:
+                if id(r) in _skip or not hasattr(r, "glyph"):
+                    continue
+                g = r.glyph
+                if hasattr(g, "size"):
+                    g.size = new_size
+                elif hasattr(g, "line_width") and not hasattr(g, "fill_color"):
+                    g.line_width = new_size
         # If contours are visible, refresh them (colours may have changed).
         if self._ctour_a.renderer.visible:
             idx = self._time_slider.value
@@ -1021,21 +1037,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._update_map_b(idx, ts)
 
     def _on_diff_colormap_change(self, *events) -> None:
-        pal = _cmap_to_palette(self.diff_colormap)
-        doc = self._active_doc()
-        if doc is not None:
-            doc.add_next_tick_callback(
-                lambda: setattr(self._mapper_diff, "palette", pal))
-        else:
-            self._mapper_diff.palette = pal
+        pass  # diff mapper driven by Appearance colormap via _apply_bokeh_style
 
     def _on_colormap_change(self, event: param.parameterized.Event) -> None:
         if event.new in CURATED_COLORMAPS:   # ignore separator clicks
             self.colormap = event.new
-
-    def _on_diff_colormap_widget_change(self, event: param.parameterized.Event) -> None:
-        if event.new in CURATED_COLORMAPS:   # ignore separator clicks
-            self.diff_colormap = event.new
 
     def _on_clim_text_change(self, event: param.parameterized.Event) -> None:
         try:
@@ -1089,7 +1095,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _on_diff_toggle(self, event: param.parameterized.Event) -> None:
         self.show_diff = bool(event.new)
-        self._diff_colormap_select.visible = self.show_diff
         if self.show_diff:
             self._maps_pane.objects = [self._pane_diff]
             idx = self._time_slider.value
