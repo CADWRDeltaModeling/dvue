@@ -283,7 +283,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     # ------------------------------------------------------------------
     vmin: Optional[float] = param.Number(default=None, allow_None=True)
     vmax: Optional[float] = param.Number(default=None, allow_None=True)
-    colormap: str = param.Selector(default="rainbow", objects=CURATED_COLORMAPS)
+    colormap: str = param.Selector(default="turbo", objects=CURATED_COLORMAPS)
     size: float = param.Number(default=6.0, bounds=(1.0, 50.0))
     show_diff: bool = param.Boolean(
         default=False, doc="Show A−B diff map instead of side-by-side."
@@ -305,7 +305,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         title_a: str = "Study A",
         title_b: str = "Study B",
         geo_id_column: str = "geo_id",
-        colormap: str = "rainbow",
+        colormap: str = "turbo",
         vmin=None,
         vmax=None,
         size: float = 6.0,

@@ -38,31 +38,35 @@ from .reader import (SlicingReader, BufferedSlicingReader, TransformedSlicingRea
 
 # Flat list used by param.Selector for validation.
 CURATED_COLORMAPS: list[str] = [
-    # Sequential — single-hue / perceptually uniform
-    "viridis",
-    "plasma",
-    "inferno",
-    "magma",
-    "Blues",
-    "YlOrRd",
-    "turbo",
-    "rainbow",
+    # Sequential — perceptually uniform, colorblind-safe (recommended)
+    "viridis",          # perceptually uniform; safe for all dichromacy types
+    "plasma",           # warm alternative; high discrimination
+    "cividis",          # optimized specifically for deuteranopia (Nuñez et al. 2018)
+    "inferno",          # high contrast on dark backgrounds
+    "magma",            # high contrast on dark backgrounds
+    # Sequential — domain-intuitive
+    "cet_fire",         # black→blue→orange→white; dark=fresh, bright=saline (EC)
+    "cet_CET_L2",       # blue→green→yellow; strong water-level intuition
+    "Blues",            # water-blue association; not perceptually uniform
+    "YlOrRd",           # warm; intuitive for heat / conductivity
+    # Sequential — high-contrast (not colorblind-safe)
+    "turbo",            # good contrast; not perceptually uniform; not colorblind-safe
     # Diverging — two-hue, centred on a neutral midpoint
-    "coolwarm",
-    "RdBu_r",
-    "RdYlBu_r",
-    "PiYG",
-    "bwr",
-    "seismic",
+    "coolwarm",         # best general-purpose diverging; perceptually symmetric
+    "RdBu_r",           # blue=negative/upstream, red=positive/downstream convention
+    "RdYlBu_r",         # yellow midpoint aids near-zero discrimination
+    "cet_CET_D9",       # blue→yellow→red; colorblind-accessible diverging
+    "PiYG",             # pink/green; useful for anomaly-style differences
 ]
 
 # Flat list for pn.widgets.Select that includes a visual separator.
 # The separator string is not a valid colormap — callbacks guard against it.
 _COLORMAP_SEPARATOR = "── Diverging ──"
 CURATED_COLORMAPS_WITH_SEP: list = [
-    "viridis", "plasma", "inferno", "magma", "Blues", "YlOrRd", "turbo", "rainbow",
+    "viridis", "plasma", "cividis", "inferno", "magma",
+    "cet_fire", "cet_CET_L2", "Blues", "YlOrRd", "turbo",
     _COLORMAP_SEPARATOR,
-    "coolwarm", "RdBu_r", "RdYlBu_r", "PiYG", "bwr", "seismic",
+    "coolwarm", "RdBu_r", "RdYlBu_r", "cet_CET_D9", "PiYG",
 ]
 
 # ---------------------------------------------------------------------------
