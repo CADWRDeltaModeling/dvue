@@ -820,8 +820,20 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         vmin: float,
         vmax: float,
         colormap: str,
+        color_vmin: "float | None" = None,
+        color_vmax: "float | None" = None,
     ) -> None:
-        """Recompute contour paths for one map and update its ColumnDataSources."""
+        """Recompute contour paths for one map and update its ColumnDataSources.
+
+        Parameters
+        ----------
+        vmin, vmax :
+            Range used for contour *level* computation.
+        color_vmin, color_vmax :
+            Range used for contour *colour* mapping.  Defaults to ``vmin``/``vmax``
+            when not supplied.  Pass the mapper bounds here when the colour scale
+            differs from the level range (e.g. the diff map).
+        """
         vals_arr = np.asarray(vals, dtype=float)
         mask = np.isfinite(vals_arr)
         if mask.sum() < 4:
@@ -840,7 +852,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             float(self.contour_smooth), levels, ctour.clip_zone,
         )
         colors = (
-            _level_colors(lvls, vmin, vmax, colormap)
+            _level_colors(lvls, color_vmin if color_vmin is not None else vmin,
+                          color_vmax if color_vmax is not None else vmax, colormap)
             if self._contour_color
             else ["black"] * len(lvls)
         )
@@ -935,8 +948,23 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._mapper_diff.low  = eff_vmin
         self._mapper_diff.high = eff_vmax
         if self._ctour_diff.renderer.visible:
+            # Use the diff data's own range for contour level computation.
+            # eff_vmin/eff_vmax are from the Appearance panel (absolute values
+            # of A), which is far outside the diff value range and would
+            # produce nonsensical or non-increasing contour levels.
+            d = self._diff_reader_cache
+            if d is not None:
+                absmax = max(abs(d.vmin), abs(d.vmax), 1e-9)
+                c_vmin, c_vmax = -absmax, absmax
+            else:
+                finite = np.asarray([v for v in vals if np.isfinite(v)])
+                if len(finite) >= 2 and finite.min() < finite.max():
+                    c_vmin, c_vmax = float(finite.min()), float(finite.max())
+                else:
+                    c_vmin, c_vmax = eff_vmin, eff_vmax
             self._recompute_contours(
-                self._ctour_diff, vals, eff_vmin, eff_vmax, self.colormap)
+                self._ctour_diff, vals, c_vmin, c_vmax, self.colormap,
+                color_vmin=eff_vmin, color_vmax=eff_vmax)
 
     def _apply_frame(self, idx: int, ts_str: str) -> None:
         """All Bokeh mutations for one frame step — must run under document lock."""

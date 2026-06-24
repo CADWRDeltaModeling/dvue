@@ -256,6 +256,10 @@ def _run_contour_computation(
     xs_out, ys_out, lvl_out = [], [], []
     fig, ax = plt.subplots(1, 1)
     try:
+        # Guard: matplotlib requires strictly increasing levels.
+        levels_arr = np.unique(np.asarray(levels_arr, dtype=float))
+        if len(levels_arr) < 2:
+            return [], [], []
         cs = ax.contour(grid_x, grid_y, grid_z, levels=levels_arr)
         if hasattr(cs, "allsegs"):
             for i, lvl in enumerate(cs.levels):
