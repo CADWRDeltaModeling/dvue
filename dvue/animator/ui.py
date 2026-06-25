@@ -490,6 +490,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._title = title
         self._map_height = map_height
         self._x2_callback = x2_callback
+        self._extra_frame_callbacks: list = []
+        self._transform_callbacks: list = []
 
         # ----------------------------------------------------------------
         # 2. Project GDF to EPSG:3857 once.
@@ -1051,10 +1053,48 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             xs, ys = self._x2_callback(step_idx, threshold)
             self._x2_source.data = {"xs": xs, "ys": ys}
 
+        for _cb in self._extra_frame_callbacks:
+            _cb(ts)
+
         ts_str = ts.strftime("%Y-%m-%d %H:%M")
         self._bk_figure.title.text = (
             f"{self._title + ' \u2014 ' if self._title else ''}{ts_str}"
         )
+
+    def add_frame_callback(self, fn) -> None:
+        """Register a callback invoked on every animation frame.
+
+        The callback receives a single :class:`pandas.Timestamp` argument:
+        the current animation time resolved from the active reader's time
+        index.  It is called inside the Bokeh document lock, so Bokeh model
+        mutations are safe.  Using a timestamp (rather than a step index)
+        means the callback is robust to time-index changes caused by
+        transform switches.
+
+        Parameters
+        ----------
+        fn : callable(ts: pd.Timestamp) -> None
+            Called after the main ``_bk_source`` patch and any X2 update.
+        """
+        self._extra_frame_callbacks.append(fn)
+
+    def add_transform_callback(self, fn) -> None:
+        """Register a callback invoked when the animation transform changes.
+
+        Called from the background thread inside :meth:`_on_transform_change`
+        (before the Bokeh document lock is re-entered), so the callback may
+        perform slow I/O (e.g. rebuilding a filtered reader) without blocking
+        the browser.
+
+        Parameters
+        ----------
+        fn : callable(spec_or_none) -> None
+            Receives the new :class:`~dvue.animator.TransformSpec` (or
+            ``None`` when the transform is set to ``"none"``).  The
+            ``TransformSpec`` is the same object stored in
+            ``_transform_options[name]``.
+        """
+        self._transform_callbacks.append(fn)
 
     # ------------------------------------------------------------------
     # Widget callbacks
@@ -1307,6 +1347,16 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 int(ti.get_indexer([current_ts], method="nearest")[0]),
                 len(ti) - 1,
             ))
+
+            # Fire transform callbacks in the background thread so heavy
+            # reader rebuilds (e.g. Godin) happen outside the document lock.
+            _new_spec = (
+                self._transform_options.get(new_name)
+                if (new_name and new_name != "none")
+                else None
+            )
+            for _tcb in self._transform_callbacks:
+                _tcb(_new_spec)
 
             def _apply() -> None:
                 """Update all Bokeh/Panel state under the document lock."""
