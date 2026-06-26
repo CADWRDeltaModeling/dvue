@@ -492,6 +492,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._x2_callback = x2_callback
         self._extra_frame_callbacks: list = []
         self._transform_callbacks: list = []
+        self._extra_save_callbacks: list = []
 
         # ----------------------------------------------------------------
         # 2. Project GDF to EPSG:3857 once.
@@ -1061,6 +1062,18 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             f"{self._title + ' \u2014 ' if self._title else ''}{ts_str}"
         )
 
+    def add_save_callback(self, fn) -> None:
+        """Register a callback invoked after each successful config save.
+
+        The callback receives the saved file path as its sole argument.
+        Multiple callbacks are supported and are called in registration order.
+
+        Parameters
+        ----------
+        fn : callable(path: str) -> None
+        """
+        self._extra_save_callbacks.append(fn)
+
     def add_frame_callback(self, fn) -> None:
         """Register a callback invoked on every animation frame.
 
@@ -1301,6 +1314,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 yaml.dump(state, f, default_flow_style=False,
                           sort_keys=False, allow_unicode=True)
             self._save_config_status.object = f"\u2713 Saved to `{path}`"
+            for _cb in self._extra_save_callbacks:
+                _cb(path)
         except Exception as exc:
             self._save_config_status.object = f"\u2717 {exc}"
 
