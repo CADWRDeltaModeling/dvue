@@ -486,6 +486,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._transform_options = transform_options or {}
         self._buffer_chunk_size = buffer_chunk_size
         self._reader = self._setup_reader(initial_transform)
+        self._initial_transform = initial_transform   # for spurious-event guard
+        self._transform_init_done = False             # becomes True after first real change
         self._geo_id_column = geo_id_column
         self._title = title
         self._map_height = map_height
@@ -541,7 +543,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if init_vmin == init_vmax:
             init_vmax = init_vmin + 1.0
 
-        init_series = reader.get_slice(reader.time_index[0])
+        init_series = self._reader.get_slice(self._reader.time_index[0])
         init_values = [
             float(init_series.get(gid, np.nan)) for gid in self._geo_ids
         ]
@@ -601,7 +603,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_both",
             min_height=map_height,
             title=f"{title + ' \u2014 ' if title else ''}"
-                  f"{reader.time_index[0].strftime('%Y-%m-%d %H:%M')}",
+                  f"{self._reader.time_index[0].strftime('%Y-%m-%d %H:%M')}",
             tools="pan,wheel_zoom,box_zoom,reset,save",
             active_scroll="wheel_zoom",
         )
@@ -699,12 +701,16 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # ----------------------------------------------------------------
         # 8. Control widgets.
         #
-        # Time slider: DiscreteSlider whose options are the actual datetime
-        # strings.  The user sees readable timestamps instead of integers.
-        # The slider value is the timestamp string; the index is derived
-        # from the options list position inside _on_slider_change.
+        # Use self._reader.time_index (the potentially-transformed reader)
+        # rather than the raw 'reader' parameter so the slider options and
+        # DatetimePicker range reflect the ACTUAL output time resolution.
+        # When initial_transform is "none" these are identical; when it is
+        # e.g. "Rolling 14 D → Daily mean" self._reader has a daily
+        # time_index while 'reader' has the raw hourly one.  Using the
+        # wrong one here is the root cause of the "slider index N out of
+        # range [0, M)" warnings when loading from a saved config.
         # ----------------------------------------------------------------
-        ti = reader.time_index
+        ti = self._reader.time_index
         # DiscretePlayer with integer indices 0..N-1 — compact options list,
         # no per-step string serialisation overhead.  Built-in play/pause/
         # loop controls drive the animation; the Bokeh Div shows the resolved
@@ -1117,7 +1123,27 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if self._syncing:
             return
         idx = int(event.new)
-        ts = self._reader.time_index[idx]
+        ti = self._reader.time_index
+        if len(ti) == 0:
+            return
+        if not (0 <= idx < len(ti)):
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "GeoAnimatorManager: slider index %d is out of range "
+                "[0, %d) — stale browser session value; resetting to 0. "
+                "This typically happens when a browser tab reconnects to a "
+                "new server session that has a shorter dataset.",
+                idx, len(ti),
+            )
+            # Snap to the beginning and push that value back to the browser
+            # so the slider thumb and the displayed timestamp are in sync.
+            idx = 0
+            self._syncing = True
+            try:
+                self._time_slider.value = idx
+            finally:
+                self._syncing = False
+        ts = ti[idx]
         ts_str = ts.strftime("%Y-%m-%d %H:%M")
         # Sync DatetimePicker without causing a feedback loop.
         self._syncing = True
@@ -1340,11 +1366,43 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         while the computation is in progress.
         """
         import threading
+        import logging as _log
+
+        new_name = event.new
+
+        # Guard against the spurious "none" event that Panel fires the first
+        # time the browser connects to sync widget state.  When loading from a
+        # saved config (initial_transform != "none"), the Bokeh Select model
+        # briefly reports value="none" (the first option / default) before the
+        # Python-set value propagates to the browser.  Applying this spurious
+        # "none" would silently reset the reader to the raw (untransformed)
+        # data — the symptom reported as "doing none transform on init".
+        #
+        # We suppress this ONLY once (first call) when the incoming value is
+        # "none" but the initially configured transform was non-"none".  All
+        # subsequent "none" selections (user-initiated) are applied normally.
+        if (not self._transform_init_done
+                and new_name == "none"
+                and self._initial_transform not in (None, "", "none")):
+            _log.getLogger(__name__).debug(
+                "_on_transform_change: suppressing spurious 'none' event on "
+                "browser connect (initial_transform=%r); restoring widget label",
+                self._initial_transform,
+            )
+            self._transform_init_done = True   # set before restore to skip guard on re-entry
+            # Restore the widget label so the dropdown shows the correct
+            # transform name.  Setting this value triggers a recursive call to
+            # _on_transform_change with initial_transform (guard is skipped
+            # because _transform_init_done is now True), which rebuilds the
+            # reader under the document lock and loads frame 0 — making the
+            # data, the slider options, and the dropdown label all consistent.
+            self._transform_select.value = self._initial_transform
+            return
+        self._transform_init_done = True
 
         current_ts = pd.Timestamp(
             self._reader.time_index[self._time_slider.value]
         )
-        new_name = event.new
 
         # Show loading indicator immediately (Panel param — safe from watcher).
         self._chart_pane.loading = True

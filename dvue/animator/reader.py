@@ -867,6 +867,16 @@ class StreamingTransformedSlicingReader(SlicingReader):
             raw_end = int(raw_ti.searchsorted(raw_upper_ts, side="left"))
             raw_end = min(n_raw, raw_end)
 
+            # Extend the raw fetch by *_overlap* steps on each side.
+            # For simple resamples _overlap == 0 so there is no change.
+            # For composed transforms such as "Rolling 14 D → Daily mean" the
+            # rolling window needs raw context beyond the output window before
+            # the aggregate step is applied; without it the boundary output
+            # days are computed from fewer than 14 days of raw data.
+            if self._overlap > 0:
+                raw_start = max(0, raw_start - self._overlap)
+                raw_end = min(n_raw, raw_end + self._overlap)
+
             if raw_start >= raw_end:
                 return pd.DataFrame(
                     np.nan,
