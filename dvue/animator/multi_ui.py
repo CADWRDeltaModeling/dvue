@@ -702,12 +702,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def collect_state(self) -> dict:
         """Return a complete dict representing the current UI state + metadata."""
         meta = self._animate_meta
-        cli_keys = meta.get("_transform_cli_keys", {})
-        transform_display = (
-            self._transform_select.value
-            if self._transform_options
-            else "none"
-        )
         state: dict = {
             "version": 1,
             "mode": meta.get("mode", "multi"),
@@ -718,7 +712,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "shapefile": meta.get("shapefile"),
             "shapefile_b": meta.get("shapefile_b"),
             "channel_id_column": meta.get("channel_id_column"),
-            "transform": cli_keys.get(transform_display, "none"),
             "colormap": self.colormap,
             "vmin": self.vmin,
             "vmax": self.vmax,
@@ -791,7 +784,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             else:
                 from .reader import TransformedSlicingReader as _TFR
                 reader = _TFR(reader, spec_or_fn)
-        return BufferedSlicingReader(reader, chunk_size=self._buffer_chunk_size)
+        return BufferedSlicingReader(
+            reader, chunk_size=self._buffer_chunk_size, prefetch=True
+        )
 
     def _get_diff_reader(self) -> SlicingReader:
         """Return a buffered DiffSlicingReader (constructed lazily, cached)."""
@@ -800,7 +795,10 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 self._base_reader_a, self._base_reader_b,
             )
         return BufferedSlicingReader(
-            self._diff_reader_cache, chunk_size=self._buffer_chunk_size)
+            self._diff_reader_cache,
+            chunk_size=self._buffer_chunk_size,
+            prefetch=True,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1256,11 +1254,13 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def _on_transform_change(self, event: param.parameterized.Event) -> None:
         """Apply a new transform to both readers, showing a loading indicator."""
         import threading
+        import logging as _log
+
+        new_name = event.new
 
         current_ts = pd.Timestamp(
             self._reader_a.time_index[self._time_slider.value]
         )
-        new_name = event.new
 
         # Show loading spinner on all three map panes immediately.
         for pane in (self._pane_a, self._pane_b, self._pane_diff):

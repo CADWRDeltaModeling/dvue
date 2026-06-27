@@ -49,6 +49,7 @@ Example HDF5 skeleton::
 from __future__ import annotations
 
 import abc
+import threading
 from typing import Optional, Union
 
 import numpy as np
@@ -276,6 +277,23 @@ class BufferedSlicingReader(SlicingReader):
     a new chunk is loaded via :meth:`~SlicingReader.get_slice_range` — a
     single I/O call that reads all steps at once (crucial for HDF5).
 
+    Prefetching (double-buffering)
+    ------------------------------
+    When ``prefetch=True`` the reader keeps a **second** buffer holding the
+    chunk *adjacent* to the current one in the direction of playback.  As the
+    cursor nears the edge of the current chunk a daemon thread loads the next
+    chunk via :meth:`~SlicingReader.get_slice_range` **off the calling
+    thread**, so the (potentially slow) HDF5 read + transform never blocks the
+    UI/IOLoop.  When the cursor crosses into the prefetched range the second
+    buffer is promoted to current with no I/O on the calling thread.
+
+    This is the key to smooth playback for streaming-transform stacks
+    (e.g. Godin → daily): without it, every chunk boundary forces a multi-
+    second synchronous filter computation on the IOLoop, freezing the browser
+    "every few days" of model time.  A synchronous load is still used for the
+    cold start and for random seeks (DatetimePicker jumps) that land outside
+    both buffers.
+
     Parameters
     ----------
     reader : SlicingReader
@@ -283,9 +301,13 @@ class BufferedSlicingReader(SlicingReader):
     chunk_size : int, optional
         Number of time steps to buffer at once.  Default ``200``.
     refill_margin : float, optional
-        Fraction of *chunk_size* from either edge that triggers a refill.
-        Default ``0.15`` — refill when within 30 steps of the edge for a
-        200-step chunk.
+        Fraction of *chunk_size* from either edge that triggers a refill (or,
+        in prefetch mode, a background prefetch).  Default ``0.15`` — act when
+        within 30 steps of the edge for a 200-step chunk.
+    prefetch : bool, optional
+        Enable asynchronous double-buffering.  Default ``False`` (preserves the
+        original synchronous behaviour for backward compatibility).  UI layers
+        that drive playback should pass ``True``.
     """
 
     def __init__(
@@ -293,13 +315,22 @@ class BufferedSlicingReader(SlicingReader):
         reader: SlicingReader,
         chunk_size: int = 200,
         refill_margin: float = 0.15,
+        prefetch: bool = False,
     ) -> None:
         self._inner = reader
         self._chunk_size = chunk_size
         self._margin = max(1, int(chunk_size * refill_margin))
+        self._prefetch = bool(prefetch)
         self._buf: Optional[pd.DataFrame] = None   # shape (chunk, geo_ids)
         self._buf_start: int = 0
         self._buf_end: int = 0
+        # Prefetch (double-buffer) state — guarded by ``_lock``.
+        self._next_buf: Optional[pd.DataFrame] = None
+        self._next_start: int = 0
+        self._next_end: int = 0
+        self._prefetching: bool = False
+        self._last_idx: int = 0
+        self._lock = threading.Lock()
         super().__init__(reader.time_index)
 
     @property
@@ -314,33 +345,129 @@ class BufferedSlicingReader(SlicingReader):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _load_chunk(self, center_idx: int) -> None:
+    def _chunk_bounds(self, center_idx: int) -> tuple:
+        """Return clamped ``(start, end)`` for a chunk centred on *center_idx*."""
         n = len(self._time_index)
         half = self._chunk_size // 2
         start = max(0, center_idx - half)
         end = min(n, start + self._chunk_size)
         start = max(0, end - self._chunk_size)      # re-clamp if at end
+        return start, end
+
+    def _load_chunk(self, center_idx: int) -> None:
+        """Synchronously load the chunk centred on *center_idx* into ``_buf``."""
+        start, end = self._chunk_bounds(center_idx)
         self._buf = self._inner.get_slice_range(start, end)
         self._buf_start = start
         self._buf_end = end
 
     def _needs_refill(self, idx: int) -> bool:
-        return (
-            self._buf is None
-            or idx < self._buf_start
-            or idx >= self._buf_end
-            or idx < self._buf_start + self._margin
-            or idx >= self._buf_end - self._margin
-        )
+        """True when a (synchronous) reload is required for *idx*.
+
+        A reload is needed when *idx* is outside the current buffer, or within
+        ``_margin`` of an edge **that is not the file boundary** (there is more
+        data to load in that direction).  Being within the margin of a clamped
+        file edge does *not* trigger a reload — that previously caused the same
+        boundary chunk to be re-read on every frame near the start/end of the
+        dataset.
+        """
+        if self._buf is None or idx < self._buf_start or idx >= self._buf_end:
+            return True
+        n = len(self._time_index)
+        if idx < self._buf_start + self._margin and self._buf_start > 0:
+            return True
+        if idx >= self._buf_end - self._margin and self._buf_end < n:
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Prefetch (double-buffer) helpers
+    # ------------------------------------------------------------------
+
+    def _try_promote(self, idx: int) -> bool:
+        """Promote the prefetched buffer to current when it covers *idx*."""
+        with self._lock:
+            if (
+                self._next_buf is not None
+                and self._next_start <= idx < self._next_end
+            ):
+                self._buf = self._next_buf
+                self._buf_start = self._next_start
+                self._buf_end = self._next_end
+                self._next_buf = None
+                return True
+            return False
+
+    def _clear_next(self) -> None:
+        """Discard any prefetched buffer (e.g. after a random seek)."""
+        with self._lock:
+            self._next_buf = None
+
+    def _maybe_prefetch(self, idx: int, direction: int) -> None:
+        """Start a background load of the adjacent chunk when near the edge."""
+        n = len(self._time_index)
+        if direction >= 0:
+            # Travelling forward — prefetch the chunk after the current one.
+            if idx < self._buf_end - self._margin or self._buf_end >= n:
+                return
+            target_start = self._buf_end
+        else:
+            # Travelling backward — prefetch the chunk before the current one.
+            if idx >= self._buf_start + self._margin or self._buf_start <= 0:
+                return
+            target_start = max(0, self._buf_start - self._chunk_size)
+
+        with self._lock:
+            if self._prefetching:
+                return
+            if self._next_buf is not None and self._next_start == target_start:
+                return  # already prefetched
+            self._prefetching = True
+        threading.Thread(
+            target=self._prefetch_worker, args=(target_start,), daemon=True
+        ).start()
+
+    def _prefetch_worker(self, target_start: int) -> None:
+        """Load a chunk in the background and store it as ``_next_buf``."""
+        chunk = None
+        start = end = 0
+        try:
+            n = len(self._time_index)
+            start = max(0, min(target_start, n))
+            end = min(n, start + self._chunk_size)
+            start = max(0, end - self._chunk_size)
+            chunk = self._inner.get_slice_range(start, end)
+        except Exception:
+            chunk = None
+        with self._lock:
+            if chunk is not None:
+                self._next_buf = chunk
+                self._next_start = start
+                self._next_end = end
+            self._prefetching = False
 
     # ------------------------------------------------------------------
     # SlicingReader interface
     # ------------------------------------------------------------------
 
     def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
-        idx = self._time_index.get_indexer([timestamp], method="nearest")[0]
-        if self._needs_refill(idx):
-            self._load_chunk(idx)
+        idx = int(self._time_index.get_indexer([timestamp], method="nearest")[0])
+        if not self._prefetch:
+            if self._needs_refill(idx):
+                self._load_chunk(idx)
+            return self._buf.iloc[idx - self._buf_start].astype(float)
+
+        # ----- prefetch mode (called from a single consumer thread) -----
+        if self._buf is None or not (self._buf_start <= idx < self._buf_end):
+            # Try the prefetched buffer first; fall back to a synchronous load
+            # for cold start / random seeks that land outside both buffers.
+            if not self._try_promote(idx):
+                self._load_chunk(idx)
+                self._clear_next()
+
+        direction = 1 if idx >= self._last_idx else -1
+        self._last_idx = idx
+        self._maybe_prefetch(idx, direction)
         return self._buf.iloc[idx - self._buf_start].astype(float)
 
     def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:

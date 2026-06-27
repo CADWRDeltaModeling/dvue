@@ -483,6 +483,173 @@ class TestBufferedSlicingReader:
 
 
 # ===========================================================================
+# BufferedSlicingReader async prefetch (double-buffer) tests
+# ===========================================================================
+
+
+class _InstrumentedReader:
+    """Wrap an InMemorySlicingReader; count and optionally delay range reads.
+
+    Used to simulate slow HDF5 + transform chunk loads deterministically so
+    the prefetch behaviour can be asserted without real data files.
+    """
+
+    def __init__(self, df: pd.DataFrame, delay: float = 0.0):
+        from dvue.animator import InMemorySlicingReader
+
+        self._inner = InMemorySlicingReader(df)
+        self._delay = float(delay)
+        self.range_calls = 0
+        self.rows_read = 0
+        # Mirror the SlicingReader surface BufferedSlicingReader relies on.
+        self.time_index = self._inner.time_index
+
+    @property
+    def vmin(self):
+        return self._inner.vmin
+
+    @property
+    def vmax(self):
+        return self._inner.vmax
+
+    def get_slice(self, ts):
+        return self._inner.get_slice(ts)
+
+    def get_slice_range(self, start_idx, end_idx):
+        self.range_calls += 1
+        self.rows_read += max(0, end_idx - start_idx)
+        if self._delay:
+            import time
+            time.sleep(self._delay)
+        return self._inner.get_slice_range(start_idx, end_idx)
+
+
+class TestBufferedReaderPrefetch:
+    """Functional correctness of the async double-buffer + boundary fix."""
+
+    @pytest.fixture
+    def long_df(self):
+        idx = pd.date_range("2020-01-01", periods=120, freq="D")
+        rng = np.random.default_rng(11)
+        return pd.DataFrame(
+            rng.uniform(0.0, 1.0, size=(120, 4)), index=idx, columns=[1, 2, 3, 4]
+        )
+
+    def test_prefetch_parity_with_sync(self, long_df):
+        """Prefetch mode returns identical values to a plain in-memory read."""
+        import time
+        from dvue.animator import BufferedSlicingReader, InMemorySlicingReader
+
+        mem = InMemorySlicingReader(long_df)
+        buf = BufferedSlicingReader(
+            _InstrumentedReader(long_df), chunk_size=20, prefetch=True
+        )
+        for ts in long_df.index:
+            pd.testing.assert_series_equal(buf.get_slice(ts), mem.get_slice(ts))
+            time.sleep(0.001)
+
+    def test_boundary_no_repeated_reload_sync(self, long_df):
+        """Sweeping near the start must not reload the same clamped chunk.
+
+        Regression guard for the boundary re-refill bug: with the buffer
+        clamped at index 0, frames within ``margin`` of the left edge must be
+        served from the buffer, not trigger a fresh ``get_slice_range`` each
+        frame.
+        """
+        from dvue.animator import BufferedSlicingReader
+
+        inst = _InstrumentedReader(long_df)
+        buf = BufferedSlicingReader(inst, chunk_size=20, refill_margin=0.2)
+        for ts in long_df.index[:8]:
+            buf.get_slice(ts)
+        # Only the initial load — buffer [0, 20) covers all eight frames.
+        assert inst.range_calls == 1
+
+    def test_random_seek_falls_back_to_sync_load(self, long_df):
+        """A jump outside both buffers triggers a synchronous load."""
+        from dvue.animator import BufferedSlicingReader
+
+        inst = _InstrumentedReader(long_df)
+        buf = BufferedSlicingReader(inst, chunk_size=20, prefetch=True)
+        buf.get_slice(long_df.index[5])
+        calls_after_first = inst.range_calls
+        # Far jump beyond the current buffer -> must reload.
+        buf.get_slice(long_df.index[100])
+        assert inst.range_calls > calls_after_first
+        # Value is still correct after the seek.
+        from dvue.animator import InMemorySlicingReader
+
+        mem = InMemorySlicingReader(long_df)
+        pd.testing.assert_series_equal(
+            buf.get_slice(long_df.index[100]), mem.get_slice(long_df.index[100])
+        )
+
+    def test_forward_sweep_uses_few_loads(self, long_df):
+        """A steady forward sweep loads ~len/chunk chunks, not one per frame."""
+        import time
+        from dvue.animator import BufferedSlicingReader
+
+        inst = _InstrumentedReader(long_df)
+        buf = BufferedSlicingReader(
+            inst, chunk_size=20, refill_margin=0.2, prefetch=True
+        )
+        for ts in long_df.index:
+            buf.get_slice(ts)
+            time.sleep(0.003)  # let prefetch threads complete between frames
+        # 120 frames / 20 per chunk ≈ 6 chunks; allow generous slack.
+        assert inst.range_calls <= 14
+
+
+@pytest.mark.performance
+class TestBufferedReaderPrefetchPerformance:
+    """Confirm async prefetch keeps worst-frame latency low under slow I/O.
+
+    Run with:  pytest -m performance
+    """
+
+    def _make_df(self, n=200):
+        idx = pd.date_range("2015-01-01", periods=n, freq="D")
+        rng = np.random.default_rng(3)
+        return pd.DataFrame(
+            rng.uniform(0.0, 1.0, size=(n, 16)), index=idx, columns=list(range(16))
+        )
+
+    def test_prefetch_reduces_worst_frame_latency(self):
+        import time
+        from dvue.animator import BufferedSlicingReader
+
+        df = self._make_df()
+        delay = 0.03  # simulated HDF5 + transform cost per chunk load
+
+        # --- synchronous buffer: pays the full load on every refill frame ---
+        sync = BufferedSlicingReader(
+            _InstrumentedReader(df, delay=delay), chunk_size=40, prefetch=False
+        )
+        sync_max = 0.0
+        for ts in df.index:
+            t0 = time.perf_counter()
+            sync.get_slice(ts)
+            sync_max = max(sync_max, time.perf_counter() - t0)
+
+        # --- prefetch buffer: load happens off-thread during playback ---
+        pre = BufferedSlicingReader(
+            _InstrumentedReader(df, delay=delay), chunk_size=40, prefetch=True
+        )
+        pre.get_slice(df.index[0])  # warm the first chunk
+        pre_max = 0.0
+        for ts in df.index:
+            t0 = time.perf_counter()
+            pre.get_slice(ts)
+            pre_max = max(pre_max, time.perf_counter() - t0)
+            time.sleep(delay)  # simulate the player's frame interval
+
+        # The synchronous reader stalls for ~delay on refill frames; the
+        # prefetch reader should never pay that cost on the consumer thread.
+        assert sync_max >= delay
+        assert pre_max < sync_max * 0.6
+
+
+# ===========================================================================
 # TransformedSlicingReader tests
 # ===========================================================================
 

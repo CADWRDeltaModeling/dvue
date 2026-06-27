@@ -81,6 +81,9 @@ dvue = ["*.html"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --cov=dvue --cov-report=term-missing"
+markers = [
+    "performance: benchmarks that measure runtime (run with -m performance)",
+]
 
 [tool.black]
 line-length = 100

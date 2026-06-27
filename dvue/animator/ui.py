@@ -486,8 +486,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._transform_options = transform_options or {}
         self._buffer_chunk_size = buffer_chunk_size
         self._reader = self._setup_reader(initial_transform)
-        self._initial_transform = initial_transform   # for spurious-event guard
-        self._transform_init_done = False             # becomes True after first real change
         self._geo_id_column = geo_id_column
         self._title = title
         self._map_height = map_height
@@ -544,6 +542,19 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             init_vmax = init_vmin + 1.0
 
         init_series = self._reader.get_slice(self._reader.time_index[0])
+        _init_step = 0
+        # Filter-based transforms (e.g. Godin) produce NaN for the first
+        # ~33.5 h of output because the file has no before-data for warmup.
+        # Skip forward to the first frame with at least one finite value so
+        # the map initialises with meaningful colours rather than all-grey.
+        if len(init_series) > 0 and init_series.isna().all():
+            _ti0 = self._reader.time_index
+            for _s in range(1, min(len(_ti0), 50)):
+                _probe = self._reader.get_slice(_ti0[_s])
+                if _probe.notna().any():
+                    init_series = _probe
+                    _init_step = _s
+                    break
         init_values = [
             float(init_series.get(gid, np.nan)) for gid in self._geo_ids
         ]
@@ -603,7 +614,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_both",
             min_height=map_height,
             title=f"{title + ' \u2014 ' if title else ''}"
-                  f"{self._reader.time_index[0].strftime('%Y-%m-%d %H:%M')}",
+                  f"{self._reader.time_index[_init_step].strftime('%Y-%m-%d %H:%M')}",
             tools="pan,wheel_zoom,box_zoom,reset,save",
             active_scroll="wheel_zoom",
         )
@@ -620,15 +631,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # Two separate HoverTools so each renderer gets the right tooltip:
         # - data_hover: restricted to the data (channel) renderer
         # - contour_hover: restricted to the contour renderer (shows level)
-        data_hover = HoverTool(
-            tooltips=[
-                ("Channel", "@geo_id"),
-                ("Value",   "@_value{0.3f}"),
-            ],
-            point_policy="follow_mouse",
-        )
-        p.add_tools(data_hover)
-
         color_field = {"field": "_value", "transform": self._bk_mapper}
         if self._geom_type == "point":
             self._data_renderer = p.scatter(
@@ -646,6 +648,19 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 fill_color=color_field,
                 line_color="white", line_width=0.5, line_alpha=0.2,
             )
+
+        # Restrict to the channel data renderer only — prevents the tooltip
+        # firing with "???" on overlay renderers (e.g. flow-arrow patches)
+        # that don't have @geo_id / @_value columns.
+        data_hover = HoverTool(
+            renderers=[self._data_renderer],
+            tooltips=[
+                ("Channel", "@geo_id"),
+                ("Value",   "@_value{0.3f}"),
+            ],
+            point_policy="follow_mouse",
+        )
+        p.add_tools(data_hover)
 
         colorbar = ColorBar(
             color_mapper=self._bk_mapper,
@@ -716,14 +731,14 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # loop controls drive the animation; the Bokeh Div shows the resolved
         # timestamp so the user sees readable dates throughout.
         self._time_div = Div(
-            text=f"<b>{ti[0].strftime('%Y-%m-%d %H:%M')}</b>",
+            text=f"<b>{ti[_init_step].strftime('%Y-%m-%d %H:%M')}</b>",
             styles={"font-size": "13px", "margin": "2px 0 6px 0"},
         )
         self._time_label_pane = pn.pane.Bokeh(self._time_div, sizing_mode="stretch_width")
         self._time_slider = pn.widgets.DiscretePlayer(
             name="",
             options=list(range(len(ti))),
-            value=0,
+            value=_init_step,
             interval=500,            # ms between steps when playing
             loop_policy="once",
             show_value=False,        # we show timestamp in the Div above
@@ -733,7 +748,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # Synced bidirectionally with the DiscretePlayer (snaps to nearest step).
         self._datetime_picker = pn.widgets.DatetimePicker(
             name="Go to date/time",
-            value=ti[0].to_pydatetime(),
+            value=ti[_init_step].to_pydatetime(),
             start=ti[0].to_pydatetime(),
             end=ti[-1].to_pydatetime(),
             sizing_mode="stretch_width",
@@ -1263,7 +1278,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
             else:
                 reader = TransformedSlicingReader(reader, spec_or_fn)
-        return BufferedSlicingReader(reader, chunk_size=self._buffer_chunk_size)
+        return BufferedSlicingReader(
+            reader, chunk_size=self._buffer_chunk_size, prefetch=True
+        )
 
     # ------------------------------------------------------------------
     # Config save / load state
@@ -1279,13 +1296,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         fields will be empty.
         """
         meta = self._animate_meta
-        cli_keys = meta.get("_transform_cli_keys", {})
-
-        transform_display = (
-            self._transform_select.value
-            if self._transform_options
-            else "none"
-        )
 
         state: dict = {
             "version": 1,
@@ -1296,7 +1306,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             "location": meta.get("location", "both"),
             "shapefile": meta.get("shapefile"),
             "channel_id_column": meta.get("channel_id_column"),
-            "transform": cli_keys.get(transform_display, "none"),
             "colormap": self.colormap,
             "vmin": self.vmin,
             "vmax": self.vmax,
@@ -1369,36 +1378,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         import logging as _log
 
         new_name = event.new
-
-        # Guard against the spurious "none" event that Panel fires the first
-        # time the browser connects to sync widget state.  When loading from a
-        # saved config (initial_transform != "none"), the Bokeh Select model
-        # briefly reports value="none" (the first option / default) before the
-        # Python-set value propagates to the browser.  Applying this spurious
-        # "none" would silently reset the reader to the raw (untransformed)
-        # data — the symptom reported as "doing none transform on init".
-        #
-        # We suppress this ONLY once (first call) when the incoming value is
-        # "none" but the initially configured transform was non-"none".  All
-        # subsequent "none" selections (user-initiated) are applied normally.
-        if (not self._transform_init_done
-                and new_name == "none"
-                and self._initial_transform not in (None, "", "none")):
-            _log.getLogger(__name__).debug(
-                "_on_transform_change: suppressing spurious 'none' event on "
-                "browser connect (initial_transform=%r); restoring widget label",
-                self._initial_transform,
-            )
-            self._transform_init_done = True   # set before restore to skip guard on re-entry
-            # Restore the widget label so the dropdown shows the correct
-            # transform name.  Setting this value triggers a recursive call to
-            # _on_transform_change with initial_transform (guard is skipped
-            # because _transform_init_done is now True), which rebuilds the
-            # reader under the document lock and loads frame 0 — making the
-            # data, the slider options, and the dropdown label all consistent.
-            self._transform_select.value = self._initial_transform
-            return
-        self._transform_init_done = True
 
         current_ts = pd.Timestamp(
             self._reader.time_index[self._time_slider.value]
