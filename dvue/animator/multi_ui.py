@@ -332,6 +332,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._diff_reader_cache = None
         self._syncing = False
         self._contour_color = True
+        self._frame_seq = 0
 
         # ----------------------------------------------------------------
         # 2. Readers (transform + buffer)
@@ -898,39 +899,45 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def _update_map_a(self, idx: int, ts: pd.Timestamp) -> None:
         series = self._reader_a.get_slice_nearest(ts)
         vals = series.reindex(self._geo_ids_a).fillna(np.nan).tolist()
-        cvals = vals
-        self._src_a.patch({
-            "_value": [(slice(None), vals)],
-            "_color_value": [(slice(None), cvals)],
-        })
-        self._fig_a.title.text = (
-            f"{self._title_a} \u2014 {ts.strftime('%Y-%m-%d %H:%M')}"
-        )
-        if self._ctour_a.renderer.visible:
-            eff_vmin, eff_vmax = self._current_clim()
-            self._recompute_contours(
-                self._ctour_a, vals, eff_vmin, eff_vmax, self.colormap)
+        self._render_map_a_vals(ts, ts.strftime("%Y-%m-%d %H:%M"), vals)
 
     def _update_map_b(self, idx: int, ts: pd.Timestamp) -> None:
         series = self._reader_b.get_slice_nearest(ts)
         vals = series.reindex(self._geo_ids_b).fillna(np.nan).tolist()
-        cvals = vals
-        self._src_b.patch({
-            "_value": [(slice(None), vals)],
-            "_color_value": [(slice(None), cvals)],
-        })
-        self._fig_b.title.text = (
-            f"{self._title_b} \u2014 {ts.strftime('%Y-%m-%d %H:%M')}"
-        )
-        if self._ctour_b.renderer.visible:
-            eff_vmin, eff_vmax = self._current_clim()
-            self._recompute_contours(
-                self._ctour_b, vals, eff_vmin, eff_vmax, self.colormap)
+        self._render_map_b_vals(ts, ts.strftime("%Y-%m-%d %H:%M"), vals)
 
     def _update_diff_map(self, ts: pd.Timestamp) -> None:
         diff_r = self._get_diff_reader()
         series = diff_r.get_slice_nearest(ts)
         vals = series.reindex(self._geo_ids_a).fillna(np.nan).tolist()
+        self._render_diff_vals(ts, ts.strftime("%Y-%m-%d %H:%M"), vals)
+
+    def _render_map_a_vals(self, ts: pd.Timestamp, ts_str: str, vals: list) -> None:
+        """Render pre-fetched A values — must run under document lock."""
+        self._src_a.patch({
+            "_value": [(slice(None), vals)],
+            "_color_value": [(slice(None), vals)],
+        })
+        self._fig_a.title.text = f"{self._title_a} \u2014 {ts_str}"
+        if self._ctour_a.renderer.visible:
+            eff_vmin, eff_vmax = self._current_clim()
+            self._recompute_contours(
+                self._ctour_a, vals, eff_vmin, eff_vmax, self.colormap)
+
+    def _render_map_b_vals(self, ts: pd.Timestamp, ts_str: str, vals: list) -> None:
+        """Render pre-fetched B values — must run under document lock."""
+        self._src_b.patch({
+            "_value": [(slice(None), vals)],
+            "_color_value": [(slice(None), vals)],
+        })
+        self._fig_b.title.text = f"{self._title_b} \u2014 {ts_str}"
+        if self._ctour_b.renderer.visible:
+            eff_vmin, eff_vmax = self._current_clim()
+            self._recompute_contours(
+                self._ctour_b, vals, eff_vmin, eff_vmax, self.colormap)
+
+    def _render_diff_vals(self, ts: pd.Timestamp, ts_str: str, vals: list) -> None:
+        """Render pre-fetched diff values — must run under document lock."""
         self._src_diff.data = {
             "xs": self._src_a.data["xs"],
             "ys": self._src_a.data["ys"],
@@ -938,7 +945,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "_color_value": vals,
             "geo_id": self._geo_ids_a,
         }
-        ts_str = ts.strftime("%Y-%m-%d %H:%M")
         self._fig_diff.title.text = (
             f"{self._title_a} \u2212 {self._title_b} \u2014 {ts_str}"
         )
@@ -989,11 +995,51 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._datetime_picker.value = ts.to_pydatetime()
         finally:
             self._syncing = False
+
         doc = self._active_doc()
+        self._frame_seq += 1
+        seq = self._frame_seq
+
         if doc is not None:
-            doc.add_next_tick_callback(
-                lambda _i=idx, _s=ts_str: self._apply_frame(_i, _s))
+            import threading
+            _ra = self._reader_a
+            _rb = self._reader_b
+            _ga = self._geo_ids_a
+            _gb = self._geo_ids_b
+            _show_diff = self.show_diff
+
+            def _bg() -> None:
+                """Fetch frame data off the IOLoop; apply under document lock."""
+                try:
+                    if _show_diff:
+                        diff_r = self._get_diff_reader()
+                        series = diff_r.get_slice_nearest(ts)
+                        vals_diff = series.reindex(_ga).fillna(np.nan).tolist()
+                        fetched = ("diff", vals_diff)
+                    else:
+                        series_a = _ra.get_slice_nearest(ts)
+                        series_b = _rb.get_slice_nearest(ts)
+                        vals_a = series_a.reindex(_ga).fillna(np.nan).tolist()
+                        vals_b = series_b.reindex(_gb).fillna(np.nan).tolist()
+                        fetched = ("ab", vals_a, vals_b)
+                except Exception:
+                    return
+
+                def _ui() -> None:
+                    if self._frame_seq != seq:
+                        return  # a newer slider event arrived; drop stale result
+                    self._time_div.text = f"<b>{ts_str}</b>"
+                    if fetched[0] == "diff":
+                        self._render_diff_vals(ts, ts_str, fetched[1])
+                    else:
+                        self._render_map_a_vals(ts, ts_str, fetched[1])
+                        self._render_map_b_vals(ts, ts_str, fetched[2])
+
+                doc.add_next_tick_callback(_ui)
+
+            threading.Thread(target=_bg, daemon=True).start()
         else:
+            # No document (tests / Jupyter) — run synchronously.
             self._apply_frame(idx, ts_str)
 
     def _on_datetime_picker_change(self, event: param.parameterized.Event) -> None:
@@ -1008,10 +1054,48 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._syncing = False
         actual_ts = self._reader_a.time_index[idx]
         ts_str = actual_ts.strftime("%Y-%m-%d %H:%M")
+
         doc = self._active_doc()
+        self._frame_seq += 1
+        seq = self._frame_seq
+
         if doc is not None:
-            doc.add_next_tick_callback(
-                lambda _i=idx, _s=ts_str: self._apply_frame(_i, _s))
+            import threading
+            _ra = self._reader_a
+            _rb = self._reader_b
+            _ga = self._geo_ids_a
+            _gb = self._geo_ids_b
+            _show_diff = self.show_diff
+
+            def _bg() -> None:
+                try:
+                    if _show_diff:
+                        diff_r = self._get_diff_reader()
+                        series = diff_r.get_slice_nearest(actual_ts)
+                        vals_diff = series.reindex(_ga).fillna(np.nan).tolist()
+                        fetched = ("diff", vals_diff)
+                    else:
+                        series_a = _ra.get_slice_nearest(actual_ts)
+                        series_b = _rb.get_slice_nearest(actual_ts)
+                        vals_a = series_a.reindex(_ga).fillna(np.nan).tolist()
+                        vals_b = series_b.reindex(_gb).fillna(np.nan).tolist()
+                        fetched = ("ab", vals_a, vals_b)
+                except Exception:
+                    return
+
+                def _ui() -> None:
+                    if self._frame_seq != seq:
+                        return
+                    self._time_div.text = f"<b>{ts_str}</b>"
+                    if fetched[0] == "diff":
+                        self._render_diff_vals(actual_ts, ts_str, fetched[1])
+                    else:
+                        self._render_map_a_vals(actual_ts, ts_str, fetched[1])
+                        self._render_map_b_vals(actual_ts, ts_str, fetched[2])
+
+                doc.add_next_tick_callback(_ui)
+
+            threading.Thread(target=_bg, daemon=True).start()
         else:
             self._apply_frame(idx, ts_str)
 
@@ -1257,6 +1341,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         import logging as _log
 
         new_name = event.new
+        self._frame_seq += 1  # invalidate any in-flight slider fetch threads
 
         current_ts = pd.Timestamp(
             self._reader_a.time_index[self._time_slider.value]
@@ -1266,6 +1351,10 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         for pane in (self._pane_a, self._pane_b, self._pane_diff):
             pane.loading = True
         self._transform_select.disabled = True
+        # Pause playback while both readers are being rebuilt.
+        _was_playing = self._time_slider.direction == 1
+        self._time_slider.pause()
+        self._time_slider.loading = True
 
         doc = self._active_doc()
 
@@ -1301,7 +1390,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
                 for pane in (self._pane_a, self._pane_b, self._pane_diff):
                     pane.loading = False
+                self._time_slider.loading = False
                 self._transform_select.disabled = False
+                # Resume playback only if it was running before the transform change.
+                if _was_playing:
+                    self._time_slider.play()
 
             if doc is not None:
                 doc.add_next_tick_callback(_apply)

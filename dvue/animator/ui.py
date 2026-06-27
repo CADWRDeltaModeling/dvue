@@ -493,6 +493,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._extra_frame_callbacks: list = []
         self._transform_callbacks: list = []
         self._extra_save_callbacks: list = []
+        self._frame_seq = 0
 
         # ----------------------------------------------------------------
         # 2. Project GDF to EPSG:3857 once.
@@ -1057,11 +1058,17 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         _clip_contour_segment(seg, lvl, self._contour_clip_zone, xs_out, ys_out, lvl_out)
 
     def _load_frame(self, step_idx: int) -> None:
-        """Fast path: patch _value, optionally update contours and X2 line."""
+        """Synchronous fetch + render — must run under document lock."""
         ts = self._reader.time_index[step_idx]
         series = self._reader.get_slice_nearest(ts)
         new_values = series.reindex(self._geo_ids).fillna(np.nan).tolist()
+        self._render_frame_data(step_idx, ts, ts.strftime("%Y-%m-%d %H:%M"), new_values)
 
+    def _render_frame_data(
+        self, step_idx: int, ts: pd.Timestamp, ts_str: str, new_values: list
+    ) -> None:
+        """Apply pre-fetched frame data to Bokeh models — must run under document lock."""
+        self._time_div.text = f"<b>{ts_str}</b>"
         self._bk_source.patch({"_value": [(slice(None), new_values)]})
 
         if self._contour_renderer.visible:
@@ -1078,7 +1085,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         for _cb in self._extra_frame_callbacks:
             _cb(ts)
 
-        ts_str = ts.strftime("%Y-%m-%d %H:%M")
         self._bk_figure.title.text = (
             f"{self._title + ' \u2014 ' if self._title else ''}{ts_str}"
         )
@@ -1167,14 +1173,35 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         finally:
             self._syncing = False
 
-        # Defer Bokeh model mutations to the next IOLoop tick so they run
-        # inside the document lock (avoids _pending_writes RuntimeError).
         doc = self._bk_figure.document
+        self._frame_seq += 1
+        seq = self._frame_seq
+
         if doc is not None:
-            doc.add_next_tick_callback(
-                lambda _idx=idx, _s=ts_str: self._apply_frame(_idx, _s)
-            )
+            import threading
+            # Snapshot reader/geo_ids so the background thread uses the state
+            # that was current when the slider event fired.
+            _reader_snap = self._reader
+            _geo_ids = self._geo_ids
+
+            def _bg() -> None:
+                """Fetch frame data off the IOLoop; apply under document lock."""
+                try:
+                    series = _reader_snap.get_slice_nearest(ts)
+                    new_values = series.reindex(_geo_ids).fillna(np.nan).tolist()
+                except Exception:
+                    return
+
+                def _ui() -> None:
+                    if self._frame_seq != seq:
+                        return  # a newer slider event arrived; drop stale result
+                    self._render_frame_data(idx, ts, ts_str, new_values)
+
+                doc.add_next_tick_callback(_ui)
+
+            threading.Thread(target=_bg, daemon=True).start()
         else:
+            # No document (tests / Jupyter) — run synchronously.
             self._apply_frame(idx, ts_str)
 
     def _on_datetime_picker_change(self, event: param.parameterized.Event) -> None:
@@ -1192,16 +1219,34 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         ts_str = actual_ts.strftime("%Y-%m-%d %H:%M")
 
         doc = self._bk_figure.document
+        self._frame_seq += 1
+        seq = self._frame_seq
+
         if doc is not None:
-            doc.add_next_tick_callback(
-                lambda _idx=idx, _s=ts_str: self._apply_frame(_idx, _s)
-            )
+            import threading
+            _reader_snap = self._reader
+            _geo_ids = self._geo_ids
+
+            def _bg() -> None:
+                try:
+                    series = _reader_snap.get_slice_nearest(actual_ts)
+                    new_values = series.reindex(_geo_ids).fillna(np.nan).tolist()
+                except Exception:
+                    return
+
+                def _ui() -> None:
+                    if self._frame_seq != seq:
+                        return
+                    self._render_frame_data(idx, actual_ts, ts_str, new_values)
+
+                doc.add_next_tick_callback(_ui)
+
+            threading.Thread(target=_bg, daemon=True).start()
         else:
             self._apply_frame(idx, ts_str)
 
     def _apply_frame(self, idx: int, ts_str: str) -> None:
         """Run all Bokeh mutations for a single frame step under document lock."""
-        self._time_div.text = f"<b>{ts_str}</b>"
         self._load_frame(idx)
 
     def _on_style_change(self, *events) -> None:
@@ -1378,6 +1423,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         import logging as _log
 
         new_name = event.new
+        self._frame_seq += 1  # invalidate any in-flight slider fetch threads
 
         current_ts = pd.Timestamp(
             self._reader.time_index[self._time_slider.value]
@@ -1386,6 +1432,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # Show loading indicator immediately (Panel param — safe from watcher).
         self._chart_pane.loading = True
         self._transform_select.disabled = True
+        # Pause playback while the new reader is being built so the slider
+        # does not advance past frames that have not yet been loaded.
+        _was_playing = self._time_slider.direction == 1
+        self._time_slider.pause()
+        self._time_slider.loading = True
 
         doc = self._bk_figure.document
 
@@ -1428,7 +1479,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 self._load_frame(nearest_idx)
                 # Clear loading indicator last, after the frame is rendered.
                 self._chart_pane.loading = False
+                self._time_slider.loading = False
                 self._transform_select.disabled = False
+                # Resume playback only if it was running before the transform change.
+                if _was_playing:
+                    self._time_slider.play()
 
             if doc is not None:
                 doc.add_next_tick_callback(_apply)
