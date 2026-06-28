@@ -902,6 +902,10 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
 
+        self._sidebar_toggle = pn.widgets.Toggle(
+            name="\u25c4", value=True, button_type="light",
+            width=32, height=32, margin=(4, 0, 4, 4),
+        )
         self._controls = pn.Column(
             pn.pane.Markdown("### Controls", margin=(4, 0, 2, 0)),
             self._time_label_pane,
@@ -914,7 +918,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             _save_card,
             sizing_mode="stretch_width",
             max_width=280,
-            margin=(4, 8, 4, 4),
+            margin=(4, 8, 4, 0),
         )
 
         # ----------------------------------------------------------------
@@ -950,12 +954,18 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             self._x2_check.param.watch(self._on_x2_toggle, "value")
             self._x2_threshold_input.param.watch(self._on_x2_threshold_change, "value")
         self._save_config_btn.on_click(self._on_save_config)
+        self._sidebar_toggle.param.watch(self._on_sidebar_toggle, "value")
 
         self.current_dt = ti[0].to_pydatetime()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _on_sidebar_toggle(self, event: param.parameterized.Event) -> None:
+        """Collapse or expand the controls sidebar, letting the map fill freed space."""
+        self._controls.visible = bool(event.new)
+        self._sidebar_toggle.name = "\u25c4" if event.new else "\u25ba"
 
     def _current_clim(self) -> tuple[float, float]:
         vmin = self.vmin if self.vmin is not None else self._reader.vmin
@@ -1000,11 +1010,42 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     def _update_contour_labels(
         self, xs_list: list, ys_list: list, lvls: list
     ) -> None:
-        """Update the label source if the label renderer is visible."""
+        """Update the label source if the label renderer is visible.
+
+        Must be called while holding the Bokeh document lock (i.e. inside
+        ``doc.add_next_tick_callback`` or during normal render/update).
+        """
         if self._contour_label_renderer.visible:
             self._contour_label_source.data = (
                 self._compute_label_positions(xs_list, ys_list, lvls)
             )
+
+    def _rebuild_contours(self) -> None:
+        """Recompute contour polygons for the current frame and apply them.
+
+        Safe to call from any Panel/param watcher callback.  All Bokeh
+        ``ColumnDataSource.data`` mutations are routed through
+        ``doc.add_next_tick_callback`` when a live Bokeh document is
+        present, avoiding the ``RuntimeError: _pending_writes should be
+        non-None`` that occurs when Bokeh sources are mutated from inside
+        Panel's async event-processing coroutine (outside the doc lock).
+        """
+        if not self._contour_renderer.visible:
+            return
+        current_values = list(self._bk_source.data["_value"])
+        xs, ys, lvls = self._compute_contours(current_values)
+        colors = self._contour_colors(lvls)
+        new_data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
+
+        def _apply():
+            self._contour_source.data = new_data
+            self._update_contour_labels(xs, ys, lvls)
+
+        doc = self._contour_source.document
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
 
     def _compute_levels(
         self, finite_vals: np.ndarray, vmin: float, vmax: float
@@ -1369,6 +1410,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 "clip_radius_km": self._contour_clip_slider.value,
             },
             "diff": {"show": False, "colormap": "coolwarm"},
+            "sidebar_collapsed": not self._sidebar_toggle.value,
         }
         if self._x2_callback is not None:
             state["x2"] = {
@@ -1498,7 +1540,14 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         lvls = self._contour_source.data.get("level", [])
         if lvls:
             colors = self._contour_colors(lvls)
-            self._contour_source.data = dict(self._contour_source.data, color=colors)
+            new_data = dict(self._contour_source.data, color=colors)
+            doc = self._contour_source.document
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda: setattr(self._contour_source, "data", new_data)
+                )
+            else:
+                self._contour_source.data = new_data
 
     def _on_contours_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide contours; recompute for current frame when enabling."""
@@ -1514,41 +1563,33 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_label_spacing_slider.visible = on
         self._contour_clip_slider.visible = on
         if on:
-            current_values = self._bk_source.data["_value"]
-            xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = self._contour_colors(lvls)
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
-            self._update_contour_labels(xs, ys, lvls)
+            self._rebuild_contours()
         else:
-            self._contour_source.data = {"xs": [], "ys": [], "level": [], "color": []}
-            self._contour_label_source.data = {"x": [], "y": [], "text": []}
+            empty_contours = {"xs": [], "ys": [], "level": [], "color": []}
+            empty_labels = {"x": [], "y": [], "text": []}
+            doc = self._contour_source.document
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda: (
+                        setattr(self._contour_source, "data", empty_contours)
+                        or setattr(self._contour_label_source, "data", empty_labels)
+                    )
+                )
+            else:
+                self._contour_source.data = empty_contours
+                self._contour_label_source.data = empty_labels
 
     def _on_n_contours_change(self, event: param.parameterized.Event) -> None:
         self.n_contours = int(event.new)
-        if self._contour_renderer.visible:
-            current_values = self._bk_source.data["_value"]
-            xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = self._contour_colors(lvls)
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
-            self._update_contour_labels(xs, ys, lvls)
+        self._rebuild_contours()
 
     def _on_contour_smooth_change(self, event: param.parameterized.Event) -> None:
         self.contour_smooth = float(event.new)
-        if self._contour_renderer.visible:
-            current_values = self._bk_source.data["_value"]
-            xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = self._contour_colors(lvls)
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
-            self._update_contour_labels(xs, ys, lvls)
+        self._rebuild_contours()
 
     def _on_contour_levels_change(self, event: param.parameterized.Event) -> None:
         self.contour_levels = event.new
-        if self._contour_renderer.visible:
-            current_values = self._bk_source.data["_value"]
-            xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = self._contour_colors(lvls)
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
-            self._update_contour_labels(xs, ys, lvls)
+        self._rebuild_contours()
 
     def _on_contour_custom_levels_change(self, event: param.parameterized.Event) -> None:
         """Recompute contours when the user edits the custom levels text box."""
@@ -1558,26 +1599,36 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         auto_controls_active = not bool(event.new.strip())
         self._n_contours_slider.disabled = not auto_controls_active
         self._contour_levels_select.disabled = not auto_controls_active
-        if self._contour_renderer.visible:
-            current_values = self._bk_source.data["_value"]
-            xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = self._contour_colors(lvls)
-            self._contour_source.data = {"xs": xs, "ys": ys, "level": lvls, "color": colors}
-            self._update_contour_labels(xs, ys, lvls)
+        self._rebuild_contours()
 
     def _on_contour_labels_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide contour labels."""
-        self._contour_label_renderer.visible = bool(event.new)
-        if event.new:
+        show = bool(event.new)
+        self._contour_label_renderer.visible = show
+        if show:
             xs = self._contour_source.data["xs"]
             ys = self._contour_source.data["ys"]
             lvls = self._contour_source.data["level"]
             if xs:
-                self._contour_label_source.data = (
-                    self._compute_label_positions(xs, ys, lvls)
-                )
+                new_label_data = self._compute_label_positions(xs, ys, lvls)
+                doc = self._contour_label_source.document
+                if doc is not None:
+                    doc.add_next_tick_callback(
+                        lambda: setattr(
+                            self._contour_label_source, "data", new_label_data
+                        )
+                    )
+                else:
+                    self._contour_label_source.data = new_label_data
         else:
-            self._contour_label_source.data = {"x": [], "y": [], "text": []}
+            empty = {"x": [], "y": [], "text": []}
+            doc = self._contour_label_source.document
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda: setattr(self._contour_label_source, "data", empty)
+                )
+            else:
+                self._contour_label_source.data = empty
 
     def _on_label_spacing_change(self, event: param.parameterized.Event) -> None:
         """Re-place contour labels with the updated spacing."""
@@ -1587,9 +1638,16 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         ys   = self._contour_source.data.get("ys", [])
         lvls = self._contour_source.data.get("level", [])
         if xs:
-            self._contour_label_source.data = (
-                self._compute_label_positions(xs, ys, lvls)
-            )
+            new_label_data = self._compute_label_positions(xs, ys, lvls)
+            doc = self._contour_label_source.document
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda: setattr(
+                        self._contour_label_source, "data", new_label_data
+                    )
+                )
+            else:
+                self._contour_label_source.data = new_label_data
 
     def _on_contour_clip_change(self, event: param.parameterized.Event) -> None:
         """Rebuild the contour clip zone with the new radius and recompute."""
@@ -1601,14 +1659,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             ).buffer(buffer_m)
         except Exception:
             self._contour_clip_zone = None
-        if self._contour_renderer.visible:
-            current_values = self._bk_source.data["_value"]
-            xs, ys, lvls = self._compute_contours(list(current_values))
-            colors = self._contour_colors(lvls)
-            self._contour_source.data = {
-                "xs": xs, "ys": ys, "level": lvls, "color": colors
-            }
-            self._update_contour_labels(xs, ys, lvls)
+        self._rebuild_contours()
 
     def _on_x2_toggle(self, event: param.parameterized.Event) -> None:
         """Show or hide the X2 isohaline line."""
@@ -1617,9 +1668,16 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         if event.new and self._x2_callback is not None:
             threshold = float(self._x2_threshold_input.value)
             xs, ys = self._x2_callback(self._time_slider.value, threshold)
-            self._x2_source.data = {"xs": xs, "ys": ys}
+            new_data = {"xs": xs, "ys": ys}
         else:
-            self._x2_source.data = {"xs": [], "ys": []}
+            new_data = {"xs": [], "ys": []}
+        doc = self._x2_source.document
+        if doc is not None:
+            doc.add_next_tick_callback(
+                lambda: setattr(self._x2_source, "data", new_data)
+            )
+        else:
+            self._x2_source.data = new_data
 
     def _on_x2_threshold_change(self, event: param.parameterized.Event) -> None:
         """Recompute X2 line when the threshold value changes."""
@@ -1629,7 +1687,14 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             except (TypeError, ValueError):
                 return
             xs, ys = self._x2_callback(self._time_slider.value, threshold)
-            self._x2_source.data = {"xs": xs, "ys": ys}
+            new_data = {"xs": xs, "ys": ys}
+            doc = self._x2_source.document
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda: setattr(self._x2_source, "data", new_data)
+                )
+            else:
+                self._x2_source.data = new_data
 
     def _on_clim_text_change(self, event: param.parameterized.Event) -> None:
         try:
@@ -1650,7 +1715,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         # to the chart pane, which would resize the Bokeh figure and reset the
         # viewport / aspect ratio.
         return pn.Column(
-            pn.Row(self._controls, self._chart_pane, sizing_mode="stretch_both"),
+            pn.Row(self._sidebar_toggle, self._controls, self._chart_pane, sizing_mode="stretch_both"),
             sizing_mode="stretch_both",
             min_height=self._map_height,
         )

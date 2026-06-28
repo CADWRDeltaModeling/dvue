@@ -517,6 +517,13 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             name="Show diff (A \u2212 B)", value=show_diff,
             sizing_mode="stretch_width",
         )
+        self._orientation_select = pn.widgets.RadioButtonGroup(
+            name="Map layout",
+            options=["Horizontal", "Vertical"],
+            value="Horizontal",
+            button_type="light",
+            sizing_mode="stretch_width",
+        )
         _transform_names = ["none"] + list(self._transform_options.keys())
         self._transform_select = pn.widgets.Select(
             name="Transform", options=_transform_names,
@@ -591,7 +598,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         )
         _diff_card = pn.Card(
             self._show_diff_check,
-            title="Diff (A − B)", collapsed=False,
+            pn.pane.Markdown("**Map layout**", margin=(4, 0, 2, 0)),
+            self._orientation_select,
+            title="Comparison", collapsed=False,
             sizing_mode="stretch_width",
         )
         _contour_card = pn.Card(
@@ -637,6 +646,10 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
 
+        self._sidebar_toggle = pn.widgets.Toggle(
+            name="\u25c4", value=True, button_type="light",
+            width=32, height=32, margin=(4, 0, 4, 4),
+        )
         self._controls = pn.Column(
             pn.pane.Markdown("### Controls", margin=(4, 0, 2, 0)),
             self._time_label_pane,
@@ -650,14 +663,15 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             _save_card,
             sizing_mode="stretch_width",
             max_width=280,
-            margin=(4, 8, 4, 4),
+            margin=(4, 8, 4, 0),
         )
 
         # ----------------------------------------------------------------
         # 14. Maps layout placeholder
         # ----------------------------------------------------------------
-        self._maps_pane = pn.Row(
+        self._maps_pane = pn.FlexBox(
             self._pane_a, self._pane_b,
+            flex_direction="row",
             sizing_mode="stretch_both",
         )
 
@@ -681,6 +695,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._colormap_select.param.watch(self._on_colormap_change, "value")
         self._size_slider.param.watch(self._on_size_widget_change, "value")
         self._show_diff_check.param.watch(self._on_diff_toggle, "value")
+        self._orientation_select.param.watch(self._on_orientation_change, "value")
+        self._sidebar_toggle.param.watch(self._on_sidebar_toggle, "value")
         self._contours_check.param.watch(self._on_contours_toggle, "value")
         self._contour_color_check.param.watch(self._on_contour_color_toggle, "value")
         self._n_contours_slider.param.watch(self._on_n_contours_change, "value")
@@ -735,6 +751,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "diff": {
                 "show": self.show_diff,
             },
+            "layout_orientation": self._orientation_select.value.lower(),
+            "sidebar_collapsed": not self._sidebar_toggle.value,
             "x2": {"enabled": False, "threshold": 2700.0},
         }
         if meta.get("hydro_h5_paths") is not None:
@@ -1257,6 +1275,21 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 self._update_diff_map(ts)
         else:
             self._maps_pane.objects = [self._pane_a, self._pane_b]
+            # Re-apply current orientation when returning to side-by-side
+            self._maps_pane.flex_direction = (
+                "column" if self._orientation_select.value == "Vertical" else "row"
+            )
+
+    def _on_orientation_change(self, event: param.parameterized.Event) -> None:
+        """Switch maps between horizontal (row) and vertical (column) layout."""
+        self._maps_pane.flex_direction = (
+            "column" if event.new == "Vertical" else "row"
+        )
+
+    def _on_sidebar_toggle(self, event: param.parameterized.Event) -> None:
+        """Collapse or expand the controls sidebar, letting the maps fill freed space."""
+        self._controls.visible = bool(event.new)
+        self._sidebar_toggle.name = "\u25c4" if event.new else "\u25ba"
 
     # ------------------------------------------------------------------
     # Callbacks — contours
@@ -1461,6 +1494,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def __panel__(self) -> pn.viewable.Viewable:
         return pn.Column(
             pn.Row(
+                self._sidebar_toggle,
                 self._controls,
                 self._maps_pane,
                 sizing_mode="stretch_both",
