@@ -333,6 +333,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._syncing = False
         self._contour_color = True
         self._frame_seq = 0
+        self._extra_frame_callbacks: list = []
+        self._extra_transform_callbacks: list = []
 
         # ----------------------------------------------------------------
         # 2. Readers (transform + buffer)
@@ -735,6 +737,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             },
             "x2": {"enabled": False, "threshold": 2700.0},
         }
+        if meta.get("hydro_h5_paths") is not None:
+            state["hydro_h5_paths"] = meta["hydro_h5_paths"]
         return state
 
     def _on_save_config(self, event) -> None:
@@ -979,6 +983,39 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         else:
             self._update_map_a(idx, ts)
             self._update_map_b(idx, ts)
+        for _cb in self._extra_frame_callbacks:
+            _cb(ts)
+
+    def add_frame_callback(self, fn) -> None:
+        """Register a callback invoked on every animation frame.
+
+        The callback receives a single :class:`pandas.Timestamp` argument
+        (the current animation time).  It is called inside the Bokeh
+        document lock after both map A and map B (or the diff map) have
+        been updated, so Bokeh model mutations are safe.
+
+        Parameters
+        ----------
+        fn : callable(ts: pd.Timestamp) -> None
+        """
+        self._extra_frame_callbacks.append(fn)
+
+    def add_transform_callback(self, fn) -> None:
+        """Register a callback invoked when the animation transform changes.
+
+        Called from the background thread inside
+        :meth:`_on_transform_change` before the Bokeh document lock is
+        re-entered, so the callback may perform slow I/O (e.g. rebuilding
+        a filtered reader) without blocking the browser.
+
+        The callback receives the new :class:`~dvue.animator.reader.TransformSpec`
+        (or ``None`` for "no transform").
+
+        Parameters
+        ----------
+        fn : callable(spec) -> None
+        """
+        self._extra_transform_callbacks.append(fn)
 
     # ------------------------------------------------------------------
     # Callbacks — time
@@ -1034,6 +1071,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                     else:
                         self._render_map_a_vals(ts, ts_str, fetched[1])
                         self._render_map_b_vals(ts, ts_str, fetched[2])
+                    for _cb in self._extra_frame_callbacks:
+                        _cb(ts)
 
                 doc.add_next_tick_callback(_ui)
 
@@ -1092,6 +1131,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                     else:
                         self._render_map_a_vals(actual_ts, ts_str, fetched[1])
                         self._render_map_b_vals(actual_ts, ts_str, fetched[2])
+                    for _cb in self._extra_frame_callbacks:
+                        _cb(actual_ts)
 
                 doc.add_next_tick_callback(_ui)
 
@@ -1368,6 +1409,16 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 int(ti.get_indexer([current_ts], method="nearest")[0]),
                 len(ti) - 1,
             ))
+
+            # Fire transform callbacks in the background thread so heavy
+            # reader rebuilds (e.g. Godin) happen outside the document lock.
+            _new_spec = (
+                self._transform_options.get(new_name)
+                if (new_name and new_name != "none")
+                else None
+            )
+            for _tcb in self._extra_transform_callbacks:
+                _tcb(_new_spec)
 
             def _apply() -> None:
                 self._reader_a = new_reader_a
