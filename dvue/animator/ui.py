@@ -1411,6 +1411,12 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             },
             "diff": {"show": False, "colormap": "coolwarm"},
             "sidebar_collapsed": not self._sidebar_toggle.value,
+            "map_extents": {
+                "x_start": float(self._bk_figure.x_range.start),
+                "x_end":   float(self._bk_figure.x_range.end),
+                "y_start": float(self._bk_figure.y_range.start),
+                "y_end":   float(self._bk_figure.y_range.end),
+            },
         }
         if self._x2_callback is not None:
             state["x2"] = {

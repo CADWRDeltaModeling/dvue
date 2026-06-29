@@ -427,6 +427,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             shared_x_range=shared_x, shared_y_range=shared_y,
         )
 
+        self._shared_x_range = shared_x
+        self._shared_y_range = shared_y
         self._fig_a = ma.fig;  self._src_a = ma.source;  self._mapper_a = ma.mapper
         self._fig_b = mb.fig;  self._src_b = mb.source;  self._mapper_b = mb.mapper
         self._colorbar_a = ma.colorbar
@@ -464,12 +466,28 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # ----------------------------------------------------------------
         # 9. Panel wrappers
         # ----------------------------------------------------------------
+        # _FLEX_CHILD: lets each pane shrink/grow equally inside the FlexBox.
+        # "flex: 1 1 0%" — grow+shrink from a 0 base size.
+        # "min-width: 0" / "min-height: 0" — remove the CSS min-width/height:auto
+        # floor that prevents flex children from shrinking below their intrinsic
+        # size; without these the panel pair overflows and adds scrollbars.
+        # The figures use sizing_mode="stretch_both" + match_aspect=True so
+        # Bokeh fills whatever pixel rectangle it is given and adjusts the data
+        # viewport (zoom) to maintain 1:1 geographic scale — no tile distortion.
+        _FLEX_CHILD = {
+            "flex": "1 1 0%",
+            "min-width": "0",
+            "min-height": "0",
+        }
         self._pane_a = pn.pane.Bokeh(
-            self._fig_a, sizing_mode="stretch_both", min_height=map_height)
+            self._fig_a, sizing_mode="stretch_both", min_height=map_height,
+            styles=_FLEX_CHILD)
         self._pane_b = pn.pane.Bokeh(
-            self._fig_b, sizing_mode="stretch_both", min_height=map_height)
+            self._fig_b, sizing_mode="stretch_both", min_height=map_height,
+            styles=_FLEX_CHILD)
         self._pane_diff = pn.pane.Bokeh(
-            self._fig_diff, sizing_mode="stretch_both", min_height=map_height)
+            self._fig_diff, sizing_mode="stretch_both", min_height=map_height,
+            styles=_FLEX_CHILD)
 
         # ----------------------------------------------------------------
         # 10. Time controls
@@ -668,10 +686,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
         # ----------------------------------------------------------------
         # 14. Maps layout placeholder
+        # pn.Row/Column swap (instead of FlexBox flex_direction change) so that
+        # Panel's reactive layout system properly fires Bokeh ResizeObserver events
+        # when orientation switches, preventing the map from appearing stretched.
         # ----------------------------------------------------------------
-        self._maps_pane = pn.FlexBox(
-            self._pane_a, self._pane_b,
-            flex_direction="row",
+        self._maps_pane = pn.Column(
+            pn.Row(self._pane_a, self._pane_b, sizing_mode="stretch_both"),
             sizing_mode="stretch_both",
         )
 
@@ -753,6 +773,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             },
             "layout_orientation": self._orientation_select.value.lower(),
             "sidebar_collapsed": not self._sidebar_toggle.value,
+            "map_extents": {
+                "x_start": float(self._shared_x_range.start),
+                "x_end":   float(self._shared_x_range.end),
+                "y_start": float(self._shared_y_range.start),
+                "y_end":   float(self._shared_y_range.end),
+            },
             "x2": {"enabled": False, "threshold": 2700.0},
         }
         if meta.get("hydro_h5_paths") is not None:
@@ -1265,7 +1291,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
     def _on_diff_toggle(self, event: param.parameterized.Event) -> None:
         self.show_diff = bool(event.new)
         if self.show_diff:
-            self._maps_pane.objects = [self._pane_diff]
+            self._maps_pane[0] = self._pane_diff
             idx = self._time_slider.value
             ts = self._reader_a.time_index[idx]
             doc = self._active_doc()
@@ -1274,17 +1300,18 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             else:
                 self._update_diff_map(ts)
         else:
-            self._maps_pane.objects = [self._pane_a, self._pane_b]
-            # Re-apply current orientation when returning to side-by-side
-            self._maps_pane.flex_direction = (
-                "column" if self._orientation_select.value == "Vertical" else "row"
-            )
+            # Restore side-by-side layout matching current orientation
+            self._maps_pane[0] = self._make_maps_layout()
+
+    def _make_maps_layout(self) -> pn.viewable.Viewable:
+        """Return a fresh Row or Column of the two map panes based on current orientation."""
+        if self._orientation_select.value == "Vertical":
+            return pn.Column(self._pane_a, self._pane_b, sizing_mode="stretch_both")
+        return pn.Row(self._pane_a, self._pane_b, sizing_mode="stretch_both")
 
     def _on_orientation_change(self, event: param.parameterized.Event) -> None:
         """Switch maps between horizontal (row) and vertical (column) layout."""
-        self._maps_pane.flex_direction = (
-            "column" if event.new == "Vertical" else "row"
-        )
+        self._maps_pane[0] = self._make_maps_layout()
 
     def _on_sidebar_toggle(self, event: param.parameterized.Event) -> None:
         """Collapse or expand the controls sidebar, letting the maps fill freed space."""
