@@ -824,6 +824,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _setup_reader(self, base: SlicingReader, transform_name: str) -> SlicingReader:
         reader = base
+        chunk_size = self._buffer_chunk_size
+        min_chunk = 50
+        max_chunk = 2000
         if (
             transform_name
             and transform_name != "none"
@@ -831,6 +834,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         ):
             spec_or_fn = self._transform_options[transform_name]
             if isinstance(spec_or_fn, TransformSpec):
+                freq_nanos = 0
                 try:
                     freq_nanos = int(
                         pd.tseries.frequencies.to_offset(
@@ -843,6 +847,27 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 if raw_overlap > 0:
                     reader = RawSequentialBuffer(reader)
                 reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
+                # Scale chunk_size for coarse aggregate transforms so the number
+                # of raw steps per chunk stays roughly constant.  See the same
+                # logic in GeoAnimatorManager._setup_reader for the rationale.
+                if (
+                    spec_or_fn.kind == "aggregate"
+                    and spec_or_fn.output_freq is not None
+                    and freq_nanos > 0
+                ):
+                    try:
+                        out_ns = int(
+                            pd.tseries.frequencies.to_offset(
+                                spec_or_fn.output_freq
+                            ).nanos
+                        )
+                        if out_ns > freq_nanos:
+                            ratio = out_ns // freq_nanos
+                            chunk_size = max(5, self._buffer_chunk_size // ratio)
+                            min_chunk = max(2, 50 // ratio)
+                            max_chunk = max(chunk_size, 2000 // ratio)
+                    except Exception:
+                        pass
             else:
                 raise TypeError(
                     f"transform_options value for {transform_name!r} must be a "
@@ -851,8 +876,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                     "or make_godin_transform() from dsm2ui.animate."
                 )
         return BufferedSlicingReader(
-            reader, chunk_size=self._buffer_chunk_size, prefetch=True,
-            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+            reader, chunk_size=chunk_size, prefetch=True,
+            adaptive=True, min_chunk_size=min_chunk, max_chunk_size=max_chunk,
         )
 
     def _get_diff_reader(self) -> SlicingReader:

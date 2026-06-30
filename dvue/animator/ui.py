@@ -1363,6 +1363,9 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         time.
         """
         reader = self._base_reader
+        chunk_size = self._buffer_chunk_size
+        min_chunk = 50
+        max_chunk = 2000
         if transform_name and transform_name != "none" and transform_name in self._transform_options:
             spec_or_fn = self._transform_options[transform_name]
             if not isinstance(spec_or_fn, TransformSpec):
@@ -1372,6 +1375,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                     "Use make_resample_transform(), make_moving_average_transform(), "
                     "or make_godin_transform() from dsm2ui.animate."
                 )
+            freq_nanos = 0
             try:
                 freq_nanos = int(
                     pd.tseries.frequencies.to_offset(
@@ -1384,9 +1388,37 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             if raw_overlap > 0:
                 reader = RawSequentialBuffer(reader)
             reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
+            # ── Scale chunk_size for coarse aggregate transforms ──────────────
+            # chunk_size is an OUTPUT-step count.  For convolution transforms
+            # (Godin, rolling average) output_freq == input_freq, so 200 output
+            # steps ≈ 200 raw steps — cheap.  For aggregate transforms that
+            # coarsen the time step (daily mean, hourly mean) 200 output steps
+            # maps to 200×ratio raw steps:
+            #   daily from 15-min  → 200×96  = 19,200 raw steps (expensive!)
+            #   hourly from 15-min → 200×4   =    800 raw steps (ok)
+            # Scale chunk_size so the raw steps per chunk stay roughly constant,
+            # keeping each load fast regardless of output frequency.
+            if (
+                spec_or_fn.kind == "aggregate"
+                and spec_or_fn.output_freq is not None
+                and freq_nanos > 0
+            ):
+                try:
+                    out_ns = int(
+                        pd.tseries.frequencies.to_offset(
+                            spec_or_fn.output_freq
+                        ).nanos
+                    )
+                    if out_ns > freq_nanos:
+                        ratio = out_ns // freq_nanos
+                        chunk_size = max(5, self._buffer_chunk_size // ratio)
+                        min_chunk = max(2, 50 // ratio)
+                        max_chunk = max(chunk_size, 2000 // ratio)
+                except Exception:
+                    pass
         return BufferedSlicingReader(
-            reader, chunk_size=self._buffer_chunk_size, prefetch=True,
-            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+            reader, chunk_size=chunk_size, prefetch=True,
+            adaptive=True, min_chunk_size=min_chunk, max_chunk_size=max_chunk,
         )
 
     # ------------------------------------------------------------------
