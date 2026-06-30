@@ -1295,10 +1295,14 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             idx = self._time_slider.value
             ts = self._reader_a.time_index[idx]
             doc = self._active_doc()
+            def _apply(_ts=ts):
+                self._update_diff_map(_ts)
+                for _cb in self._extra_frame_callbacks:
+                    _cb(_ts)
             if doc is not None:
-                doc.add_next_tick_callback(lambda _ts=ts: self._update_diff_map(_ts))
+                doc.add_next_tick_callback(_apply)
             else:
-                self._update_diff_map(ts)
+                _apply()
         else:
             # Restore side-by-side layout matching current orientation
             self._maps_pane[0] = self._make_maps_layout()
