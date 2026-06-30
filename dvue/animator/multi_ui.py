@@ -1243,6 +1243,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             id(self._ctour_a.renderer), id(self._ctour_b.renderer),
             id(self._ctour_diff.renderer),
         }
+        _skip.update(id(r) for r in getattr(self, "_obs_renderers", []))
         for fig in (self._fig_a, self._fig_b, self._fig_diff):
             for r in fig.renderers:
                 if id(r) in _skip or not hasattr(r, "glyph"):

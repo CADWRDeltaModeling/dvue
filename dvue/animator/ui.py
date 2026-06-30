@@ -1318,9 +1318,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._bk_mapper.low = eff_vmin
         self._bk_mapper.high = eff_vmax
         new_size = float(self.size)
-        # Only update size on the data renderer — contour and X2 renderers
-        # have their own fixed line widths and must not be resized.
+        # Only update size on the data renderer — contour, X2, and obs-station
+        # renderers have their own independent size controls and must not be
+        # resized by the Appearance panel slider.
         _skip = {id(self._contour_renderer), id(self._x2_renderer)}
+        _skip.update(id(r) for r in getattr(self, "_obs_renderers", []))
         for r in self._bk_figure.renderers:
             if id(r) in _skip or not hasattr(r, "glyph"):
                 continue
