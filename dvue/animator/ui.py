@@ -1528,6 +1528,23 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             for _tcb in self._transform_callbacks:
                 _tcb(_new_spec)
 
+            # ── Pre-load the first frame HERE, off the IOLoop ────────────
+            # _load_frame() (I/O + filter) must NOT run inside
+            # add_next_tick_callback because that would block the IOLoop for
+            # the entire filter computation time (potentially several
+            # seconds for Godin on a 500-channel QUAL file).  Instead we
+            # fetch the data in this background thread and pass the
+            # pre-computed values directly to _render_frame_data (which
+            # only does fast Bokeh model mutations).
+            ts = ti[nearest_idx]
+            ts_str = ts.strftime("%Y-%m-%d %H:%M")
+            _geo_ids_snap = self._geo_ids   # thread-safe read of list ref
+            try:
+                series = new_reader.get_slice_nearest(ts)
+                new_values = series.reindex(_geo_ids_snap).fillna(np.nan).tolist()
+            except Exception:
+                new_values = [float("nan")] * len(_geo_ids_snap)
+
             def _apply() -> None:
                 """Update all Bokeh/Panel state under the document lock."""
                 self._reader = new_reader
@@ -1540,10 +1557,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                     self._datetime_picker.value = ti[nearest_idx].to_pydatetime()
                 finally:
                     self._syncing = False
-                self._time_div.text = (
-                    f"<b>{ti[nearest_idx].strftime('%Y-%m-%d %H:%M')}</b>"
-                )
-                self._load_frame(nearest_idx)
+                # _render_frame_data only mutates Bokeh models — no I/O.
+                self._render_frame_data(nearest_idx, ts, ts_str, new_values)
                 # Clear loading indicator last, after the frame is rendered.
                 self._chart_pane.loading = False
                 self._time_slider.loading = False
