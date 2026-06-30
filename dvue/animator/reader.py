@@ -49,6 +49,8 @@ Example HDF5 skeleton::
 from __future__ import annotations
 
 import abc
+import collections
+import time as _time
 import threading
 from typing import Optional, Union
 
@@ -308,6 +310,19 @@ class BufferedSlicingReader(SlicingReader):
         Enable asynchronous double-buffering.  Default ``False`` (preserves the
         original synchronous behaviour for backward compatibility).  UI layers
         that drive playback should pass ``True``.
+    adaptive : bool, optional
+        When ``True`` (default), automatically adjusts ``chunk_size`` based on
+        the observed playback frame rate so the buffer always covers
+        approximately ``target_buffer_seconds`` of real playback time.  Only
+        active in prefetch mode; has no effect when ``prefetch=False``.
+    min_chunk_size : int, optional
+        Lower bound on the adaptive chunk size.  Default ``50``.
+    max_chunk_size : int, optional
+        Upper bound on the adaptive chunk size.  Default ``2000``.
+    target_buffer_seconds : float, optional
+        Target wall-clock seconds of playback to keep buffered.  Default
+        ``10.0``.  At 20 fps this yields a 200-step chunk; at 30 fps, 300
+        steps; at 60 fps, 600 steps.
     """
 
     def __init__(
@@ -316,11 +331,21 @@ class BufferedSlicingReader(SlicingReader):
         chunk_size: int = 200,
         refill_margin: float = 0.15,
         prefetch: bool = False,
+        adaptive: bool = True,
+        min_chunk_size: int = 50,
+        max_chunk_size: int = 2000,
+        target_buffer_seconds: float = 10.0,
     ) -> None:
         self._inner = reader
         self._chunk_size = chunk_size
+        self._refill_margin_fraction = refill_margin
         self._margin = max(1, int(chunk_size * refill_margin))
         self._prefetch = bool(prefetch)
+        self._adaptive = bool(adaptive)
+        self._min_chunk_size = max(1, int(min_chunk_size))
+        self._max_chunk_size = max(self._min_chunk_size, int(max_chunk_size))
+        self._target_buffer_seconds = float(target_buffer_seconds)
+        self._frame_times: collections.deque = collections.deque(maxlen=20)
         self._buf: Optional[pd.DataFrame] = None   # shape (chunk, geo_ids)
         self._buf_start: int = 0
         self._buf_end: int = 0
@@ -404,7 +429,12 @@ class BufferedSlicingReader(SlicingReader):
             self._next_buf = None
 
     def _maybe_prefetch(self, idx: int, direction: int) -> None:
-        """Start a background load of the adjacent chunk when near the edge."""
+        """Start a background load of the adjacent chunk when near the edge.
+
+        Also updates ``_chunk_size`` from the observed playback frame rate when
+        ``adaptive=True``.  Only fires near a chunk boundary (the natural point
+        to resize); the 20 % threshold avoids rapid oscillation.
+        """
         n = len(self._time_index)
         if direction >= 0:
             # Travelling forward — prefetch the chunk after the current one.
@@ -416,6 +446,18 @@ class BufferedSlicingReader(SlicingReader):
             if idx >= self._buf_start + self._margin or self._buf_start <= 0:
                 return
             target_start = max(0, self._buf_start - self._chunk_size)
+
+        # ── Adaptive chunk sizing ─────────────────────────────────────────
+        # Grow/shrink _chunk_size so the buffer covers a fixed wall-clock
+        # duration ahead.  Runs on the consumer thread (no lock needed).
+        if self._adaptive and len(self._frame_times) >= 5:
+            elapsed = self._frame_times[-1] - self._frame_times[0]
+            fps = (len(self._frame_times) - 1) / max(elapsed, 1e-3)
+            new_size = int(fps * self._target_buffer_seconds)
+            new_size = max(self._min_chunk_size, min(self._max_chunk_size, new_size))
+            if abs(new_size - self._chunk_size) / max(self._chunk_size, 1) > 0.2:
+                self._chunk_size = new_size
+                self._margin = max(1, int(new_size * self._refill_margin_fraction))
 
         with self._lock:
             if self._prefetching:
@@ -467,6 +509,7 @@ class BufferedSlicingReader(SlicingReader):
 
         direction = 1 if idx >= self._last_idx else -1
         self._last_idx = idx
+        self._frame_times.append(_time.monotonic())
         self._maybe_prefetch(idx, direction)
         return self._buf.iloc[idx - self._buf_start].astype(float)
 
@@ -619,192 +662,10 @@ def _build_common_index(
     return pd.date_range(start=start, end=end, freq=coarser_freq)
 
 
-class TransformedSlicingReader(SlicingReader):
-    """Applies a time-dimension transform to any :class:`SlicingReader`.
-
-    The entire raw dataset is loaded from the inner reader on **first
-    access**, the transform function is applied once, and the result is
-    cached as an in-memory DataFrame.  Subsequent ``get_slice`` /
-    ``get_slice_range`` calls are served from that cache.
-
-    This eager-on-first-access strategy keeps chunk-boundary arithmetic
-    simple: transforms that require context across time steps (rolling
-    average, tidal filter warmup) see the full dataset, not just a window.
-
-    Parameters
-    ----------
-    inner : SlicingReader
-        The raw data source.
-    transform_fn : callable
-        ``(df: pd.DataFrame) -> pd.DataFrame``
-
-        Receives the full raw DataFrame (rows = timestamps, columns =
-        geo_ids) and must return a DataFrame with a **regular
-        DatetimeIndex**.  The output may have a different frequency or
-        fewer rows than the input (e.g. after resampling).
-    warmup_steps : int, optional
-        Number of raw time steps to prepend before the first usable output
-        step.  These rows are discarded after the transform.  Only needed
-        for filters with a warm-up period (e.g. Godin: ~134 steps at
-        15 min).  Default ``0``.
-
-    Notes
-    -----
-    For very large tidefiles (multi-year at 15-min) this class reads the
-    **entire** dataset into memory.  Callers should apply a time-window
-    restriction on the inner reader, or use ``InMemorySlicingReader``
-    with a pre-loaded block, when memory is a concern.
-
-    Transform functions for DSM2 data (resample, rolling average, Godin
-    filter) are provided in :mod:`dsm2ui.animate` to keep vtools3 out of
-    the dvue dependency tree.
-
-    Examples
-    --------
-    Daily average of a 15-min reader::
-
-        from dvue.animator import TransformedSlicingReader
-        daily_reader = TransformedSlicingReader(
-            raw_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
-        )
-
-    24-hour centred rolling mean (keeps 15-min timesteps)::
-
-        TransformedSlicingReader(
-            raw_reader,
-            transform_fn=lambda df: df.rolling(96, center=True, min_periods=48).mean(),
-        )
-    """
-
-    def __init__(
-        self,
-        inner: SlicingReader,
-        transform_fn,
-        warmup_steps: int = 0,
-    ) -> None:
-        self._inner = inner
-        self._transform_fn = transform_fn
-        self._warmup_steps = max(0, int(warmup_steps))
-        self._cache: Optional[pd.DataFrame] = None  # populated on first access
-
-        # Compute a provisional time index from the inner reader so the
-        # SlicingReader base class is satisfied at __init__ time.
-        # The real (post-transform) index is set on first access via
-        # _ensure_cache(); the base __init__ call below will be re-invoked
-        # via _reinit_from_cache once the actual index is known.
-        # For now pass the inner index as a placeholder — it will be
-        # replaced when the cache is populated.
-        self._inner_time_index_placeholder = inner.time_index
-        # We cannot call super().__init__ with the correct index until the
-        # transform has been applied.  Instead we initialise with the inner
-        # index and then override _time_index after transform.
-        super().__init__(inner.time_index)
-
-    # ------------------------------------------------------------------
-    # Lazy cache population
-    # ------------------------------------------------------------------
-
-    def _ensure_cache(self) -> None:
-        """Populate the in-memory transformed DataFrame (once only)."""
-        if self._cache is not None:
-            return
-
-        inner = self._inner
-        n_raw = len(inner.time_index)
-
-        # Fetch more raw data if warmup padding is requested.
-        # warmup_steps rows are prepended before the logical start.
-        start_raw = 0   # always start from the beginning for full coverage
-        raw_df = inner.get_slice_range(start_raw, n_raw)
-
-        # Apply the user-supplied transform
-        transformed: pd.DataFrame = self._transform_fn(raw_df)
-
-        if not isinstance(transformed.index, pd.DatetimeIndex):
-            raise TypeError(
-                "transform_fn must return a DataFrame with a pd.DatetimeIndex."
-            )
-
-        # Enforce a regular frequency on the output index
-        if transformed.index.freq is None:
-            transformed.index.freq = pd.infer_freq(transformed.index)
-        if transformed.index.freq is None:
-            raise ValueError(
-                "transform_fn returned a DataFrame with an irregular DatetimeIndex. "
-                "Ensure the transform produces a regular time series "
-                "(e.g. use resample().mean() or rolling().mean())."
-            )
-
-        # Discard any warmup rows from the *output* if warmup_steps > 0.
-        # For most transforms (resample, rolling) the warmup is expressed as
-        # NaN rows at the start; drop them here.
-        if self._warmup_steps > 0:
-            # Map warmup_steps (raw steps) → output steps
-            # Heuristic: drop leading NaN rows up to warmup_steps worth of time
-            raw_freq_ns = pd.tseries.frequencies.to_offset(inner.time_index.freq).nanos
-            out_freq_ns = pd.tseries.frequencies.to_offset(transformed.index.freq).nanos
-            out_warmup = max(1, int(self._warmup_steps * raw_freq_ns / out_freq_ns))
-            n_drop = min(out_warmup, len(transformed))
-            # Only drop if all-NaN rows exist at the start
-            leading_nan = transformed.iloc[:n_drop].isna().all(axis=1)
-            n_actual_drop = int(leading_nan[::-1].idxmax() + 1) if leading_nan.any() else 0
-            if n_actual_drop > 0:
-                transformed = transformed.iloc[n_actual_drop:]
-
-        self._cache = transformed
-
-        # Update the time_index to the transformed index
-        self._time_index = transformed.index
-
-        # Recompute vmin/vmax from transformed data
-        vals = transformed.to_numpy(dtype=float, na_value=np.nan)
-        self._vmin = float(np.nanmin(vals)) if not np.all(np.isnan(vals)) else 0.0
-        self._vmax = float(np.nanmax(vals)) if not np.all(np.isnan(vals)) else 0.0
-
-    # ------------------------------------------------------------------
-    # SlicingReader interface
-    # ------------------------------------------------------------------
-
-    @property
-    def time_index(self) -> pd.DatetimeIndex:
-        self._ensure_cache()
-        return self._time_index
-
-    @property
-    def vmin(self) -> float:
-        self._ensure_cache()
-        return self._vmin
-
-    @property
-    def vmax(self) -> float:
-        self._ensure_cache()
-        return self._vmax
-
-    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
-        self._ensure_cache()
-        i = self._time_index.get_indexer([timestamp], method="nearest")[0]
-        return self._cache.iloc[i].astype(float)
-
-    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
-        self._ensure_cache()
-        return self._cache.iloc[start_idx:end_idx].astype(float)
-
-    def close(self) -> None:
-        """Close the underlying inner reader if it supports ``close()``."""
-        if hasattr(self._inner, "close"):
-            self._inner.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-
 # ---------------------------------------------------------------------------
 # Streaming transform — applies transform per-chunk, no full-file load
 # ---------------------------------------------------------------------------
+
 
 class TransformSpec:
     """Describes a time-domain transform for :class:`StreamingTransformedSlicingReader`.
@@ -861,15 +722,16 @@ class TransformSpec:
 class StreamingTransformedSlicingReader(SlicingReader):
     """Apply a time-domain transform lazily, one chunk at a time.
 
-    Unlike :class:`TransformedSlicingReader`, this class **never loads the
-    full dataset at startup**.  Each :meth:`get_slice_range` call fetches
+    Each :meth:`get_slice_range` call fetches only the raw steps needed for
+    that window (plus an overlap border to avoid boundary artefacts), applies
+    the transform function, and returns the trimmed result.  Each :meth:`get_slice_range` call fetches
     only the raw steps needed for that window (plus an overlap border to
     avoid boundary artefacts), applies the transform function, and returns
     the trimmed result.
 
     This makes startup near-instant for large tidefiles — ``time_index`` is
-    derived from the inner reader's metadata, and ``vmin``/``vmax`` are
-    estimated from a small sample in the middle of the file.
+    derived from the inner reader's metadata and no data is read at all;
+    ``vmin``/``vmax`` are inherited from the inner reader.
 
     Architecture
     ------------
@@ -889,10 +751,6 @@ class StreamingTransformedSlicingReader(SlicingReader):
         The raw data source (e.g. :class:`~dsm2ui.animate.HydroH5FlowReader`).
     spec : TransformSpec
         Describes the transform and its overlap requirements.
-    sample_steps : int, optional
-        Number of **output** frames to sample from the middle of the file
-        for ``vmin``/``vmax`` estimation.  Default ``200``.
-
     Notes
     -----
     For the Godin filter the overlap is ~33.5 h worth of raw steps on each
@@ -905,7 +763,6 @@ class StreamingTransformedSlicingReader(SlicingReader):
         self,
         inner: SlicingReader,
         spec: "TransformSpec",
-        sample_steps: int = 200,
     ) -> None:
         import math as _math
 
@@ -913,7 +770,6 @@ class StreamingTransformedSlicingReader(SlicingReader):
         self._spec = spec
 
         raw_ti = inner.time_index
-        n_raw = len(raw_ti)
         try:
             freq_nanos = int(pd.tseries.frequencies.to_offset(raw_ti.freq).nanos)
         except AttributeError:
@@ -923,10 +779,6 @@ class StreamingTransformedSlicingReader(SlicingReader):
 
         # ── Compute output time index (no HDF5 read) ──────────────────
         if spec.output_freq is not None:
-            # Aggregate: derive output dates from inner's date range.
-            # Use a tiny dummy Series (2 timestamps) to let pandas resample
-            # compute alignment correctly, then extrapolate to the full range.
-            dummy = pd.Series(0.0, index=raw_ti[[0, -1]])
             out_freq_offset = pd.tseries.frequencies.to_offset(spec.output_freq)
             # Build the complete output DatetimeIndex via date_range arithmetic
             # (pandas date_range is pure datetime math, no data I/O).
@@ -940,25 +792,13 @@ class StreamingTransformedSlicingReader(SlicingReader):
             # Convolution: output has the same time index as input.
             out_ti = raw_ti
 
-        # ── Estimate vmin/vmax from a central sample (no full-file load) ──
-        n_out = len(out_ti)
-        mid_out = n_out // 2
-        s_start = max(0, mid_out - sample_steps // 2)
-        s_end = min(n_out, s_start + sample_steps)
+        # vmin/vmax inherited from the inner reader — the user controls the
+        # colour scale via the UI; automatic sampling would add unnecessary
+        # HDF5 I/O on every transform switch.
+        self._vmin = inner.vmin
+        self._vmax = inner.vmax
 
-        super().__init__(out_ti)   # sets self._time_index before get_slice_range
-
-        try:
-            sample_df = self.get_slice_range(s_start, s_end)
-            vals = sample_df.to_numpy(dtype=float, na_value=np.nan)
-            finite = vals[np.isfinite(vals)]
-            if len(finite):
-                self._vmin = float(np.nanmin(finite))
-                self._vmax = float(np.nanmax(finite))
-            else:
-                self._vmin, self._vmax = inner.vmin, inner.vmax
-        except Exception:
-            self._vmin, self._vmax = inner.vmin, inner.vmax
+        super().__init__(out_ti)
 
     # ------------------------------------------------------------------
     # SlicingReader interface
@@ -1053,3 +893,238 @@ class StreamingTransformedSlicingReader(SlicingReader):
     def __exit__(self, *args):
         self.close()
 
+
+# ---------------------------------------------------------------------------
+# Raw sequential look-ahead buffer
+# ---------------------------------------------------------------------------
+
+class RawSequentialBuffer(SlicingReader):
+    """Intercepts ``get_slice_range`` calls and serves them from an in-memory cache.
+
+    Unlike :class:`BufferedSlicingReader` (which targets per-frame
+    ``get_slice`` calls), ``RawSequentialBuffer`` caches bulk
+    ``get_slice_range`` reads.  It is designed to sit between a raw HDF5
+    reader and :class:`StreamingTransformedSlicingReader`::
+
+        BufferedSlicingReader(prefetch=True)    ← per-frame serving
+          └── StreamingTransformedSlicingReader  ← transform per chunk
+              └── RawSequentialBuffer            ← this class
+                  └── HydroH5FlowReader          ← h5py reads
+
+    When :class:`StreamingTransformedSlicingReader` requests an
+    overlap-padded raw window (e.g., 2,228 steps for Godin+Daily at 1 h),
+    the request is served from RAM if it falls within the current cache.  A
+    background thread simultaneously pre-reads the **next** window so HDF5
+    I/O and transform computation **overlap in time** (pipelined) rather than
+    running sequentially on the same thread.
+
+    **Synchronous path**: on a cache miss only the exact requested range is
+    loaded from the inner reader — no synchronous lookahead.  This ensures
+    RSB never adds overhead in non-prefetch mode.
+
+    **Async prefetch**: after every cache miss or hit-near-end, a background
+    thread loads a window of ``lookahead_factor × request_size`` starting
+    slightly *before* the end of the current cache.  The ``back_safety``
+    overlap ensures that the next sequential request (whose start may be
+    ``2 × filter_overlap`` steps before the end of the current cache, e.g.
+    68 steps for a 34-step bilateral Godin filter) lands in the prefetch
+    window.
+
+    Parameters
+    ----------
+    inner : SlicingReader
+        The raw data source (e.g., :class:`~dsm2ui.animate.HydroH5FlowReader`).
+    lookahead_factor : int, optional
+        The async prefetch covers this many times the most-recent requested
+        size.  Default ``4``.
+    min_chunk_size : int, optional
+        Lower bound on the auto-computed prefetch size.  Default ``200``.
+    back_safety : int, optional
+        The async prefetch starts this many steps *before* the end of the
+        current cache so that the next sequential request (which overlaps by
+        up to ``2 × filter_overlap`` steps) is covered.  Default ``300``
+        (covers Godin at both 1-hour and 15-minute resolution).
+    prefetch_enabled : bool, optional
+        When ``False`` the async background prefetch thread is never launched.
+        Set to ``False`` when the outer :class:`BufferedSlicingReader` is in
+        synchronous mode (``prefetch=False``) to avoid background-thread I/O
+        contention with the consumer's synchronous chunk loads.  Default
+        ``True``.
+    """
+
+    def __init__(
+        self,
+        inner: SlicingReader,
+        lookahead_factor: int = 4,
+        min_chunk_size: int = 200,
+        back_safety: int = 300,
+        prefetch_enabled: bool = True,
+    ) -> None:
+        self._inner = inner
+        self._lookahead_factor = max(1, int(lookahead_factor))
+        self._min_chunk_size = max(1, int(min_chunk_size))
+        self._back_safety = max(0, int(back_safety))
+        self._prefetch_enabled = bool(prefetch_enabled)
+
+        self._cache: Optional[pd.DataFrame] = None
+        self._cache_start: int = 0
+        self._cache_end: int = 0
+
+        # Prefetched (next) cache — written by daemon thread, read under lock.
+        self._next_cache: Optional[pd.DataFrame] = None
+        self._next_start: int = 0
+        self._next_end: int = 0
+        self._prefetching: bool = False
+        self._lock = threading.Lock()
+
+        super().__init__(inner.time_index)
+
+    # ------------------------------------------------------------------
+    # SlicingReader interface
+    # ------------------------------------------------------------------
+
+    @property
+    def vmin(self) -> float:
+        return self._inner.vmin
+
+    @property
+    def vmax(self) -> float:
+        return self._inner.vmax
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        """Exact lookup — delegates to :meth:`get_slice_range`."""
+        i = int(self._time_index.get_indexer([timestamp], method="nearest")[0])
+        chunk = self.get_slice_range(i, i + 1)
+        if len(chunk) == 0:
+            return pd.Series(dtype=float)
+        return chunk.iloc[0].astype(float)
+
+    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
+        """Serve a contiguous range from the in-memory cache.
+
+        **Cache hit**: pure DataFrame slice — zero I/O.
+        **Next-cache promotion**: if the prefetch thread has completed and
+        its window covers the request, swap it to main cache — zero I/O.
+        **Cache miss**: load **exactly** ``[start_idx, end_idx]`` from the
+        inner reader (no synchronous lookahead), then launch an async prefetch
+        of the following window.
+        """
+        request_size = end_idx - start_idx
+
+        # Fast path: full range is within the current cache.
+        if (
+            self._cache is not None
+            and self._cache_start <= start_idx
+            and end_idx <= self._cache_end
+        ):
+            self._maybe_prefetch(self._cache_end, request_size)
+            s = start_idx - self._cache_start
+            e = end_idx - self._cache_start
+            return self._cache.iloc[s:e]
+
+        # Try to promote the prefetched (next) cache.
+        with self._lock:
+            if (
+                self._next_cache is not None
+                and self._next_start <= start_idx
+                and end_idx <= self._next_end
+            ):
+                self._cache = self._next_cache
+                self._cache_start = self._next_start
+                self._cache_end = self._next_end
+                self._next_cache = None
+                self._prefetching = False
+
+        # Re-check after possible promotion.
+        if (
+            self._cache is not None
+            and self._cache_start <= start_idx
+            and end_idx <= self._cache_end
+        ):
+            self._maybe_prefetch(self._cache_end, request_size)
+            s = start_idx - self._cache_start
+            e = end_idx - self._cache_start
+            return self._cache.iloc[s:e]
+
+        # Cache miss: load EXACTLY the requested range — no synchronous lookahead.
+        n = len(self._time_index)
+        load_end = min(n, end_idx)
+        self._cache = self._inner.get_slice_range(start_idx, load_end)
+        self._cache_start = start_idx
+        self._cache_end = load_end
+        with self._lock:
+            self._next_cache = None
+            self._prefetching = False
+        self._maybe_prefetch(load_end, request_size)
+        return self._cache.iloc[: end_idx - start_idx]
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _maybe_prefetch(self, after_pos: int, request_size: int) -> None:
+        """Spawn a background load of the next window when not already running.
+
+        The prefetch window starts up to ``back_safety`` steps *before*
+        ``after_pos`` so that the next sequential request (whose start overlaps
+        by up to ``2 × filter_overlap`` steps into the current cache) is
+        guaranteed to fall within the prefetched window.  ``back_safety`` is
+        capped at ``request_size - 1`` so that for small requests the prefetch
+        still advances forward rather than always targeting the same window.
+
+        Does nothing when :attr:`_prefetch_enabled` is ``False``.
+        """
+        if not self._prefetch_enabled:
+            return
+        n = len(self._time_index)
+        if after_pos >= n:
+            return
+        # Cap back_safety so it never exceeds the request width minus one step.
+        effective_back = min(self._back_safety, max(0, request_size - 1))
+        target_start = max(0, after_pos - effective_back)
+        next_size = max(self._min_chunk_size, request_size * self._lookahead_factor)
+        target_end = min(n, target_start + next_size)
+        if target_end <= target_start:
+            return
+
+        with self._lock:
+            if self._prefetching:
+                return
+            if (
+                self._next_cache is not None
+                and self._next_start <= target_start
+                and target_end <= self._next_end
+            ):
+                return  # already have this window
+            self._prefetching = True
+
+        threading.Thread(
+            target=self._prefetch_worker,
+            args=(target_start, target_end),
+            daemon=True,
+        ).start()
+
+    def _prefetch_worker(self, start: int, end: int) -> None:
+        """Load a raw chunk off the consumer thread; store as ``_next_cache``."""
+        chunk = None
+        try:
+            chunk = self._inner.get_slice_range(start, end)
+        except Exception:
+            chunk = None
+        with self._lock:
+            if chunk is not None:
+                self._next_cache = chunk
+                self._next_start = start
+                self._next_end = end
+            self._prefetching = False
+
+    def close(self) -> None:
+        """Close the underlying inner reader if it supports ``close()``."""
+        if hasattr(self._inner, "close"):
+            self._inner.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

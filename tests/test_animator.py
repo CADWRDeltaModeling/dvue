@@ -559,7 +559,7 @@ class TestBufferedReaderPrefetch:
         from dvue.animator import BufferedSlicingReader
 
         inst = _InstrumentedReader(long_df)
-        buf = BufferedSlicingReader(inst, chunk_size=20, refill_margin=0.2)
+        buf = BufferedSlicingReader(inst, chunk_size=20, refill_margin=0.2, adaptive=False)
         for ts in long_df.index[:8]:
             buf.get_slice(ts)
         # Only the initial load — buffer [0, 20) covers all eight frames.
@@ -591,7 +591,7 @@ class TestBufferedReaderPrefetch:
 
         inst = _InstrumentedReader(long_df)
         buf = BufferedSlicingReader(
-            inst, chunk_size=20, refill_margin=0.2, prefetch=True
+            inst, chunk_size=20, refill_margin=0.2, prefetch=True, adaptive=False
         )
         for ts in long_df.index:
             buf.get_slice(ts)
@@ -650,11 +650,164 @@ class TestBufferedReaderPrefetchPerformance:
 
 
 # ===========================================================================
-# TransformedSlicingReader tests
+# RawSequentialBuffer tests
 # ===========================================================================
 
-class TestTransformedSlicingReader:
-    """Tests for TransformedSlicingReader with synthetic daily data."""
+
+class TestRawSequentialBuffer:
+    """Functional tests for RawSequentialBuffer cache hit/miss and prefetch."""
+
+    @pytest.fixture
+    def raw_df(self):
+        idx = pd.date_range("2020-01-01", periods=200, freq="h")
+        rng = np.random.default_rng(42)
+        return pd.DataFrame(
+            rng.uniform(0.0, 1.0, size=(200, 4)), index=idx, columns=[1, 2, 3, 4]
+        )
+
+    @pytest.fixture
+    def instrumented(self, raw_df):
+        """InMemorySlicingReader wrapped in _InstrumentedReader for call counting."""
+        return _InstrumentedReader(raw_df)
+
+    def test_cache_miss_then_hit_sequential(self, instrumented, raw_df):
+        """First request misses; subsequent requests in the same window hit."""
+        import time
+        from dvue.animator.reader import RawSequentialBuffer
+        buf = RawSequentialBuffer(instrumented, lookahead_factor=3, min_chunk_size=20)
+        # First request — must miss (empty cache) and load synchronously.
+        buf.get_slice_range(0, 10)
+        assert instrumented.range_calls >= 1
+        # Let any background prefetch thread run to completion so it doesn't
+        # race with our assertion below.
+        time.sleep(0.05)
+        calls_after_prefetch = instrumented.range_calls
+        # Subsequent request fully within the already-loaded cache window —
+        # must NOT trigger a new synchronous inner call.
+        buf.get_slice_range(5, 10)
+        assert instrumented.range_calls == calls_after_prefetch
+
+    def test_correct_values_returned(self, instrumented, raw_df):
+        """Values from cache match inner reader directly."""
+        from dvue.animator import InMemorySlicingReader
+        from dvue.animator.reader import RawSequentialBuffer
+        mem = InMemorySlicingReader(raw_df)
+        buf = RawSequentialBuffer(instrumented, lookahead_factor=3, min_chunk_size=20)
+        result = buf.get_slice_range(10, 20)
+        expected = mem.get_slice_range(10, 20)
+        pd.testing.assert_frame_equal(result, expected)
+
+    def test_cache_miss_on_seek(self, instrumented, raw_df):
+        """A jump beyond the cache triggers a new synchronous load."""
+        from dvue.animator.reader import RawSequentialBuffer
+        buf = RawSequentialBuffer(instrumented, lookahead_factor=3, min_chunk_size=20)
+        buf.get_slice_range(0, 10)
+        calls_after_first = instrumented.range_calls
+        # Far jump — must miss and load again.
+        buf.get_slice_range(150, 160)
+        assert instrumented.range_calls > calls_after_first
+
+    def test_sequential_sweep_few_misses(self, raw_df):
+        """A sequential sweep should generate far fewer inner calls than frames."""
+        import time
+        from dvue.animator.reader import RawSequentialBuffer
+        inst = _InstrumentedReader(raw_df)
+        buf = RawSequentialBuffer(inst, lookahead_factor=4, min_chunk_size=30)
+        # 200 sequential 10-step requests (each 10 steps wide).
+        for i in range(0, 200, 10):
+            buf.get_slice_range(i, min(200, i + 10))
+            time.sleep(0.002)  # let prefetch threads complete
+        # With lookahead=4 and min=30, the async prefetch covers 40 steps ahead.
+        # One synchronous cold-start load + several promotions from next_cache =
+        # well under 15 total inner calls for 200 steps.
+        assert inst.range_calls <= 15
+
+    def test_vmin_vmax_delegated(self, instrumented):
+        """vmin/vmax should reflect the inner reader."""
+        from dvue.animator.reader import RawSequentialBuffer
+        buf = RawSequentialBuffer(instrumented, lookahead_factor=2)
+        assert buf.vmin == instrumented.vmin
+        assert buf.vmax == instrumented.vmax
+
+    def test_time_index_matches_inner(self, instrumented):
+        from dvue.animator.reader import RawSequentialBuffer
+        buf = RawSequentialBuffer(instrumented)
+        assert len(buf.time_index) == len(instrumented.time_index)
+
+
+# ===========================================================================
+# BufferedSlicingReader — adaptive chunk sizing tests
+# ===========================================================================
+
+
+class TestBufferedSlicingReaderAdaptive:
+    """Confirm that _chunk_size grows when playback fps is high."""
+
+    @pytest.fixture
+    def long_df(self):
+        idx = pd.date_range("2020-01-01", periods=500, freq="h")
+        rng = np.random.default_rng(99)
+        return pd.DataFrame(
+            rng.uniform(0.0, 1.0, size=(500, 4)), index=idx, columns=[1, 2, 3, 4]
+        )
+
+    def test_chunk_size_grows_at_high_fps(self, long_df):
+        """After rapid successive frames the adaptive code grows _chunk_size."""
+        import time
+        from dvue.animator import BufferedSlicingReader, InMemorySlicingReader
+
+        mem = InMemorySlicingReader(long_df)
+        buf = BufferedSlicingReader(
+            mem, chunk_size=50, prefetch=True,
+            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+            target_buffer_seconds=5.0,
+        )
+        initial_size = buf._chunk_size
+        # Simulate rapid playback: no sleep → very high fps.
+        for ts in long_df.index[:100]:
+            buf.get_slice(ts)
+        # After 100 frames with no sleep, fps >> 1/5 → new_size >> initial_size.
+        assert buf._chunk_size >= initial_size  # must not shrink
+        # At some point (after the first prefetch trigger) it should have grown.
+        # Drive further to ensure the margin is crossed and a prefetch fires.
+        for ts in long_df.index[100:200]:
+            buf.get_slice(ts)
+        assert buf._chunk_size > initial_size
+
+    def test_adaptive_false_chunk_size_stable(self, long_df):
+        """With adaptive=False the chunk_size never changes."""
+        import time
+        from dvue.animator import BufferedSlicingReader, InMemorySlicingReader
+
+        mem = InMemorySlicingReader(long_df)
+        buf = BufferedSlicingReader(
+            mem, chunk_size=30, prefetch=True, adaptive=False,
+        )
+        for ts in long_df.index[:200]:
+            buf.get_slice(ts)
+        assert buf._chunk_size == 30
+
+    def test_adaptive_not_active_in_sync_mode(self, long_df):
+        """adaptive=True has no effect when prefetch=False."""
+        from dvue.animator import BufferedSlicingReader, InMemorySlicingReader
+
+        mem = InMemorySlicingReader(long_df)
+        buf = BufferedSlicingReader(
+            mem, chunk_size=30, prefetch=False, adaptive=True,
+            target_buffer_seconds=0.001,
+        )
+        for ts in long_df.index[:50]:
+            buf.get_slice(ts)
+        # _maybe_prefetch is never called in sync mode → size stays at 30.
+        assert buf._chunk_size == 30
+
+
+# ===========================================================================
+# StreamingTransformedSlicingReader — basic API tests
+# ===========================================================================
+
+class TestStreamingTransformedSlicingReaderBasic:
+    """Basic API tests for StreamingTransformedSlicingReader (resample, rolling, context-manager)."""
 
     @pytest.fixture
     def hourly_df(self):
@@ -669,92 +822,78 @@ class TestTransformedSlicingReader:
         from dvue.animator import InMemorySlicingReader
         return InMemorySlicingReader(hourly_df)
 
-    def test_resample_daily_reduces_steps(self, hourly_reader):
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
+    @pytest.fixture
+    def resample_spec(self):
+        from dvue.animator import TransformSpec
+        return TransformSpec(
+            lambda df: df.resample("D").mean(),
+            kind="aggregate",
+            get_overlap=lambda _: 0,
+            output_freq="D",
         )
+
+    @pytest.fixture
+    def rolling_spec(self):
+        from dvue.animator import TransformSpec
+        return TransformSpec(
+            lambda df: df.rolling(6, center=True, min_periods=1).mean(),
+            kind="convolution",
+            get_overlap=lambda _: 3,
+        )
+
+    def test_resample_daily_reduces_steps(self, hourly_reader, resample_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, resample_spec)
         # 48 hourly steps → 2 daily steps
         assert len(tr.time_index) == 2
 
-    def test_resample_daily_freq(self, hourly_reader):
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
-        )
+    def test_resample_daily_freq(self, hourly_reader, resample_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, resample_spec)
         assert tr.time_index.freq == pd.tseries.frequencies.to_offset("D")
 
-    def test_resample_get_slice_returns_series(self, hourly_reader):
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
-        )
+    def test_resample_get_slice_returns_series(self, hourly_reader, resample_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, resample_spec)
         s = tr.get_slice(tr.time_index[0])
         assert isinstance(s, pd.Series)
         assert len(s) == 4
 
-    def test_rolling_keeps_steps(self, hourly_reader, hourly_df):
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.rolling("6h", center=True, min_periods=1).mean(),
-        )
+    def test_rolling_keeps_steps(self, hourly_reader, rolling_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, rolling_spec)
         assert len(tr.time_index) == 48
 
-    def test_rolling_smooths_values(self, hourly_reader, hourly_df):
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.rolling(6, center=True, min_periods=1).mean(),
-        )
-        raw = hourly_reader.get_slice(hourly_df.index[12])
+    def test_rolling_smooths_values(self, hourly_reader, hourly_df, rolling_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, rolling_spec)
         smoothed = tr.get_slice_nearest(hourly_df.index[12])
-        # Smoothed should differ from raw (unless all same value)
         assert isinstance(smoothed, pd.Series)
         assert len(smoothed) == 4
 
-    def test_vmin_vmax_from_transformed_data(self, hourly_reader, hourly_df):
-        from dvue.animator import TransformedSlicingReader
-        # Daily mean should have vmin/vmax within the raw range
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
-        )
-        assert tr.vmin >= hourly_reader.vmin - 1e-6
-        assert tr.vmax <= hourly_reader.vmax + 1e-6
+    def test_vmin_vmax_inherited_from_inner(self, hourly_reader, resample_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, resample_spec)
+        # vmin/vmax are inherited from the inner reader — no sampling on construction
+        assert tr.vmin == hourly_reader.vmin
+        assert tr.vmax == hourly_reader.vmax
 
-    def test_get_slice_nearest_on_transformed(self, hourly_reader):
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
-        )
-        # Query midday — should snap to the daily step
+    def test_get_slice_nearest_on_transformed(self, hourly_reader, resample_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(hourly_reader, resample_spec)
+        # Query midday — should snap to the nearest daily step
         midday = pd.Timestamp("2020-01-01 12:00")
         s = tr.get_slice_nearest(midday)
         assert isinstance(s, pd.Series)
 
-    def test_non_datetime_output_raises(self, hourly_reader):
-        from dvue.animator import TransformedSlicingReader
-        import pytest
-        # transform_fn that returns a non-DatetimeIndex should raise TypeError
-        def bad_transform(df):
-            result = df.reset_index(drop=True)
-            return result
+    def test_invalid_kind_raises(self):
+        from dvue.animator import TransformSpec
+        with pytest.raises(ValueError, match="kind"):
+            TransformSpec(lambda df: df, kind="unknown", get_overlap=lambda _: 0)
 
-        tr = TransformedSlicingReader(hourly_reader, transform_fn=bad_transform)
-        with pytest.raises(TypeError, match="DatetimeIndex"):
-            tr.get_slice(hourly_reader.time_index[0])
-
-    def test_context_manager(self, hourly_reader):
-        from dvue.animator import TransformedSlicingReader
-        with TransformedSlicingReader(
-            hourly_reader,
-            transform_fn=lambda df: df.resample("D").mean(),
-        ) as tr:
+    def test_context_manager(self, hourly_reader, resample_spec):
+        from dvue.animator import StreamingTransformedSlicingReader
+        with StreamingTransformedSlicingReader(hourly_reader, resample_spec) as tr:
             assert len(tr.time_index) == 2
 
 
@@ -885,10 +1024,10 @@ class TestStreamingTransformedSlicingReader:
     # ── Construction / time_index ─────────────────────────────────────
 
     def test_aggregate_time_index_computed_without_data(self, reader_hourly):
-        """Daily resample: time_index derived from inner metadata, no raw reads."""
+        """Daily resample: time_index derived from inner metadata, zero raw reads."""
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._resample_spec("D")
-        # Patch get_slice_range to detect calls during __init__ beyond vmin/vmax sample
+        # Patch get_slice_range to verify no reads occur during __init__
         _original = reader_hourly.get_slice_range
         call_counts = [0]
 
@@ -897,17 +1036,17 @@ class TestStreamingTransformedSlicingReader:
             return _original(*a, **kw)
         reader_hourly.get_slice_range = _counting
 
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
         # Should have produced 2 output days for 48 hourly steps
         assert len(sr.time_index) == 2
         assert sr.time_index.freq == pd.tseries.frequencies.to_offset("D")
-        # vmin/vmax sample triggered at most one call
-        assert call_counts[0] <= 1
+        # Construction must not read any data
+        assert call_counts[0] == 0
 
     def test_convolution_time_index_same_as_inner(self, reader_hourly):
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._rolling_spec("4h")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
         assert len(sr.time_index) == len(reader_hourly.time_index)
         assert sr.time_index.freq == reader_hourly.time_index.freq
 
@@ -917,7 +1056,7 @@ class TestStreamingTransformedSlicingReader:
         """Streaming daily mean matches full-dataset daily mean."""
         from dvue.animator import StreamingTransformedSlicingReader, InMemorySlicingReader
         spec = self._resample_spec("D")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=2)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
 
         # Reference: full-dataset daily mean via InMemorySlicingReader
         full_df = reader_hourly._data
@@ -934,7 +1073,7 @@ class TestStreamingTransformedSlicingReader:
         """Requesting a subrange returns exactly the right rows."""
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._resample_spec("D")
-        sr = StreamingTransformedSlicingReader(reader_long, spec, sample_steps=10)
+        sr = StreamingTransformedSlicingReader(reader_long, spec)
         # reader_long IS daily, so daily resample of daily = same
         result = sr.get_slice_range(10, 20)
         assert len(result) == 10
@@ -943,7 +1082,7 @@ class TestStreamingTransformedSlicingReader:
         """Streaming rolling mean matches full-dataset rolling mean at interior steps."""
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._rolling_spec("4h")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
 
         full_df = reader_hourly._data
         expected_full = full_df.rolling("4h", center=True, min_periods=1).mean()
@@ -957,7 +1096,7 @@ class TestStreamingTransformedSlicingReader:
         """Requesting from step 0 works (clamped overlap)."""
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._rolling_spec("4h")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
         result = sr.get_slice_range(0, 5)
         assert len(result) == 5
         assert result.shape[1] == 4
@@ -966,7 +1105,7 @@ class TestStreamingTransformedSlicingReader:
         """Requesting the last few steps works (clamped right overlap)."""
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._rolling_spec("4h")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
         n = len(sr.time_index)
         result = sr.get_slice_range(n - 5, n)
         assert len(result) == 5
@@ -976,20 +1115,22 @@ class TestStreamingTransformedSlicingReader:
     def test_get_slice_returns_series(self, reader_hourly):
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._rolling_spec("4h")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
         s = sr.get_slice(sr.time_index[10])
         assert isinstance(s, pd.Series)
         assert len(s) == 4
 
     # ── vmin / vmax ───────────────────────────────────────────────────
 
-    def test_vmin_vmax_finite(self, reader_hourly):
+    def test_vmin_vmax_inherited_from_inner(self, reader_hourly):
         from dvue.animator import StreamingTransformedSlicingReader
         spec = self._resample_spec("D")
-        sr = StreamingTransformedSlicingReader(reader_hourly, spec, sample_steps=2)
+        sr = StreamingTransformedSlicingReader(reader_hourly, spec)
+        # vmin/vmax inherited from inner reader — finite and equal to inner's
         assert np.isfinite(sr.vmin)
         assert np.isfinite(sr.vmax)
-        assert sr.vmin <= sr.vmax
+        assert sr.vmin == reader_hourly.vmin
+        assert sr.vmax == reader_hourly.vmax
 
     # ── Overlap computation ───────────────────────────────────────────
 
@@ -1038,7 +1179,7 @@ class TestStreamingTransformedSlicingReader:
         idx = _pd.date_range("2020-01-01", periods=48, freq="h")
         df = _pd.DataFrame(_np.ones((48, 2)), index=idx, columns=[1, 2])
         reader = InMemorySlicingReader(df)
-        sr = StreamingTransformedSlicingReader(reader, spec, sample_steps=2)
+        sr = StreamingTransformedSlicingReader(reader, spec)
         assert len(sr.time_index) == 2   # 48 h → 2 days
 
     def test_rolling_spec_is_TransformSpec(self):
@@ -1065,7 +1206,7 @@ class TestStreamingTransformedSlicingReader:
         idx = _pd.date_range("2020-01-01", periods=24, freq="h")
         df = _pd.DataFrame(_np.ones((24, 2)), index=idx, columns=[1, 2])
         reader = InMemorySlicingReader(df)
-        sr = StreamingTransformedSlicingReader(reader, spec, sample_steps=4)
+        sr = StreamingTransformedSlicingReader(reader, spec)
         assert len(sr.time_index) == 24  # convolution: same length
 
     def test_godin_spec_overlap_formula(self):

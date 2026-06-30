@@ -5,7 +5,6 @@ Provides a framework for animating spatial data over time:
 - :class:`InMemorySlicingReader` — wraps a ``pd.DataFrame(index=DatetimeIndex,
   columns=geo_ids)`` for immediate use.
 - :class:`BufferedSlicingReader` — keeps a rolling in-memory buffer for HDF5.
-- :class:`TransformedSlicingReader` — applies a time-domain transform (full load, legacy).
 - :class:`TransformSpec` — describes a streaming transform (kind, overlap, output_freq).
 - :class:`StreamingTransformedSlicingReader` — applies a transform per-chunk, no full load.
 - :class:`DiffSlicingReader` — computes element-wise A − B between two readers.
@@ -21,20 +20,20 @@ from .reader import (
     SlicingReader,
     InMemorySlicingReader,
     BufferedSlicingReader,
-    TransformedSlicingReader,
     TransformSpec,
     StreamingTransformedSlicingReader,
     DiffSlicingReader,
+    RawSequentialBuffer,
 )
 
 __all__ = [
     "SlicingReader",
     "InMemorySlicingReader",
     "BufferedSlicingReader",
-    "TransformedSlicingReader",
     "TransformSpec",
     "StreamingTransformedSlicingReader",
     "DiffSlicingReader",
+    "RawSequentialBuffer",
     "GeoAnimatorManager",
     "MultiGeoAnimatorManager",
     "CURATED_COLORMAPS",

@@ -37,7 +37,7 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure as bk_figure
 
-from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader
+from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader, RawSequentialBuffer
 from .ui import (
     CURATED_COLORMAPS,
     CURATED_COLORMAPS_WITH_SEP,
@@ -55,7 +55,6 @@ from .ui import (
     _format_level,
     TransformSpec,
     StreamingTransformedSlicingReader,
-    TransformedSlicingReader,
 )
 
 
@@ -825,28 +824,57 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
 
     def _setup_reader(self, base: SlicingReader, transform_name: str) -> SlicingReader:
         reader = base
-        if (transform_name and transform_name != "none"
-                and transform_name in self._transform_options):
+        if (
+            transform_name
+            and transform_name != "none"
+            and transform_name in self._transform_options
+        ):
             spec_or_fn = self._transform_options[transform_name]
             if isinstance(spec_or_fn, TransformSpec):
+                try:
+                    freq_nanos = int(
+                        pd.tseries.frequencies.to_offset(
+                            reader.time_index.freq
+                        ).nanos
+                    )
+                    raw_overlap = spec_or_fn.get_overlap(freq_nanos)
+                except (AttributeError, TypeError):
+                    raw_overlap = 0
+                if raw_overlap > 0:
+                    reader = RawSequentialBuffer(reader)
                 reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
             else:
-                from .reader import TransformedSlicingReader as _TFR
-                reader = _TFR(reader, spec_or_fn)
+                raise TypeError(
+                    f"transform_options value for {transform_name!r} must be a "
+                    f"TransformSpec, got {type(spec_or_fn).__name__}. "
+                    "Use make_resample_transform(), make_moving_average_transform(), "
+                    "or make_godin_transform() from dsm2ui.animate."
+                )
         return BufferedSlicingReader(
-            reader, chunk_size=self._buffer_chunk_size, prefetch=True
+            reader, chunk_size=self._buffer_chunk_size, prefetch=True,
+            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
         )
 
     def _get_diff_reader(self) -> SlicingReader:
-        """Return a buffered DiffSlicingReader (constructed lazily, cached)."""
+        """Return a buffered DiffSlicingReader backed by the transformed readers.
+
+        Uses ``_reader_a`` / ``_reader_b`` (already transform-wrapped and
+        buffered) so per-frame ``get_slice_nearest`` calls inside
+        :class:`~dvue.animator.DiffSlicingReader` hit the in-memory buffers of
+        each study rather than the raw HDF5 files.  The diff is therefore
+        computed on the same transformed data shown on each individual map.
+        The diff cache is invalidated (reset to ``None``) whenever the
+        transform changes, so the fresh transformed readers are always used.
+        """
         if self._diff_reader_cache is None:
             self._diff_reader_cache = DiffSlicingReader(
-                self._base_reader_a, self._base_reader_b,
+                self._reader_a, self._reader_b,
             )
         return BufferedSlicingReader(
             self._diff_reader_cache,
             chunk_size=self._buffer_chunk_size,
             prefetch=True,
+            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
         )
 
     # ------------------------------------------------------------------
@@ -1464,10 +1492,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         doc = self._active_doc()
 
         def _compute() -> None:
-            """Background thread: build both readers (triggers lazy cache)."""
+            """Background thread: build both readers, warm up buffers."""
             new_reader_a = self._setup_reader(self._base_reader_a, new_name)
             new_reader_b = self._setup_reader(self._base_reader_b, new_name)
-            # Accessing time_index forces TransformedSlicingReader._ensure_cache()
             ti = new_reader_a.time_index
             nearest_idx = max(0, min(
                 int(ti.get_indexer([current_ts], method="nearest")[0]),

@@ -29,8 +29,9 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure as bk_figure
 
-from .reader import (SlicingReader, BufferedSlicingReader, TransformedSlicingReader,
-                     StreamingTransformedSlicingReader, TransformSpec)
+from .reader import (SlicingReader, BufferedSlicingReader,
+                     StreamingTransformedSlicingReader, TransformSpec,
+                     RawSequentialBuffer)
 
 # ---------------------------------------------------------------------------
 # Curated colormaps (subset that works well with numeric data on maps)
@@ -1353,19 +1354,37 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     def _setup_reader(self, transform_name: str) -> "SlicingReader":
         """Wrap ``_base_reader`` with an optional transform then buffer it.
 
-        When the transform option value is a :class:`TransformSpec` the
-        streaming implementation is used (no full-file load at startup).
-        A bare callable falls back to the legacy :class:`TransformedSlicingReader`.
+        The transform option value must be a :class:`TransformSpec`.
+        A :class:`RawSequentialBuffer` is inserted between the raw reader and
+        the transform when the spec has a non-zero overlap (e.g. Godin,
+        rolling average), so HDF5 I/O and transform computation overlap in
+        time.
         """
         reader = self._base_reader
         if transform_name and transform_name != "none" and transform_name in self._transform_options:
             spec_or_fn = self._transform_options[transform_name]
-            if isinstance(spec_or_fn, TransformSpec):
-                reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
-            else:
-                reader = TransformedSlicingReader(reader, spec_or_fn)
+            if not isinstance(spec_or_fn, TransformSpec):
+                raise TypeError(
+                    f"transform_options[{transform_name!r}] must be a TransformSpec, "
+                    f"got {type(spec_or_fn).__name__}. "
+                    "Use make_resample_transform(), make_moving_average_transform(), "
+                    "or make_godin_transform() from dsm2ui.animate."
+                )
+            try:
+                freq_nanos = int(
+                    pd.tseries.frequencies.to_offset(
+                        reader.time_index.freq
+                    ).nanos
+                )
+                raw_overlap = spec_or_fn.get_overlap(freq_nanos)
+            except (AttributeError, TypeError):
+                raw_overlap = 0
+            if raw_overlap > 0:
+                reader = RawSequentialBuffer(reader)
+            reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
         return BufferedSlicingReader(
-            reader, chunk_size=self._buffer_chunk_size, prefetch=True
+            reader, chunk_size=self._buffer_chunk_size, prefetch=True,
+            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
         )
 
     # ------------------------------------------------------------------
@@ -1489,10 +1508,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         doc = self._bk_figure.document
 
         def _compute() -> None:
-            """Run in a background thread: build reader (triggers lazy cache)."""
+            """Run in a background thread: build reader, warm up buffer."""
             new_reader = self._setup_reader(new_name)
-            # Accessing time_index triggers TransformedSlicingReader._ensure_cache()
-            # which is the slow step (loads HDF5 + applies filter).
             ti = new_reader.time_index
             nearest_idx = max(0, min(
                 int(ti.get_indexer([current_ts], method="nearest")[0]),
