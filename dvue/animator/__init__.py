@@ -22,6 +22,7 @@ from .reader import (
     BufferedSlicingReader,
     TransformSpec,
     StreamingTransformedSlicingReader,
+    ResamplingSlicingReader,
     DiffSlicingReader,
     RawSequentialBuffer,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "BufferedSlicingReader",
     "TransformSpec",
     "StreamingTransformedSlicingReader",
+    "ResamplingSlicingReader",
     "DiffSlicingReader",
     "RawSequentialBuffer",
     "GeoAnimatorManager",

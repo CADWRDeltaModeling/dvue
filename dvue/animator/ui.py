@@ -31,7 +31,7 @@ from bokeh.plotting import figure as bk_figure
 
 from .reader import (SlicingReader, BufferedSlicingReader,
                      StreamingTransformedSlicingReader, TransformSpec,
-                     RawSequentialBuffer)
+                     RawSequentialBuffer, ResamplingSlicingReader)
 
 # ---------------------------------------------------------------------------
 # Curated colormaps (subset that works well with numeric data on maps)
@@ -1366,6 +1366,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         chunk_size = self._buffer_chunk_size
         min_chunk = 50
         max_chunk = 2000
+        target_buf_s = 10.0
         if transform_name and transform_name != "none" and transform_name in self._transform_options:
             spec_or_fn = self._transform_options[transform_name]
             if not isinstance(spec_or_fn, TransformSpec):
@@ -1382,43 +1383,53 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                         reader.time_index.freq
                     ).nanos
                 )
-                raw_overlap = spec_or_fn.get_overlap(freq_nanos)
             except (AttributeError, TypeError):
-                raw_overlap = 0
-            if raw_overlap > 0:
-                reader = RawSequentialBuffer(reader)
-            reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
-            # ── Scale chunk_size for coarse aggregate transforms ──────────────
-            # chunk_size is an OUTPUT-step count.  For convolution transforms
-            # (Godin, rolling average) output_freq == input_freq, so 200 output
-            # steps ≈ 200 raw steps — cheap.  For aggregate transforms that
-            # coarsen the time step (daily mean, hourly mean) 200 output steps
-            # maps to 200×ratio raw steps:
-            #   daily from 15-min  → 200×96  = 19,200 raw steps (expensive!)
-            #   hourly from 15-min → 200×4   =    800 raw steps (ok)
-            # Scale chunk_size so the raw steps per chunk stay roughly constant,
-            # keeping each load fast regardless of output frequency.
-            if (
-                spec_or_fn.kind == "aggregate"
-                and spec_or_fn.output_freq is not None
-                and freq_nanos > 0
-            ):
+                pass
+
+            if spec_or_fn.kind == "aggregate":
+                # ── Aggregate (resample) transforms ──────────────────────────
+                # Stack: [STSR(filter)] → ResamplingSlicingReader → BSR
+                # RSR requests only the inner steps needed for each output
+                # window, so chunk_size stays small regardless of the
+                # input/output frequency ratio.
+                filter_spec = spec_or_fn.filter_spec
+                if filter_spec is not None:
+                    # Convolution pre-filter (e.g. Godin, rolling 14D)
+                    try:
+                        raw_overlap = filter_spec.get_overlap(freq_nanos)
+                    except (AttributeError, TypeError):
+                        raw_overlap = 0
+                    if raw_overlap > 0:
+                        reader = RawSequentialBuffer(reader)
+                    reader = StreamingTransformedSlicingReader(reader, filter_spec)
+                reader = ResamplingSlicingReader(
+                    reader,
+                    spec_or_fn.output_freq,
+                    spec_or_fn.resample_agg,
+                )
+                # Outer BSR: start small for fast cold start; adaptive sizing
+                # grows the chunk during playback so the prefetch thread always
+                # has enough lead time.  max_chunk_size=365 (1 year of daily)
+                # and target_buffer_seconds=30 let the buffer grow to
+                # fps×30 s worth of output steps at runtime.
+                chunk_size = max(5, self._buffer_chunk_size // 20)
+                min_chunk = 2
+                max_chunk = 365
+                target_buf_s = 30.0
+            else:
+                # ── Convolution transforms (Godin, rolling) ──────────────────
                 try:
-                    out_ns = int(
-                        pd.tseries.frequencies.to_offset(
-                            spec_or_fn.output_freq
-                        ).nanos
-                    )
-                    if out_ns > freq_nanos:
-                        ratio = out_ns // freq_nanos
-                        chunk_size = max(5, self._buffer_chunk_size // ratio)
-                        min_chunk = max(2, 50 // ratio)
-                        max_chunk = max(chunk_size, 2000 // ratio)
-                except Exception:
-                    pass
+                    raw_overlap = spec_or_fn.get_overlap(freq_nanos)
+                except (AttributeError, TypeError):
+                    raw_overlap = 0
+                if raw_overlap > 0:
+                    reader = RawSequentialBuffer(reader)
+                reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
+
         return BufferedSlicingReader(
             reader, chunk_size=chunk_size, prefetch=True,
             adaptive=True, min_chunk_size=min_chunk, max_chunk_size=max_chunk,
+            target_buffer_seconds=target_buf_s,
         )
 
     # ------------------------------------------------------------------

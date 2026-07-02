@@ -710,13 +710,19 @@ class TransformSpec:
     :func:`~dsm2ui.animate.make_godin_transform` for production examples.
     """
 
-    def __init__(self, transform_fn, kind: str, get_overlap, output_freq=None):
+    def __init__(self, transform_fn, kind: str, get_overlap, output_freq=None,
+                 filter_spec=None, resample_agg="mean"):
         if kind not in ("convolution", "aggregate"):
             raise ValueError(f"kind must be 'convolution' or 'aggregate', got {kind!r}")
         self.transform_fn = transform_fn
         self.kind = kind
         self.get_overlap = get_overlap   # callable(freq_nanos: int) -> int
         self.output_freq = output_freq
+        # Optional: for kind="aggregate", carry the convolution pre-filter spec
+        # so _setup_reader can stack STSR(filter_spec) → ResamplingSlicingReader
+        # instead of using STSR's slow aggregate code path.
+        self.filter_spec = filter_spec   # TransformSpec or None
+        self.resample_agg = resample_agg # aggregation for ResamplingSlicingReader
 
 
 class StreamingTransformedSlicingReader(SlicingReader):
@@ -875,6 +881,113 @@ class StreamingTransformedSlicingReader(SlicingReader):
             result = result.copy()
             result.index = self._time_index[start_out:end_out]
             return result
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        i = int(self._time_index.get_indexer([timestamp], method="nearest")[0])
+        chunk = self.get_slice_range(i, i + 1)
+        if len(chunk) == 0:
+            return pd.Series(dtype=float)
+        return chunk.iloc[0].astype(float)
+
+    def close(self) -> None:
+        if hasattr(self._inner, "close"):
+            self._inner.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+# ---------------------------------------------------------------------------
+# Resampling reader
+# ---------------------------------------------------------------------------
+
+class ResamplingSlicingReader(SlicingReader):
+    """Wraps any :class:`SlicingReader` and resamples its output to a coarser frequency.
+
+    Unlike :class:`StreamingTransformedSlicingReader` with ``kind="aggregate"``,
+    this reader requests only the inner steps needed for each output window —
+    never a large overlap-padded chunk.  It is the efficient outer layer for
+    composed transforms::
+
+        BufferedSlicingReader(chunk_size=20)
+          └── ResamplingSlicingReader(output_freq="D")
+              └── StreamingTransformedSlicingReader(godin, kind="convolution")
+                  └── RawSequentialBuffer
+                      └── BaseReader
+
+    Parameters
+    ----------
+    inner : SlicingReader
+        The pre-filtered source (Godin STSR, rolling STSR, or a raw reader).
+    output_freq : str
+        Pandas offset string for the desired output step (e.g. ``"D"``, ``"h"``).
+    agg : {"mean", "max", "min", "sum"}, optional
+        Aggregation applied when resampling.  Default ``"mean"``.
+    """
+
+    def __init__(self, inner: SlicingReader, output_freq: str, agg: str = "mean") -> None:
+        self._inner = inner
+        self._output_freq = output_freq
+        self._agg = agg
+
+        raw_ti = inner.time_index
+        out_freq = pd.tseries.frequencies.to_offset(output_freq)
+        out_start = raw_ti[0].floor(output_freq)
+        out_end = raw_ti[-1].floor(output_freq)
+        out_ti = pd.date_range(out_start, out_end, freq=output_freq)
+        if out_ti.freq is None:
+            out_ti = out_ti.copy()
+            out_ti.freq = out_freq
+
+        self._vmin = inner.vmin
+        self._vmax = inner.vmax
+
+        super().__init__(out_ti)
+
+    @property
+    def vmin(self) -> float:
+        return self._vmin
+
+    @property
+    def vmax(self) -> float:
+        return self._vmax
+
+    def get_slice_range(self, start_out: int, end_out: int) -> pd.DataFrame:
+        n_out = len(self._time_index)
+        start_out = max(0, min(start_out, n_out))
+        end_out = max(start_out, min(end_out, n_out))
+        if start_out >= end_out:
+            return pd.DataFrame(index=self._time_index[start_out:end_out])
+
+        out_freq = pd.tseries.frequencies.to_offset(self._output_freq)
+        out_start_ts = self._time_index[start_out]
+        last_out_ts = self._time_index[end_out - 1]
+        raw_upper_ts = last_out_ts + out_freq
+
+        raw_ti = self._inner.time_index
+        raw_start = int(raw_ti.searchsorted(out_start_ts, side="left"))
+        raw_end = int(raw_ti.searchsorted(raw_upper_ts, side="left"))
+        raw_end = min(len(raw_ti), raw_end)
+
+        if raw_start >= raw_end:
+            return pd.DataFrame(index=self._time_index[start_out:end_out])
+
+        raw_df = self._inner.get_slice_range(raw_start, raw_end)
+        if raw_df.empty:
+            return pd.DataFrame(index=self._time_index[start_out:end_out])
+
+        resampled = getattr(raw_df.resample(self._output_freq), self._agg)()
+        if resampled.index.freq is None:
+            resampled.index.freq = out_freq
+
+        want = self._time_index[start_out:end_out]
+        result = resampled.reindex(want)
+        if result.index.freq is None:
+            result.index.freq = self._time_index.freq
+        return result
 
     def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
         i = int(self._time_index.get_indexer([timestamp], method="nearest")[0])

@@ -37,7 +37,8 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure as bk_figure
 
-from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader, RawSequentialBuffer
+from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader, RawSequentialBuffer, \
+    ResamplingSlicingReader
 from .ui import (
     CURATED_COLORMAPS,
     CURATED_COLORMAPS_WITH_SEP,
@@ -827,57 +828,62 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         chunk_size = self._buffer_chunk_size
         min_chunk = 50
         max_chunk = 2000
+        target_buf_s = 10.0
         if (
             transform_name
             and transform_name != "none"
             and transform_name in self._transform_options
         ):
             spec_or_fn = self._transform_options[transform_name]
-            if isinstance(spec_or_fn, TransformSpec):
-                freq_nanos = 0
-                try:
-                    freq_nanos = int(
-                        pd.tseries.frequencies.to_offset(
-                            reader.time_index.freq
-                        ).nanos
-                    )
-                    raw_overlap = spec_or_fn.get_overlap(freq_nanos)
-                except (AttributeError, TypeError):
-                    raw_overlap = 0
-                if raw_overlap > 0:
-                    reader = RawSequentialBuffer(reader)
-                reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
-                # Scale chunk_size for coarse aggregate transforms so the number
-                # of raw steps per chunk stays roughly constant.  See the same
-                # logic in GeoAnimatorManager._setup_reader for the rationale.
-                if (
-                    spec_or_fn.kind == "aggregate"
-                    and spec_or_fn.output_freq is not None
-                    and freq_nanos > 0
-                ):
-                    try:
-                        out_ns = int(
-                            pd.tseries.frequencies.to_offset(
-                                spec_or_fn.output_freq
-                            ).nanos
-                        )
-                        if out_ns > freq_nanos:
-                            ratio = out_ns // freq_nanos
-                            chunk_size = max(5, self._buffer_chunk_size // ratio)
-                            min_chunk = max(2, 50 // ratio)
-                            max_chunk = max(chunk_size, 2000 // ratio)
-                    except Exception:
-                        pass
-            else:
+            if not isinstance(spec_or_fn, TransformSpec):
                 raise TypeError(
                     f"transform_options value for {transform_name!r} must be a "
                     f"TransformSpec, got {type(spec_or_fn).__name__}. "
                     "Use make_resample_transform(), make_moving_average_transform(), "
                     "or make_godin_transform() from dsm2ui.animate."
                 )
+            freq_nanos = 0
+            try:
+                freq_nanos = int(
+                    pd.tseries.frequencies.to_offset(
+                        reader.time_index.freq
+                    ).nanos
+                )
+            except (AttributeError, TypeError):
+                pass
+
+            if spec_or_fn.kind == "aggregate":
+                filter_spec = spec_or_fn.filter_spec
+                if filter_spec is not None:
+                    try:
+                        raw_overlap = filter_spec.get_overlap(freq_nanos)
+                    except (AttributeError, TypeError):
+                        raw_overlap = 0
+                    if raw_overlap > 0:
+                        reader = RawSequentialBuffer(reader)
+                    reader = StreamingTransformedSlicingReader(reader, filter_spec)
+                reader = ResamplingSlicingReader(
+                    reader,
+                    spec_or_fn.output_freq,
+                    spec_or_fn.resample_agg,
+                )
+                chunk_size = max(5, self._buffer_chunk_size // 20)
+                min_chunk = 2
+                max_chunk = 365
+                target_buf_s = 30.0
+            else:
+                try:
+                    raw_overlap = spec_or_fn.get_overlap(freq_nanos)
+                except (AttributeError, TypeError):
+                    raw_overlap = 0
+                if raw_overlap > 0:
+                    reader = RawSequentialBuffer(reader)
+                reader = StreamingTransformedSlicingReader(reader, spec_or_fn)
+
         return BufferedSlicingReader(
             reader, chunk_size=chunk_size, prefetch=True,
             adaptive=True, min_chunk_size=min_chunk, max_chunk_size=max_chunk,
+            target_buffer_seconds=target_buf_s,
         )
 
     def _get_diff_reader(self) -> SlicingReader:
@@ -1537,6 +1543,27 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             for _tcb in self._extra_transform_callbacks:
                 _tcb(_new_spec)
 
+            # ── Pre-load both maps in the background thread ──────────────────
+            # _apply_frame (and its _update_map_a / _update_map_b calls)
+            # triggers cold-start HDF5 reads on the Tornado IOLoop, which
+            # freezes the browser for the duration of the chunk load.
+            # Pre-fetch both maps here, off the IOLoop, then pass the
+            # pre-computed values to _apply for pure Bokeh model mutations.
+            ts = ti[nearest_idx]
+            ts_str = ts.strftime("%Y-%m-%d %H:%M")
+            _geo_ids_a_snap = self._geo_ids_a
+            _geo_ids_b_snap = self._geo_ids_b
+            try:
+                _sa = new_reader_a.get_slice_nearest(ts)
+                vals_a = _sa.reindex(_geo_ids_a_snap).fillna(np.nan).tolist()
+            except Exception:
+                vals_a = [float("nan")] * len(_geo_ids_a_snap)
+            try:
+                _sb = new_reader_b.get_slice_nearest(ts)
+                vals_b = _sb.reindex(_geo_ids_b_snap).fillna(np.nan).tolist()
+            except Exception:
+                vals_b = [float("nan")] * len(_geo_ids_b_snap)
+
             def _apply() -> None:
                 self._reader_a = new_reader_a
                 self._reader_b = new_reader_b
@@ -1552,9 +1579,12 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 finally:
                     self._syncing = False
 
-                ts_str = ti[nearest_idx].strftime("%Y-%m-%d %H:%M")
                 self._time_div.text = f"<b>{ts_str}</b>"
-                self._apply_frame(nearest_idx, ts_str)
+                # Pure Bokeh mutations — no I/O on the IOLoop.
+                self._render_map_a_vals(ts, ts_str, vals_a)
+                self._render_map_b_vals(ts, ts_str, vals_b)
+                for _cb in self._extra_frame_callbacks:
+                    _cb(ts)
 
                 for pane in (self._pane_a, self._pane_b, self._pane_diff):
                     pane.loading = False
