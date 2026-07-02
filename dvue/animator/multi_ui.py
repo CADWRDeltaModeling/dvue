@@ -31,6 +31,7 @@ from bokeh.models import (
     ColumnDataSource,
     Div,
     HoverTool,
+    Label,
     LinearColorMapper,
     Range1d,
     WMTSTileSource,
@@ -56,6 +57,8 @@ from .ui import (
     _format_level,
     TransformSpec,
     StreamingTransformedSlicingReader,
+    MapLabelSpec,
+    _VALID_CORNERS,
 )
 
 
@@ -127,6 +130,9 @@ def _build_bokeh_map(
     geo_id_column: str,
     shared_x_range=None,
     shared_y_range=None,
+    map_label_spec: Optional["MapLabelSpec"] = None,
+    map_width: int = 500,
+    initial_label_text: str = "",
 ) -> SimpleNamespace:
     """Build one Bokeh figure and all associated rendering objects.
 
@@ -137,7 +143,8 @@ def _build_bokeh_map(
     Returns a ``SimpleNamespace`` with attributes:
         ``fig``, ``source``, ``mapper``, ``data_renderer``, ``tile_renderer``,
         ``contour_source``, ``contour_renderer``,
-        ``contour_label_source``, ``contour_label_renderer``.
+        ``contour_label_source``, ``contour_label_renderer``,
+        ``corner_label``.
     """
     source = ColumnDataSource({
         "xs": bk_xs, "ys": bk_ys,
@@ -230,6 +237,30 @@ def _build_bokeh_map(
         visible=False,
     )
 
+    # Corner timestamp label — screen-pixel coordinates, fixed in the canvas
+    # container, not attached to map data coordinates.
+    _spec = map_label_spec if map_label_spec is not None else MapLabelSpec()
+    _corner = _spec.corner if _spec.corner in _VALID_CORNERS else "bottom_left"
+    from .ui import _label_corner_pos
+    _lx, _ly, _la, _lb = _label_corner_pos(_corner, map_width, map_height)
+    corner_label = Label(
+        x=_lx, y=_ly,
+        x_units="screen", y_units="screen",
+        text=initial_label_text,
+        text_font_size=_spec.font_size,
+        text_font_style="bold",
+        text_color="black",
+        text_align=_la,
+        text_baseline=_lb,
+        background_fill_color="white",
+        background_fill_alpha=0.7,
+        border_line_color="lightgrey",
+        border_line_alpha=0.8,
+        padding=4,
+        visible=_spec.visible,
+    )
+    p.add_layout(corner_label)
+
     return SimpleNamespace(
         fig=p,
         source=source,
@@ -241,6 +272,7 @@ def _build_bokeh_map(
         contour_renderer=contour_renderer,
         contour_label_source=contour_label_source,
         contour_label_renderer=contour_label_renderer,
+        corner_label=corner_label,
     )
 
 
@@ -314,11 +346,17 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         transform_options=None,
         initial_transform: str = "none",
         buffer_chunk_size: int = 200,
+        map_label_spec: Optional[MapLabelSpec] = None,
+        map_label_corner: str = "bottom_left",
         **params,
     ) -> None:
         # ----------------------------------------------------------------
         # 1. Store configuration
         # ----------------------------------------------------------------
+        if map_label_spec is None:
+            _corner = map_label_corner if map_label_corner in _VALID_CORNERS else "bottom_left"
+            map_label_spec = MapLabelSpec(corner=_corner)
+        self._map_label_spec = map_label_spec
         self._base_reader_a = reader_a
         self._base_reader_b = reader_b
         if gdf_b is None:
@@ -403,6 +441,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # 7. Build Bokeh figures — all three share the same Range1d pair
         # ----------------------------------------------------------------
         ts0 = ti[0].strftime("%Y-%m-%d %H:%M")
+        _spec = self._map_label_spec
+        _init_label_text = _spec.format(ti[0], 0)
 
         ma = _build_bokeh_map(
             self._gdf_a_proj, self._geo_ids_a, bk_xs_a, bk_ys_a,
@@ -410,6 +450,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             colormap, eff_vmin, eff_vmax, size, map_height,
             f"{title_a} \u2014 {ts0}", geo_id_column,
             shared_x_range=shared_x, shared_y_range=shared_y,
+            map_label_spec=_spec, map_width=500, initial_label_text=_init_label_text,
         )
         mb = _build_bokeh_map(
             self._gdf_b_proj, self._geo_ids_b, bk_xs_b, bk_ys_b,
@@ -417,6 +458,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             colormap, eff_vmin, eff_vmax, size, map_height,
             f"{title_b} \u2014 {ts0}", geo_id_column,
             shared_x_range=shared_x, shared_y_range=shared_y,
+            map_label_spec=_spec, map_width=500, initial_label_text=_init_label_text,
         )
         # Diff figure reuses map A's geometry and shares the viewport.
         md = _build_bokeh_map(
@@ -425,6 +467,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             colormap, eff_vmin, eff_vmax, size, map_height,
             f"{title_a} \u2212 {title_b} \u2014 {ts0}", geo_id_column,
             shared_x_range=shared_x, shared_y_range=shared_y,
+            map_label_spec=_spec, map_width=1000, initial_label_text=_init_label_text,
         )
 
         self._shared_x_range = shared_x
@@ -437,6 +480,9 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._colorbar_b = mb.colorbar
         self._fig_diff = md.fig;  self._src_diff = md.source
         self._mapper_diff = md.mapper
+        self._corner_label_a = ma.corner_label
+        self._corner_label_b = mb.corner_label
+        self._corner_label_diff = md.corner_label
         # Keep renderer references so show/hide checkboxes can toggle them.
         self._all_data_renderers = (
             ma.data_renderer, mb.data_renderer, md.data_renderer)
@@ -592,6 +638,11 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width", visible=False,
         )
         # Show / hide toggles for channels and basemap (all three figures).
+        # Map corner label toggle — initial state from spec.
+        self._map_label_check = pn.widgets.Checkbox(
+            name="Show map label", value=self._map_label_spec.visible,
+            sizing_mode="stretch_width",
+        )
         # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
         self._channels_alpha_slider = pn.widgets.IntSlider(
             name="Channel lines opacity", start=0, end=100, value=100, step=5,
@@ -611,6 +662,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._size_slider,
             self._channels_alpha_slider,
             self._basemap_alpha_slider,
+            self._map_label_check,
             title="Appearance", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -728,6 +780,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._contour_clip_slider.param.watch(self._on_contour_clip_change, "value")
         self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
         self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
+        self._map_label_check.param.watch(self._on_map_label_toggle, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
         self._save_config_btn.on_click(self._on_save_config)
@@ -768,6 +821,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
                 "label_spacing": self._contour_label_spacing_slider.value,
                 "clip_radius_km": self._contour_clip_slider.value,
             },
+            "map_label": self._map_label_spec.to_dict(),
             "diff": {
                 "show": self.show_diff,
             },
@@ -1025,6 +1079,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "_value": [(slice(None), vals)],
             "_color_value": [(slice(None), vals)],
         })
+        _label = self._map_label_spec.format(ts, self._time_slider.value)
+        self._corner_label_a.text = _label
         self._fig_a.title.text = f"{self._title_a} \u2014 {ts_str}"
         if self._ctour_a.renderer.visible:
             eff_vmin, eff_vmax = self._current_clim()
@@ -1037,6 +1093,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "_value": [(slice(None), vals)],
             "_color_value": [(slice(None), vals)],
         })
+        _label = self._map_label_spec.format(ts, self._time_slider.value)
+        self._corner_label_b.text = _label
         self._fig_b.title.text = f"{self._title_b} \u2014 {ts_str}"
         if self._ctour_b.renderer.visible:
             eff_vmin, eff_vmax = self._current_clim()
@@ -1052,6 +1110,8 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             "_color_value": vals,
             "geo_id": self._geo_ids_a,
         }
+        _label = self._map_label_spec.format(ts, self._time_slider.value)
+        self._corner_label_diff.text = _label
         self._fig_diff.title.text = (
             f"{self._title_a} \u2212 {self._title_b} \u2014 {ts_str}"
         )
@@ -1337,6 +1397,22 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         def _apply():
             for r in self._all_tile_renderers:
                 r.alpha = alpha
+
+        doc = self._active_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _on_map_label_toggle(self, event: param.parameterized.Event) -> None:
+        """Show or hide the corner timestamp label on all three maps."""
+        visible = bool(event.new)
+        self._map_label_spec.visible = visible
+
+        def _apply():
+            self._corner_label_a.visible = visible
+            self._corner_label_b.visible = visible
+            self._corner_label_diff.visible = visible
 
         doc = self._active_doc()
         if doc is not None:

@@ -7,6 +7,7 @@ Geometry (xs/ys) is pre-extracted at init and never re-serialized.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 from typing import Optional
 
@@ -23,6 +24,7 @@ from bokeh.models import (
     ColumnDataSource,
     Div,
     HoverTool,
+    Label,
     LinearColorMapper,
     Range1d,
     WMTSTileSource,
@@ -81,6 +83,131 @@ _CARTO_LIGHT_ATTR = "© CARTO / © OpenStreetMap contributors"
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+_VALID_CORNERS = ("bottom_left", "top_left", "bottom_right", "top_right")
+
+
+@dataclasses.dataclass
+class MapLabelSpec:
+    """Configuration for the animated corner label shown on each animation frame.
+
+    The ``template`` is a Python :meth:`str.format` string that is re-evaluated
+    on every frame.  The following variables are available:
+
+    ``t``
+        :class:`pandas.Timestamp` — current animation time.
+    ``step``
+        :class:`int` — zero-based frame index in the active time index.
+    ``days``
+        :class:`float` — elapsed days since ``start_time``.
+        Only available when ``start_time`` is set.
+    ``hours``
+        :class:`float` — elapsed hours since ``start_time``.
+        Only available when ``start_time`` is set.
+
+    Example templates::
+
+        "{t:%Y-%m-%d %H:%M}"            # default: readable timestamp
+        "Day {days:.0f}"                 # integer days since start_time
+        "Day {days:.1f} \u2014 {t:%b %Y}"    # decimal days + month label
+        "Step {step}"                    # raw zero-based frame counter
+
+    YAML schema (under the ``map_label`` key)::
+
+        map_label:
+          corner: bottom_left        # bottom_left | top_left | bottom_right | top_right
+          template: "Day {days:.0f}" # Python format string
+          start_time: "2020-10-01"   # reference date for {days}/{hours}; optional
+          font_size: "14px"           # CSS font-size string; optional
+          visible: true               # initial visibility; optional
+    """
+
+    corner: str = "bottom_left"
+    """Corner of the map canvas: ``bottom_left`` | ``top_left`` | ``bottom_right`` | ``top_right``."""
+    template: str = "{t:%Y-%m-%d %H:%M}"
+    """Python :meth:`str.format` string evaluated each animation frame."""
+    start_time: Optional[pd.Timestamp] = None
+    """Reference time used for ``{days}`` and ``{hours}`` variables."""
+    font_size: str = "14px"
+    """CSS font-size string applied to the label (e.g. ``'14px'``, ``'1em'``)."""
+    visible: bool = True
+    """Initial visibility of the label."""
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MapLabelSpec":
+        """Construct from a plain dict (e.g. parsed from YAML)."""
+        start_raw = d.get("start_time")
+        start: Optional[pd.Timestamp] = None
+        if start_raw is not None:
+            try:
+                start = pd.Timestamp(str(start_raw))
+            except Exception:
+                pass
+        return cls(
+            corner=str(d.get("corner", "bottom_left")),
+            template=str(d.get("template", "{t:%Y-%m-%d %H:%M}")),
+            start_time=start,
+            font_size=str(d.get("font_size", "14px")),
+            visible=bool(d.get("visible", True)),
+        )
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict suitable for YAML round-tripping."""
+        d: dict = {
+            "corner": self.corner,
+            "template": self.template,
+            "font_size": self.font_size,
+            "visible": self.visible,
+        }
+        if self.start_time is not None:
+            d["start_time"] = self.start_time.strftime("%Y-%m-%d %H:%M")
+        return d
+
+    def format(self, t: pd.Timestamp, step: int = 0) -> str:
+        """Evaluate the template for the given animation time and step index.
+
+        Returns a plain timestamp string on any formatting error so the label
+        is never blank (e.g. when ``{days}`` is used but ``start_time`` is unset).
+        """
+        fmt_vars: dict = {"t": t, "step": step}
+        if self.start_time is not None:
+            delta = t - self.start_time
+            fmt_vars["days"] = delta.total_seconds() / 86400.0
+            fmt_vars["hours"] = delta.total_seconds() / 3600.0
+        try:
+            return self.template.format(**fmt_vars)
+        except (KeyError, ValueError, TypeError):
+            try:
+                return t.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return str(t)
+
+
+def _label_corner_pos(
+    corner: str, map_width: int, map_height: int
+) -> tuple:
+    """Return ``(x, y, text_align, text_baseline)`` in screen pixels.
+
+    Coordinates are measured from the bottom-left of the Bokeh canvas area
+    (the inner plot frame, excluding toolbar and axis ticks).  The label
+    therefore stays fixed relative to the figure container when the user
+    pans or zooms — it is **not** attached to geographic data coordinates.
+
+    *map_width* / *map_height* are used only as initial reference dimensions
+    for right/top edges; they will not dynamically track browser resizes when
+    the figure uses ``sizing_mode='stretch_both'``.
+    """
+    pad = 8
+    if corner == "bottom_left":
+        return pad, pad, "left", "bottom"
+    if corner == "top_left":
+        return pad, map_height - pad, "left", "top"
+    if corner == "bottom_right":
+        return map_width - pad, pad, "right", "bottom"
+    if corner == "top_right":
+        return map_width - pad, map_height - pad, "right", "top"
+    return pad, pad, "left", "bottom"  # default fallback
+
 
 def _cmap_to_palette(name: str, n: int = 256) -> list[str]:
     """Convert a matplotlib colormap name to a Bokeh-compatible hex palette."""
@@ -416,6 +543,14 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         Not used for polygons.  Default ``8``.
     map_height : int, optional
         Minimum map height in pixels.  Default ``500``.
+    map_label_spec : MapLabelSpec or None, optional
+        Full label configuration (corner, template, start_time, font_size,
+        visible).  When ``None`` a default :class:`MapLabelSpec` is created
+        using ``map_label_corner``.
+    map_label_corner : str, optional
+        Shorthand corner override used only when ``map_label_spec`` is
+        ``None``.  One of ``'bottom_left'``, ``'top_left'``,
+        ``'bottom_right'``, ``'top_right'``.  Default ``'bottom_left'``.
     """
 
     vmin: Optional[float] = param.Number(
@@ -478,6 +613,8 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         transform_options: Optional[dict] = None,
         initial_transform: str = "none",
         buffer_chunk_size: int = 200,
+        map_label_spec: Optional[MapLabelSpec] = None,
+        map_label_corner: str = "bottom_left",
         **params,
     ) -> None:
         # ----------------------------------------------------------------
@@ -486,6 +623,10 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._base_reader = reader          # raw reader, never transformed
         self._transform_options = transform_options or {}
         self._buffer_chunk_size = buffer_chunk_size
+        if map_label_spec is None:
+            _corner = map_label_corner if map_label_corner in _VALID_CORNERS else "bottom_left"
+            map_label_spec = MapLabelSpec(corner=_corner)
+        self._map_label_spec = map_label_spec
         self._reader = self._setup_reader(initial_transform)
         self._geo_id_column = geo_id_column
         self._title = title
@@ -673,6 +814,34 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         )
         p.add_layout(colorbar, "right")
 
+        # ----------------------------------------------------------------
+        # Corner timestamp label — attached to the canvas in screen-pixel
+        # coordinates, not to map data coordinates.  Stays fixed when the
+        # user pans or zooms.
+        # ----------------------------------------------------------------
+        _spec = self._map_label_spec
+        _lx, _ly, _la, _lb = _label_corner_pos(
+            _spec.corner, map_width, map_height
+        )
+        _init_label_text = _spec.format(self._reader.time_index[_init_step], _init_step)
+        self._corner_label = Label(
+            x=_lx, y=_ly,
+            x_units="screen", y_units="screen",
+            text=_init_label_text,
+            text_font_size=_spec.font_size,
+            text_font_style="bold",
+            text_color="black",
+            text_align=_la,
+            text_baseline=_lb,
+            background_fill_color="white",
+            background_fill_alpha=0.7,
+            border_line_color="lightgrey",
+            border_line_alpha=0.8,
+            padding=4,
+            visible=_spec.visible,
+        )
+        p.add_layout(self._corner_label)
+
         # Contour renderer — coloured by isovalue via the same colormap,
         # fixed width=3, sits on top, initially invisible.
         self._contour_renderer = p.multi_line(
@@ -808,6 +977,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             value=_default_clip_km, step=0.5,
             sizing_mode="stretch_width", visible=False,
         )
+        # Map corner label toggle — initial state from spec.
+        self._map_label_check = pn.widgets.Checkbox(
+            name="Show map label", value=self._map_label_spec.visible,
+            sizing_mode="stretch_width",
+        )
         # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
         self._channels_alpha_slider = pn.widgets.IntSlider(
             name="Channel lines opacity", start=0, end=100, value=100, step=5,
@@ -850,6 +1024,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             *_size_widgets,
             self._channels_alpha_slider,
             self._basemap_alpha_slider,
+            self._map_label_check,
             title="Appearance", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -949,6 +1124,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._contour_clip_slider.param.watch(self._on_contour_clip_change, "value")
         self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
         self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
+        self._map_label_check.param.watch(self._on_map_label_toggle, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
         if x2_callback is not None:
@@ -1111,6 +1287,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     ) -> None:
         """Apply pre-fetched frame data to Bokeh models — must run under document lock."""
         self._time_div.text = f"<b>{ts_str}</b>"
+        self._corner_label.text = self._map_label_spec.format(ts, step_idx)
         self._bk_source.patch({"_value": [(slice(None), new_values)]})
 
         if self._contour_renderer.visible:
@@ -1474,6 +1651,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
                 "clip_radius_km": self._contour_clip_slider.value,
             },
             "diff": {"show": False, "colormap": "coolwarm"},
+            "map_label": self._map_label_spec.to_dict(),
             "sidebar_collapsed": not self._sidebar_toggle.value,
             "map_extents": {
                 "x_start": float(self._bk_figure.x_range.start),
@@ -1522,6 +1700,12 @@ class GeoAnimatorManager(pn.viewable.Viewer):
     def _on_basemap_alpha_change(self, event: param.parameterized.Event) -> None:
         """Apply background map opacity (0–100) to the tile renderer."""
         self._tile_renderer.alpha = event.new / 100.0
+
+    def _on_map_label_toggle(self, event: param.parameterized.Event) -> None:
+        """Show or hide the corner timestamp label."""
+        visible = bool(event.new)
+        self._map_label_spec.visible = visible
+        self._corner_label.visible = visible
 
     def _on_transform_change(self, event: param.parameterized.Event) -> None:
         """Apply a new time-domain transform; preserve current playback position.

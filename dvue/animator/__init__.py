@@ -38,14 +38,19 @@ __all__ = [
     "RawSequentialBuffer",
     "GeoAnimatorManager",
     "MultiGeoAnimatorManager",
+    "MapLabelSpec",
     "CURATED_COLORMAPS",
 ]
 
 
 def __getattr__(name: str):
-    if name in ("GeoAnimatorManager", "CURATED_COLORMAPS"):
-        from .ui import GeoAnimatorManager, CURATED_COLORMAPS  # noqa: F401
-        g = {"GeoAnimatorManager": GeoAnimatorManager, "CURATED_COLORMAPS": CURATED_COLORMAPS}
+    if name in ("GeoAnimatorManager", "CURATED_COLORMAPS", "MapLabelSpec"):
+        from .ui import GeoAnimatorManager, CURATED_COLORMAPS, MapLabelSpec  # noqa: F401
+        g = {
+            "GeoAnimatorManager": GeoAnimatorManager,
+            "CURATED_COLORMAPS": CURATED_COLORMAPS,
+            "MapLabelSpec": MapLabelSpec,
+        }
         return g[name]
     if name == "MultiGeoAnimatorManager":
         from .multi_ui import MultiGeoAnimatorManager  # noqa: F401
@@ -54,9 +59,13 @@ def __getattr__(name: str):
 
 
 def __getattr__(name: str):
-    if name in ("GeoAnimatorManager", "CURATED_COLORMAPS"):
-        from .ui import GeoAnimatorManager, CURATED_COLORMAPS  # noqa: F401
-        g = {"GeoAnimatorManager": GeoAnimatorManager, "CURATED_COLORMAPS": CURATED_COLORMAPS}
+    if name in ("GeoAnimatorManager", "CURATED_COLORMAPS", "MapLabelSpec"):
+        from .ui import GeoAnimatorManager, CURATED_COLORMAPS, MapLabelSpec  # noqa: F401
+        g = {
+            "GeoAnimatorManager": GeoAnimatorManager,
+            "CURATED_COLORMAPS": CURATED_COLORMAPS,
+            "MapLabelSpec": MapLabelSpec,
+        }
         return g[name]
     if name == "MultiGeoAnimatorManager":
         from .multi_ui import MultiGeoAnimatorManager  # noqa: F401
