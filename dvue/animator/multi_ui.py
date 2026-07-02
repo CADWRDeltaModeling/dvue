@@ -55,6 +55,7 @@ from .ui import (
     _level_colors,
     _nice_decimal_places,
     _format_level,
+    _label_corner_pos,
     TransformSpec,
     StreamingTransformedSlicingReader,
     MapLabelSpec,
@@ -241,7 +242,6 @@ def _build_bokeh_map(
     # container, not attached to map data coordinates.
     _spec = map_label_spec if map_label_spec is not None else MapLabelSpec()
     _corner = _spec.corner if _spec.corner in _VALID_CORNERS else "bottom_left"
-    from .ui import _label_corner_pos
     _lx, _ly, _la, _lb = _label_corner_pos(_corner, map_width, map_height)
     corner_label = Label(
         x=_lx, y=_ly,
@@ -355,7 +355,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         # ----------------------------------------------------------------
         if map_label_spec is None:
             _corner = map_label_corner if map_label_corner in _VALID_CORNERS else "bottom_left"
-            map_label_spec = MapLabelSpec(corner=_corner)
+            map_label_spec = MapLabelSpec(corner=_corner, visible=False)
         self._map_label_spec = map_label_spec
         self._base_reader_a = reader_a
         self._base_reader_b = reader_b
@@ -638,9 +638,35 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width", visible=False,
         )
         # Show / hide toggles for channels and basemap (all three figures).
-        # Map corner label toggle — initial state from spec.
+        # Map label panel — full controls in a dedicated sidebar card.
+        _spec_now = self._map_label_spec
         self._map_label_check = pn.widgets.Checkbox(
-            name="Show map label", value=self._map_label_spec.visible,
+            name="Show label", value=_spec_now.visible,
+            sizing_mode="stretch_width",
+        )
+        self._map_label_corner_select = pn.widgets.Select(
+            name="Corner",
+            options=list(_VALID_CORNERS),
+            value=_spec_now.corner if _spec_now.corner in _VALID_CORNERS else "bottom_left",
+            sizing_mode="stretch_width",
+        )
+        self._map_label_template_input = pn.widgets.TextInput(
+            name="Template",
+            value=_spec_now.template,
+            sizing_mode="stretch_width",
+        )
+        self._map_label_start_input = pn.widgets.TextInput(
+            name="Start time  (YYYY-MM-DD)",
+            value=(
+                _spec_now.start_time.strftime("%Y-%m-%d %H:%M")
+                if _spec_now.start_time is not None else ""
+            ),
+            placeholder="e.g. 2020-10-01",
+            sizing_mode="stretch_width",
+        )
+        self._map_label_font_input = pn.widgets.TextInput(
+            name="Font size",
+            value=_spec_now.font_size,
             sizing_mode="stretch_width",
         )
         # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
@@ -662,7 +688,6 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._size_slider,
             self._channels_alpha_slider,
             self._basemap_alpha_slider,
-            self._map_label_check,
             title="Appearance", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -687,6 +712,15 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._contour_card = _contour_card
+        _map_label_card = pn.Card(
+            self._map_label_check,
+            self._map_label_corner_select,
+            self._map_label_template_input,
+            self._map_label_start_input,
+            self._map_label_font_input,
+            title="Map label", collapsed=True,
+            sizing_mode="stretch_width",
+        )
         _optional_cards: list = []
         if self._transform_options:
             _optional_cards.append(pn.Card(
@@ -729,6 +763,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             _appearance_card,
             _diff_card,
             _contour_card,
+            _map_label_card,
             *_optional_cards,
             _save_card,
             sizing_mode="stretch_width",
@@ -781,6 +816,10 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
         self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
         self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
         self._map_label_check.param.watch(self._on_map_label_toggle, "value")
+        self._map_label_corner_select.param.watch(self._on_map_label_corner_change, "value")
+        self._map_label_template_input.param.watch(self._on_map_label_template_change, "value")
+        self._map_label_start_input.param.watch(self._on_map_label_start_time_change, "value")
+        self._map_label_font_input.param.watch(self._on_map_label_font_change, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
         self._save_config_btn.on_click(self._on_save_config)
@@ -1413,6 +1452,76 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             self._corner_label_a.visible = visible
             self._corner_label_b.visible = visible
             self._corner_label_diff.visible = visible
+
+        doc = self._active_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _on_map_label_corner_change(self, event: param.parameterized.Event) -> None:
+        """Reposition corner labels on all three maps when the corner changes."""
+        self._map_label_spec.corner = event.new
+        lx, ly, la, lb = _label_corner_pos(event.new, 500, self._map_height)
+
+        def _apply() -> None:
+            for lbl in (self._corner_label_a, self._corner_label_b, self._corner_label_diff):
+                lbl.x = lx
+                lbl.y = ly
+                lbl.text_align = la
+                lbl.text_baseline = lb
+
+        doc = self._active_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _on_map_label_template_change(self, event: param.parameterized.Event) -> None:
+        """Apply an updated format template and re-render the current frame label."""
+        self._map_label_spec.template = event.new
+        self._refresh_map_label()
+
+    def _on_map_label_start_time_change(self, event: param.parameterized.Event) -> None:
+        """Parse the start-time text and re-render the current frame labels."""
+        raw = (event.new or "").strip()
+        if raw:
+            try:
+                self._map_label_spec.start_time = pd.Timestamp(raw)
+            except Exception:
+                return
+        else:
+            self._map_label_spec.start_time = None
+        self._refresh_map_label()
+
+    def _on_map_label_font_change(self, event: param.parameterized.Event) -> None:
+        """Apply an updated font-size string to all three corner labels."""
+        font = event.new or "14px"
+        self._map_label_spec.font_size = font
+
+        def _apply() -> None:
+            for lbl in (self._corner_label_a, self._corner_label_b, self._corner_label_diff):
+                lbl.text_font_size = font
+
+        doc = self._active_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _refresh_map_label(self) -> None:
+        """Re-evaluate the label template at the current playback position."""
+        idx = self._time_slider.value
+        ti = self._reader_a.time_index
+        if not (0 <= idx < len(ti)):
+            return
+        ts = ti[idx]
+        new_text = self._map_label_spec.format(ts, idx)
+
+        def _apply() -> None:
+            self._corner_label_a.text = new_text
+            self._corner_label_b.text = new_text
+            self._corner_label_diff.text = new_text
 
         doc = self._active_doc()
         if doc is not None:

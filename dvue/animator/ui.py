@@ -625,8 +625,11 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._buffer_chunk_size = buffer_chunk_size
         if map_label_spec is None:
             _corner = map_label_corner if map_label_corner in _VALID_CORNERS else "bottom_left"
-            map_label_spec = MapLabelSpec(corner=_corner)
+            map_label_spec = MapLabelSpec(corner=_corner, visible=False)
         self._map_label_spec = map_label_spec
+        # Keep map dimensions for corner repositioning from the UI panel.
+        self._map_width = map_width
+        self._map_height = map_height
         self._reader = self._setup_reader(initial_transform)
         self._geo_id_column = geo_id_column
         self._title = title
@@ -977,9 +980,37 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             value=_default_clip_km, step=0.5,
             sizing_mode="stretch_width", visible=False,
         )
-        # Map corner label toggle — initial state from spec.
+        # Map label panel — full controls in a dedicated sidebar card.
+        # _map_label_check is the primary visible toggle (referenced by
+        # _apply_config_to_manager); the remaining widgets configure the spec.
+        _spec_now = self._map_label_spec
         self._map_label_check = pn.widgets.Checkbox(
-            name="Show map label", value=self._map_label_spec.visible,
+            name="Show label", value=_spec_now.visible,
+            sizing_mode="stretch_width",
+        )
+        self._map_label_corner_select = pn.widgets.Select(
+            name="Corner",
+            options=list(_VALID_CORNERS),
+            value=_spec_now.corner if _spec_now.corner in _VALID_CORNERS else "bottom_left",
+            sizing_mode="stretch_width",
+        )
+        self._map_label_template_input = pn.widgets.TextInput(
+            name="Template",
+            value=_spec_now.template,
+            sizing_mode="stretch_width",
+        )
+        self._map_label_start_input = pn.widgets.TextInput(
+            name="Start time  (YYYY-MM-DD)",
+            value=(
+                _spec_now.start_time.strftime("%Y-%m-%d %H:%M")
+                if _spec_now.start_time is not None else ""
+            ),
+            placeholder="e.g. 2020-10-01",
+            sizing_mode="stretch_width",
+        )
+        self._map_label_font_input = pn.widgets.TextInput(
+            name="Font size",
+            value=_spec_now.font_size,
             sizing_mode="stretch_width",
         )
         # Channel and basemap opacity sliders (0 = invisible, 100 = fully opaque)
@@ -1024,7 +1055,6 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             *_size_widgets,
             self._channels_alpha_slider,
             self._basemap_alpha_slider,
-            self._map_label_check,
             title="Appearance", collapsed=False,
             sizing_mode="stretch_width",
         )
@@ -1042,6 +1072,15 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             sizing_mode="stretch_width",
         )
         self._contour_card = _contour_card
+        _map_label_card = pn.Card(
+            self._map_label_check,
+            self._map_label_corner_select,
+            self._map_label_template_input,
+            self._map_label_start_input,
+            self._map_label_font_input,
+            title="Map label", collapsed=True,
+            sizing_mode="stretch_width",
+        )
         _optional_cards: list = []
         if self._transform_options:
             _optional_cards.append(pn.Card(
@@ -1090,6 +1129,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             pn.layout.Divider(margin=(4, 0, 4, 0)),
             _appearance_card,
             _contour_card,
+            _map_label_card,
             *_optional_cards,
             _save_card,
             sizing_mode="stretch_width",
@@ -1125,6 +1165,10 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         self._channels_alpha_slider.param.watch(self._on_channels_alpha_change, "value")
         self._basemap_alpha_slider.param.watch(self._on_basemap_alpha_change, "value")
         self._map_label_check.param.watch(self._on_map_label_toggle, "value")
+        self._map_label_corner_select.param.watch(self._on_map_label_corner_change, "value")
+        self._map_label_template_input.param.watch(self._on_map_label_template_change, "value")
+        self._map_label_start_input.param.watch(self._on_map_label_start_time_change, "value")
+        self._map_label_font_input.param.watch(self._on_map_label_font_change, "value")
         if self._transform_options:
             self._transform_select.param.watch(self._on_transform_change, "value")
         if x2_callback is not None:
@@ -1706,6 +1750,72 @@ class GeoAnimatorManager(pn.viewable.Viewer):
         visible = bool(event.new)
         self._map_label_spec.visible = visible
         self._corner_label.visible = visible
+
+    def _on_map_label_corner_change(self, event: param.parameterized.Event) -> None:
+        """Reposition the corner label when the user picks a different corner."""
+        self._map_label_spec.corner = event.new
+        lx, ly, la, lb = _label_corner_pos(event.new, self._map_width, self._map_height)
+
+        def _apply() -> None:
+            self._corner_label.x = lx
+            self._corner_label.y = ly
+            self._corner_label.text_align = la
+            self._corner_label.text_baseline = lb
+
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _on_map_label_template_change(self, event: param.parameterized.Event) -> None:
+        """Apply an updated format template and re-render the current frame."""
+        self._map_label_spec.template = event.new
+        self._refresh_map_label()
+
+    def _on_map_label_start_time_change(self, event: param.parameterized.Event) -> None:
+        """Parse the start-time text and re-render the current frame label."""
+        raw = (event.new or "").strip()
+        if raw:
+            try:
+                self._map_label_spec.start_time = pd.Timestamp(raw)
+            except Exception:
+                return   # invalid input — leave spec unchanged
+        else:
+            self._map_label_spec.start_time = None
+        self._refresh_map_label()
+
+    def _on_map_label_font_change(self, event: param.parameterized.Event) -> None:
+        """Apply an updated font-size string to the Bokeh label."""
+        font = event.new or "14px"
+        self._map_label_spec.font_size = font
+
+        def _apply() -> None:
+            self._corner_label.text_font_size = font
+
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    def _refresh_map_label(self) -> None:
+        """Re-evaluate the label template at the current playback position."""
+        idx = self._time_slider.value
+        ti = self._reader.time_index
+        if not (0 <= idx < len(ti)):
+            return
+        ts = ti[idx]
+        new_text = self._map_label_spec.format(ts, idx)
+
+        def _apply() -> None:
+            self._corner_label.text = new_text
+
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
 
     def _on_transform_change(self, event: param.parameterized.Event) -> None:
         """Apply a new time-domain transform; preserve current playback position.
