@@ -227,6 +227,11 @@ class TimeSeriesDataUIManager(DataUIManager):
         default=True,
         doc="Show the 'Clear Cache' button in the action bar and transform panel. Set to False to hide it.",
     )
+    convert_units = param.Boolean(
+        default=False,
+        doc="Apply unit conversion to loaded data. Override apply_unit_conversion() in a subclass "
+            "to define the conversion logic for a specific domain (e.g. ft→m, cfs→m³/s).",
+    )
 
     def __init__(self, **params):
         self._cached_catalog = None
@@ -677,7 +682,13 @@ class TimeSeriesDataUIManager(DataUIManager):
         self.param.watch(_update_expr_and_btn, _transform_watch_params)
 
         # ── Build Transform tab ──────────────────────────────────────────────
+        convert_units_w = pn.widgets.Checkbox.from_param(
+            self.param.convert_units, name="Convert units", margin=_M)
+
         transform_widgets = pn.Column(
+            # ── ⓪ Units ——————————————————————————————————————————
+            _section("⓪ Units"),
+            pn.Row(convert_units_w, align="center"),
             # ── ① Data Prep ——————————————————————————————————————
             _section("① Data Prep"),
             pn.Row(
@@ -1060,6 +1071,9 @@ class TimeSeriesDataUIManager(DataUIManager):
             else:
                 data, _, _ = self.get_data_for_time_range(r, effective_time_range)
 
+            if self.convert_units:
+                data = self.apply_unit_conversion(data)
+
             # Update progress - scale from 0 to 50%
             if dataui:
                 current_progress = int(progress_per_row * (i + 1))
@@ -1070,6 +1084,29 @@ class TimeSeriesDataUIManager(DataUIManager):
         # After completing all rows, ensure progress is at 50%
         if dataui:
             dataui.set_progress(50)
+
+    def apply_unit_conversion(self, data: "pd.DataFrame") -> "pd.DataFrame":
+        """Apply domain-specific unit conversion to a loaded data frame.
+
+        Called by :meth:`get_data` for every yielded series when
+        ``convert_units`` is ``True``.  The default implementation is a no-op;
+        override in a subclass to implement actual conversion logic.
+
+        The ``data.attrs["unit"]`` key should be updated to the converted unit
+        string so downstream components (labels, y-axis titles) stay in sync.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Raw data frame as returned by the catalog reader.
+
+        Returns
+        -------
+        pd.DataFrame
+            Converted data frame (may be a new object or the same object
+            modified in-place, as long as ``data.attrs`` is updated).
+        """
+        return data
 
     # display related support for tables
     def get_table_columns(self):
@@ -1700,6 +1737,15 @@ class TimeSeriesPlotAction(PlotAction):
             try:
                 if data is None:
                     continue
+
+                # Apply unit conversion before resolving the unit label so that
+                # the y-axis title reflects the converted unit.  The plot action
+                # calls ref.getData() directly (bypassing manager.get_data()), so
+                # this is the only place the conversion runs for the plot path.
+                if getattr(manager, "convert_units", False):
+                    _apply_fn = getattr(manager, "apply_unit_conversion", None)
+                    if _apply_fn is not None:
+                        data = _apply_fn(data)
 
                 # Resolve unit: prefer data.attrs["unit"] (set by reader after any
                 # conversion), then DataReference attribute, then catalog row.
