@@ -230,7 +230,13 @@ class TimeSeriesDataUIManager(DataUIManager):
     convert_units = param.Boolean(
         default=False,
         doc="Apply unit conversion to loaded data. Override apply_unit_conversion() in a subclass "
-            "to define the conversion logic for a specific domain (e.g. ft→m, cfs→m³/s).",
+            "to define the conversion logic for a specific domain (e.g. ft\u2192m, cfs\u2192m\u00b3/s).",
+    )
+    show_convert_units = param.Boolean(
+        default=False,
+        doc="Show the 'Convert units' checkbox in the Transform tab. Set to True in subclasses "
+            "that implement apply_unit_conversion(). When False the widget is hidden and "
+            "convert_units has no effect.",
     )
 
     def __init__(self, **params):
@@ -685,12 +691,15 @@ class TimeSeriesDataUIManager(DataUIManager):
         convert_units_w = pn.widgets.Checkbox.from_param(
             self.param.convert_units, name="Convert units", margin=_M)
 
-        transform_widgets = pn.Column(
-            # ── ⓪ Units ——————————————————————————————————————————
-            _section("⓪ Units"),
+        units_section = [
+            _section("\u24ea Units"),
             pn.Row(convert_units_w, align="center"),
-            # ── ① Data Prep ——————————————————————————————————————
-            _section("① Data Prep"),
+        ] if self.show_convert_units else []
+
+        transform_widgets = pn.Column(
+            *units_section,
+            # ── \u2460 Data Prep \u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014
+            _section("\u2460 Data Prep"),
             pn.Row(
                 pn.pane.HTML(
                     "<span style='font-size:11px;color:#666'>Gap fill limit</span>",
