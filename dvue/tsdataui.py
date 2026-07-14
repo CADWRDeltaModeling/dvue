@@ -429,6 +429,26 @@ class TimeSeriesDataUIManager(DataUIManager):
     def is_irregular(self, r):
         raise NotImplementedError("Method is_irregular not implemented")
 
+    def get_convertible_unit_groups(self):
+        """Return groups of unit strings that represent the same physical
+        quantity but use different scales (e.g. feet and meters).
+
+        When two or more of these units appear in the current selection and
+        unit conversion is not applied, :class:`TimeSeriesPlotAction` will
+        render them as dual y-axes on a single subplot instead of separate
+        subplots.
+
+        Override in subclasses to declare domain-specific convertible unit
+        groups.  Returns an empty list by default (dual-axis disabled).
+
+        Returns
+        -------
+        list of set of str
+            Each set contains unit strings that are interconvertible
+            (e.g. ``[{"feet", "meters"}, {"deg_c", "deg_f"}]``).
+        """
+        return []
+
     def get_data_for_time_range(self, r, time_range):
         raise NotImplementedError("Method get_data_for_time_range not implemented")
 
@@ -1808,14 +1828,51 @@ class TimeSeriesPlotAction(PlotAction):
 
         title_map = self._update_title_for_custom_grouping(title_map, manager)
 
+        # --- Dual y-axis grouping for convertible units ---
+        # When two unit groups represent the same physical quantity on different
+        # scales (e.g. feet + meters) and unit conversion is off, merge them
+        # into a single subplot with multi_y=True instead of separate subplots.
+        dual_axis_groups = {}       # merged_key → {"unit_keys": [...], "title": str}
+        dual_axis_consumed = set()  # layout_map keys absorbed into a dual-axis plot
+
+        if not manager.plot_group_by_column:
+            convertible_groups = manager.get_convertible_unit_groups()
+            if convertible_groups:
+                from collections import defaultdict
+                unit_to_cg = {}
+                for cg_idx, cg_set in enumerate(convertible_groups):
+                    for u in cg_set:
+                        unit_to_cg[u.lower()] = cg_idx
+
+                cg_to_unit_keys = defaultdict(list)
+                for lk in layout_map:
+                    cg_idx = unit_to_cg.get(str(lk).lower())
+                    if cg_idx is not None:
+                        cg_to_unit_keys[cg_idx].append(lk)
+
+                for cg_idx, unit_keys in cg_to_unit_keys.items():
+                    if len(unit_keys) >= 2:
+                        merged_key = tuple(sorted(str(k) for k in unit_keys))
+                        base_titles = [title_map.get(k, str(k)) for k in unit_keys]
+                        merged_title = " / ".join(dict.fromkeys(base_titles))
+                        dual_axis_groups[merged_key] = {
+                            "unit_keys": unit_keys,
+                            "title": merged_title,
+                        }
+                        dual_axis_consumed.update(unit_keys)
+
         if manager.sensible_range_yaxis:
             for group_key, curves in layout_map.items():
+                if group_key in dual_axis_consumed:
+                    continue
                 for curve, _ in curves:
                     range_map[group_key] = manager._calculate_range(range_map[group_key], curve.data)
 
         # Assemble overlays
         overlays = []
         for group_key, curves_data in layout_map.items():
+            if group_key in dual_axis_consumed:
+                continue
             stations = station_map[group_key]
             style_combinations, has_duplicates, has_style_duplicates = (
                 manager._get_style_combinations(stations, curves_data, style_maps)
@@ -1887,6 +1944,67 @@ class TimeSeriesPlotAction(PlotAction):
                         else (None, None)
                     ),
                     title=title_map[group_key],
+                    min_height=400,
+                )
+            )
+
+        # Assemble dual y-axis overlays for convertible unit pairs
+        for merged_key, da_info in dual_axis_groups.items():
+            unit_keys = da_info["unit_keys"]
+            all_styled = []
+
+            for uk in unit_keys:
+                curves_data_uk = layout_map[uk]
+                stations_uk = station_map[uk]
+                style_combinations_uk, has_dups_uk, has_style_dups_uk = (
+                    manager._get_style_combinations(stations_uk, curves_data_uk, style_maps)
+                )
+                styled_uk = [
+                    manager._apply_curve_styling(
+                        curve, row, has_dups_uk, has_style_dups_uk,
+                        style_maps, style_combinations_uk,
+                    )
+                    for curve, row in curves_data_uk
+                ]
+
+                # Each unit group gets its own vdim name so multi_y maps them
+                # to separate axes (left for first unit key, right for second).
+                unit_vdim = (
+                    "value__"
+                    + str(uk)
+                    .replace(" ", "_")
+                    .replace("/", "_per_")
+                    .replace("^", "")
+                    .replace("(", "")
+                    .replace(")", "")
+                )
+                for curve in styled_uk:
+                    try:
+                        if curve.vdims:
+                            old_vdim = curve.vdims[0].name
+                            curve = curve.redim(**{old_vdim: unit_vdim})
+                    except Exception:
+                        pass
+                    # Set per-curve hover so the correct vdim column is referenced
+                    curve = curve.opts(
+                        opts.Curve(
+                            hover_tooltips=[
+                                ("Time", "@Time{%F %H:%M}"),
+                                ("", f"$name: @{{{unit_vdim}}}{{0,0.000}}"),
+                            ],
+                            hover_formatters={"@Time": "datetime"},
+                        )
+                    )
+                    all_styled.append(curve)
+
+            overlays.append(
+                hv.Overlay(all_styled)
+                .opts(
+                    multi_y=True,
+                    show_legend=manager.show_legend,
+                    show_grid=manager.show_gridlines,
+                    legend_position=manager.legend_position,
+                    title=da_info["title"],
                     min_height=400,
                 )
             )
