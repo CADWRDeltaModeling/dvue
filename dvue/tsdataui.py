@@ -1952,6 +1952,8 @@ class TimeSeriesPlotAction(PlotAction):
         for merged_key, da_info in dual_axis_groups.items():
             unit_keys = da_info["unit_keys"]
             all_styled = []
+            _ylims_per_vdim = {}  # vdim_name → (lo, hi)  — consumed by the Bokeh hook
+            _primary_vdim = None  # first vdim maps to the primary (left) y_range
 
             for uk in unit_keys:
                 curves_data_uk = layout_map[uk]
@@ -1967,40 +1969,89 @@ class TimeSeriesPlotAction(PlotAction):
                     for curve, row in curves_data_uk
                 ]
 
-                # Each unit group gets its own vdim name so multi_y maps them
-                # to separate axes (left for first unit key, right for second).
-                unit_vdim = (
-                    "value__"
-                    + str(uk)
-                    .replace(" ", "_")
-                    .replace("/", "_per_")
-                    .replace("^", "")
-                    .replace("(", "")
-                    .replace(")", "")
-                )
+                # Compute the data range for this unit group.
+                uk_range = None
+                for curve, _ in curves_data_uk:
+                    if manager.sensible_range_yaxis:
+                        uk_range = manager._calculate_range(uk_range, curve.data)
+                    elif curve.data is not None and not curve.data.empty:
+                        vals = curve.data.iloc[:, 0].dropna()
+                        if len(vals):
+                            lo, hi = float(vals.min()), float(vals.max())
+                            uk_range = (
+                                [lo, hi] if uk_range is None
+                                else [min(uk_range[0], lo), max(uk_range[1], hi)]
+                            )
+                if uk_range is not None:
+                    span = uk_range[1] - uk_range[0]
+                    pad = span * 0.05 if span > 0 else (abs(uk_range[0]) * 0.05 or 1.0)
+                    uk_ylim = (uk_range[0] - pad, uk_range[1] + pad)
+                else:
+                    uk_ylim = (None, None)
+
+                # Use the unit string as the vdim name so HoloViews
+                # unambiguously maps each unit group to its own axis.
+                unit_vdim_name = _sanitize_vdim(str(uk))   # e.g. "feet", "meters"
+                unit_dim = hv.Dimension(unit_vdim_name, label=str(uk))
+
+                # ylabel for this axis: prefer the accumulated title for this
+                # unit group (station IDs / parameter names set by
+                # append_to_title_map), falling back to the unit string.
+                uk_ylabel = title_map.get(uk, str(uk))
+
+                _ylims_per_vdim[unit_vdim_name] = uk_ylim
+                if _primary_vdim is None:
+                    _primary_vdim = unit_vdim_name
+
                 for curve in styled_uk:
                     try:
                         if curve.vdims:
                             old_vdim = curve.vdims[0].name
-                            curve = curve.redim(**{old_vdim: unit_vdim})
+                            curve = curve.redim(**{old_vdim: unit_dim})
                     except Exception:
                         pass
-                    # Set per-curve hover so the correct vdim column is referenced
                     curve = curve.opts(
-                        opts.Curve(
-                            hover_tooltips=[
-                                ("Time", "@Time{%F %H:%M}"),
-                                ("", f"$name: @{{{unit_vdim}}}{{0,0.000}}"),
-                            ],
-                            hover_formatters={"@Time": "datetime"},
-                        )
+                        ylabel=uk_ylabel,
+                        hover_tooltips=[
+                            ("Time", "@Time{%F %H:%M}"),
+                            ("", f"$name: @{{{unit_vdim_name}}}{{0,0.000}}"),
+                        ],
+                        hover_formatters={"@Time": "datetime"},
                     )
                     all_styled.append(curve)
+
+            # Bokeh hook: runs after the figure is fully rendered and directly
+            # sets Range1d start/end on the primary y_range (left axis) and
+            # any extra_y_ranges (right axis / additional axes).  This is more
+            # reliable than per-element ylim opts, which HoloViews can override
+            # during its own range-computation pass.
+            #
+            # In HoloViews multi_y: first vdim → y_range (left);
+            # subsequent vdims → extra_y_ranges keyed by vdim name.
+            # Capture loop values via default args to avoid closure issues.
+            def _dual_axis_range_hook(
+                plot, element,
+                _primary=_primary_vdim,
+                _ylims=dict(_ylims_per_vdim),
+            ):
+                y_range = plot.handles.get("y_range")
+                extra_y_ranges = plot.handles.get("extra_y_ranges", {})
+                for vname, ylim in _ylims.items():
+                    if ylim[0] is None:
+                        continue
+                    if vname == _primary:
+                        if y_range is not None:
+                            y_range.start = ylim[0]
+                            y_range.end = ylim[1]
+                    elif vname in extra_y_ranges:
+                        extra_y_ranges[vname].start = ylim[0]
+                        extra_y_ranges[vname].end = ylim[1]
 
             overlays.append(
                 hv.Overlay(all_styled)
                 .opts(
                     multi_y=True,
+                    hooks=[_dual_axis_range_hook],
                     show_legend=manager.show_legend,
                     show_grid=manager.show_gridlines,
                     legend_position=manager.legend_position,
