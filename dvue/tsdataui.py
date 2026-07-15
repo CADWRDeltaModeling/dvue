@@ -449,6 +449,35 @@ class TimeSeriesDataUIManager(DataUIManager):
         """
         return []
 
+    def get_secondary_axis_spec(self, unit: str):
+        """Return a secondary y-axis specification for *unit*, or ``None``.
+
+        When this method returns a non-None value, a reference axis is added
+        on the right side of the plot showing tick labels converted to a
+        related unit (e.g. feet ↔ meters, °C ↔ °F).  The secondary axis
+        shares the *same* data range as the primary axis — only the tick
+        labels are re-formatted via the supplied JavaScript snippet.
+
+        Override in subclasses that support unit conversion so users can
+        read both scales at a glance without mental arithmetic.
+
+        Parameters
+        ----------
+        unit : str
+            Lower-cased unit string of the primary axis (as stored in the
+            catalog ``unit`` column).
+
+        Returns
+        -------
+        dict or None
+            ``{"label": str, "js_code": str}`` where *label* is the
+            secondary axis title and *js_code* is a one-liner Bokeh
+            ``FuncTickFormatter`` body (receives ``tick`` as the primary
+            axis value, must ``return`` a string).  Return ``None`` to
+            suppress the secondary axis (default).
+        """
+        return None
+
     def get_data_for_time_range(self, r, time_range):
         raise NotImplementedError("Method get_data_for_time_range not implemented")
 
@@ -1928,6 +1957,30 @@ class TimeSeriesPlotAction(PlotAction):
                 ("", f"$name: @{{{value_col}}}{{0,0.000}}"),
             ]
 
+            # Optional secondary axis (reference unit) for this overlay.
+            secondary_spec = manager.get_secondary_axis_spec(str(group_key))
+            secondary_hooks = []
+            if secondary_spec is not None:
+                def _secondary_axis_hook(
+                    plot, element, _spec=secondary_spec
+                ):
+                    from bokeh.models import LinearAxis, FuncTickFormatter
+                    fig = plot.handles.get("plot")
+                    if fig is None:
+                        return
+                    formatter = FuncTickFormatter(
+                        code=f"return ({_spec['js_code']});"
+                    )
+                    fig.add_layout(
+                        LinearAxis(
+                            y_range_name="default",
+                            axis_label=_spec["label"],
+                            formatter=formatter,
+                        ),
+                        "right",
+                    )
+                secondary_hooks = [_secondary_axis_hook]
+
             overlays.append(
                 hv.Overlay(styled_curves)
                 .opts(opts.Curve(
@@ -1935,6 +1988,7 @@ class TimeSeriesPlotAction(PlotAction):
                     hover_formatters={"@Time": "datetime"},
                 ))
                 .opts(
+                    hooks=secondary_hooks,
                     show_legend=manager.show_legend,
                     show_grid=manager.show_gridlines,
                     legend_position=manager.legend_position,
@@ -2003,14 +2057,43 @@ class TimeSeriesPlotAction(PlotAction):
                 if _primary_vdim is None:
                     _primary_vdim = unit_vdim_name
 
-                for curve in styled_uk:
+                for element in styled_uk:
+                    # _apply_curve_styling may return hv.Curve or hv.Overlay
+                    # (Curve * Scatter when marker cycling is active).
+                    # ylim / ylabel for multi_y MUST be applied directly to the
+                    # inner hv.Curve — not to an Overlay wrapper — so HoloViews
+                    # creates a fixed Range1d for that axis rather than a
+                    # DataRange1d that the browser will auto-range.
+                    if isinstance(element, hv.Overlay):
+                        try:
+                            children = list(element.values())
+                        except Exception:
+                            children = []
+                        curve_el = next(
+                            (e for e in children if isinstance(e, hv.Curve)), None
+                        )
+                        other_els = [
+                            e for e in children if not isinstance(e, hv.Curve)
+                        ]
+                    elif isinstance(element, hv.Curve):
+                        curve_el = element
+                        other_els = []
+                    else:
+                        all_styled.append(element)
+                        continue
+
+                    if curve_el is None:
+                        all_styled.append(element)
+                        continue
+
+                    # Rename vdim and set per-axis opts on the bare Curve.
                     try:
-                        if curve.vdims:
-                            old_vdim = curve.vdims[0].name
-                            curve = curve.redim(**{old_vdim: unit_dim})
+                        old_vdim = curve_el.vdims[0].name
+                        curve_el = curve_el.redim(**{old_vdim: unit_dim})
                     except Exception:
                         pass
-                    curve = curve.opts(
+                    curve_el = curve_el.opts(
+                        ylim=uk_ylim,
                         ylabel=uk_ylabel,
                         hover_tooltips=[
                             ("Time", "@Time{%F %H:%M}"),
@@ -2018,7 +2101,17 @@ class TimeSeriesPlotAction(PlotAction):
                         ],
                         hover_formatters={"@Time": "datetime"},
                     )
-                    all_styled.append(curve)
+
+                    # Re-compose with any Scatter elements from marker styling.
+                    result = curve_el
+                    for other in other_els:
+                        try:
+                            old_vdim = other.vdims[0].name
+                            other = other.redim(**{old_vdim: unit_dim})
+                        except Exception:
+                            pass
+                        result = result * other
+                    all_styled.append(result)
 
             # Bokeh hook: runs after the figure is fully rendered and directly
             # sets Range1d start/end on the primary y_range (left axis) and
