@@ -82,3 +82,104 @@ def exceedance_plot(
 
 def save_figure(fig, filename):
     fig.savefig(filename, dpi=300, bbox_inches="tight")
+
+
+# ---------------------------------------------------------------------------
+# PSU reference-line utilities for EC (µS/cm) plots
+# ---------------------------------------------------------------------------
+
+import math as _math
+
+
+def _nice_psu_levels(lo_psu: float, hi_psu: float, max_lines: int = 7) -> list:
+    """Return PSU values at 'nice' intervals within [lo_psu, hi_psu].
+
+    Uses standard nice-number algorithm: step is 1, 2, or 5 × 10ⁿ.
+    """
+    span = hi_psu - lo_psu
+    if span <= 0:
+        return []
+    raw_step = span / max_lines
+    magnitude = 10 ** _math.floor(_math.log10(raw_step)) if raw_step > 0 else 1
+    step = magnitude * 10  # fallback
+    for mult in (1, 2, 5, 10):
+        candidate = mult * magnitude
+        if span / candidate <= max_lines:
+            step = candidate
+            break
+    decimals = max(0, -int(_math.floor(_math.log10(step)))) if step < 1 else 0
+    start_idx = _math.ceil(lo_psu / step)
+    levels = []
+    idx = start_idx
+    while True:
+        val = round(idx * step, decimals + 1)
+        if val > hi_psu + step * 1e-6:
+            break
+        if val >= 0:
+            levels.append(val)
+        idx += 1
+    return levels
+
+
+def make_psu_reference_lines_hook(lo_ec: float, hi_ec: float):
+    """Return a Bokeh hook that draws PSU isopleths on an EC (µS/cm) plot.
+
+    Horizontal dotted lines are positioned at the exact EC (µS/cm) values
+    that correspond to round PSU levels.  The conversion uses the full
+    non-linear PSP-78 / Hill-corrected ``ec_psu_25c`` formula from vtools,
+    so tick positions are physically correct — unlike a linear secondary
+    axis, which would be misleading over the full estuarine salinity range.
+
+    Parameters
+    ----------
+    lo_ec, hi_ec : float
+        Y-axis range of the plot in µS/cm.
+
+    Returns
+    -------
+    callable
+        A Bokeh plot hook ``hook(plot, element)``.
+    """
+    def hook(plot, element, _lo=lo_ec, _hi=hi_ec):
+        try:
+            from bokeh.models import Span, Label
+            from vtools.functions.unit_conversions import ec_psu_25c, psu_ec_25c
+        except ImportError:
+            return
+        fig = plot.handles.get("plot")
+        if fig is None or _lo is None or _hi is None or _lo >= _hi:
+            return
+
+        lo_psu = float(ec_psu_25c(max(_lo, 0.0)))
+        hi_psu = float(ec_psu_25c(max(_hi, 0.0)))
+        psu_levels = _nice_psu_levels(lo_psu, hi_psu)
+
+        for psu in psu_levels:
+            try:
+                ec_val = float(psu_ec_25c(float(psu)))
+            except Exception:
+                continue
+            if not (_lo <= ec_val <= _hi):
+                continue
+            label_text = f"{int(psu)} PSU" if psu == int(psu) else f"{psu:.1f} PSU"
+            fig.add_layout(Span(
+                location=ec_val,
+                dimension="width",
+                line_color="#888888",
+                line_dash="dotted",
+                line_width=1,
+                line_alpha=0.6,
+            ))
+            fig.add_layout(Label(
+                x=6,
+                y=ec_val,
+                text=label_text,
+                text_font_size="9px",
+                text_color="#555555",
+                x_units="screen",
+                y_units="data",
+                text_align="left",
+                text_baseline="bottom",
+            ))
+
+    return hook

@@ -478,6 +478,28 @@ class TimeSeriesDataUIManager(DataUIManager):
         """
         return None
 
+    def get_annotation_hook(self, unit: str, lo, hi):
+        """Return a Bokeh hook that adds annotations to a single-unit overlay.
+
+        Called once per overlay during rendering.  Override in subclasses to
+        add reference lines, threshold markers, or other annotations that are
+        specific to the displayed unit (e.g. PSU isopleths on an EC axis).
+
+        Parameters
+        ----------
+        unit : str
+            Lower-cased unit string for the overlay's y-axis.
+        lo, hi : float or None
+            Approximate y-axis data bounds (with padding).  May be ``None``
+            when the range cannot be determined before rendering.
+
+        Returns
+        -------
+        callable or None
+            A Bokeh hook ``hook(plot, element)`` or ``None``.
+        """
+        return None
+
     def get_data_for_time_range(self, r, time_range):
         raise NotImplementedError("Method get_data_for_time_range not implemented")
 
@@ -1957,9 +1979,39 @@ class TimeSeriesPlotAction(PlotAction):
                 ("", f"$name: @{{{value_col}}}{{0,0.000}}"),
             ]
 
-            # Optional secondary axis (reference unit) for this overlay.
+            # Compute the y-axis range for this overlay so that:
+            #   (a) it can be passed to get_annotation_hook for accurate
+            #       reference-line positioning even when sensible_range_yaxis
+            #       is off, and
+            #   (b) it is used as ylim in the overlay opts.
+            group_ylim = (
+                tuple(range_map[group_key])
+                if range_map[group_key] is not None
+                else (None, None)
+            )
+            # When sensible_range_yaxis is off the range_map entry is None;
+            # compute raw data bounds so annotation hooks still get a valid range.
+            lo_anno, hi_anno = group_ylim
+            if lo_anno is None:
+                _ar = None
+                for curve, _ in curves_data:
+                    if curve.data is not None and not curve.data.empty:
+                        vals = curve.data.iloc[:, 0].dropna()
+                        if len(vals):
+                            _lo_v, _hi_v = float(vals.min()), float(vals.max())
+                            _ar = (
+                                [_lo_v, _hi_v] if _ar is None
+                                else [min(_ar[0], _lo_v), max(_ar[1], _hi_v)]
+                            )
+                if _ar is not None:
+                    _sp = _ar[1] - _ar[0]
+                    _pd = _sp * 0.05 if _sp > 0 else 1.0
+                    lo_anno, hi_anno = _ar[0] - _pd, _ar[1] + _pd
+
+            # Build hooks: secondary axis + optional annotations
+            # (e.g. PSU reference lines for EC plots).
             secondary_spec = manager.get_secondary_axis_spec(str(group_key))
-            secondary_hooks = []
+            all_hooks = []
             if secondary_spec is not None:
                 def _secondary_axis_hook(
                     plot, element, _spec=secondary_spec
@@ -1979,7 +2031,13 @@ class TimeSeriesPlotAction(PlotAction):
                         ),
                         "right",
                     )
-                secondary_hooks = [_secondary_axis_hook]
+                all_hooks.append(_secondary_axis_hook)
+
+            annotation_hook = manager.get_annotation_hook(
+                str(group_key), lo_anno, hi_anno
+            )
+            if annotation_hook is not None:
+                all_hooks.append(annotation_hook)
 
             overlays.append(
                 hv.Overlay(styled_curves)
@@ -1988,15 +2046,11 @@ class TimeSeriesPlotAction(PlotAction):
                     hover_formatters={"@Time": "datetime"},
                 ))
                 .opts(
-                    hooks=secondary_hooks,
+                    hooks=all_hooks,
                     show_legend=manager.show_legend,
                     show_grid=manager.show_gridlines,
                     legend_position=manager.legend_position,
-                    ylim=(
-                        tuple(range_map[group_key])
-                        if range_map[group_key] is not None
-                        else (None, None)
-                    ),
+                    ylim=group_ylim,
                     title=title_map[group_key],
                     min_height=400,
                 )
