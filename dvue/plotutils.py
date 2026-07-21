@@ -121,26 +121,30 @@ def _nice_psu_levels(lo_psu: float, hi_psu: float, max_lines: int = 7) -> list:
     return levels
 
 
-def make_psu_reference_lines_hook(lo_ec: float, hi_ec: float):
-    """Return a Bokeh hook that draws PSU isopleths on an EC (µS/cm) plot.
+def make_psu_reference_lines_hook(lo_ec: float, hi_ec: float,
+                                   ec_unit_scale: float = 1.0):
+    """Return a Bokeh hook that draws PSU isopleths on an EC plot.
 
-    Horizontal dotted lines are positioned at the exact EC (µS/cm) values
-    that correspond to round PSU levels.  The conversion uses the full
+    Horizontal dotted lines are positioned at the exact EC values that
+    correspond to round PSU levels.  The conversion uses the full
     non-linear PSP-78 / Hill-corrected ``ec_psu_25c`` formula from vtools,
-    so tick positions are physically correct — unlike a linear secondary
-    axis, which would be misleading over the full estuarine salinity range.
+    so tick positions are physically correct.
 
     Parameters
     ----------
     lo_ec, hi_ec : float
-        Y-axis range of the plot in µS/cm.
+        Y-axis range in the displayed EC unit.
+    ec_unit_scale : float
+        Multiply axis values by this factor to convert to µS/cm before
+        the PSU conversion.  Default ``1.0`` when the axis IS already in
+        µS/cm.  Pass ``1000.0`` for axes in mS/cm (e.g. NOAA conductivity).
 
     Returns
     -------
     callable
         A Bokeh plot hook ``hook(plot, element)``.
     """
-    def hook(plot, element, _lo=lo_ec, _hi=hi_ec):
+    def hook(plot, element, _lo=lo_ec, _hi=hi_ec, _scale=ec_unit_scale):
         try:
             from bokeh.models import Span, Label
             from vtools.functions.unit_conversions import ec_psu_25c, psu_ec_25c
@@ -150,13 +154,13 @@ def make_psu_reference_lines_hook(lo_ec: float, hi_ec: float):
         if fig is None or _lo is None or _hi is None or _lo >= _hi:
             return
 
-        lo_psu = float(ec_psu_25c(max(_lo, 0.0)))
-        hi_psu = float(ec_psu_25c(max(_hi, 0.0)))
+        lo_psu = float(ec_psu_25c(max(_lo * _scale, 0.0)))
+        hi_psu = float(ec_psu_25c(max(_hi * _scale, 0.0)))
         psu_levels = _nice_psu_levels(lo_psu, hi_psu)
 
         for psu in psu_levels:
             try:
-                ec_val = float(psu_ec_25c(float(psu)))
+                ec_val = float(psu_ec_25c(float(psu))) / _scale
             except Exception:
                 continue
             if not (_lo <= ec_val <= _hi):
@@ -181,5 +185,88 @@ def make_psu_reference_lines_hook(lo_ec: float, hi_ec: float):
                 text_align="left",
                 text_baseline="bottom",
             ))
+
+    return hook
+
+
+def make_psu_dual_axis_hook(lo_ec: float, hi_ec: float,
+                             ec_unit_scale: float = 1.0):
+    """Return a Bokeh hook that adds a PSU reference axis to an EC plot.
+
+    A right-side ``LinearAxis`` is added whose tick marks sit at the exact
+    EC axis positions that correspond to round PSU levels (computed via the
+    full non-linear PSP-78 / Hill-corrected ``ec_psu_25c`` formula).  The
+    axis shares the primary ``y_range`` so every tick is physically aligned:
+    the EC value on the left axis and its PSU equivalent on the right sit at
+    the same height.
+
+    Parameters
+    ----------
+    lo_ec, hi_ec : float
+        Y-axis range in the displayed EC unit.
+    ec_unit_scale : float
+        Multiply axis values by this to convert to µS/cm before the PSU
+        conversion.  Default ``1.0`` (axis is already in µS/cm).
+        Pass ``1000.0`` for mS/cm axes (NOAA conductivity).
+
+    Returns
+    -------
+    callable
+        A Bokeh plot hook ``hook(plot, element)``.
+    """
+    def hook(plot, element, _lo=lo_ec, _hi=hi_ec, _scale=ec_unit_scale):
+        try:
+            from bokeh.models import LinearAxis, FixedTicker, CustomJSTickFormatter
+            from vtools.functions.unit_conversions import ec_psu_25c, psu_ec_25c
+        except ImportError:
+            return
+        fig = plot.handles.get("plot")
+        if fig is None or _lo is None or _hi is None or _lo >= _hi:
+            return
+
+        lo_psu = float(ec_psu_25c(max(_lo * _scale, 0.0)))
+        hi_psu = float(ec_psu_25c(max(_hi * _scale, 0.0)))
+        psu_levels = _nice_psu_levels(lo_psu, hi_psu)
+        if not psu_levels:
+            return
+
+        ec_ticks, psu_labels = [], []
+        for psu in psu_levels:
+            try:
+                ec_val = float(psu_ec_25c(float(psu))) / _scale
+            except Exception:
+                continue
+            if _lo <= ec_val <= _hi:
+                ec_ticks.append(ec_val)
+                psu_labels.append(
+                    str(int(psu)) if psu == int(psu) else f"{psu:.1f}"
+                )
+        if not ec_ticks:
+            return
+
+        # CustomJSTickFormatter: the tick *position* is an EC value; return
+        # the pre-computed PSU label for that position.  We use a tolerance
+        # check rather than exact equality to guard against any floating-point
+        # rounding that Bokeh may apply to tick values.
+        formatter = CustomJSTickFormatter(
+            args=dict(ec_ticks=ec_ticks, psu_labels=psu_labels),
+            code="""
+            var best = 0, min_diff = Infinity;
+            for (var i = 0; i < ec_ticks.length; i++) {
+                var d = Math.abs(tick - ec_ticks[i]);
+                if (d < min_diff) { min_diff = d; best = i; }
+            }
+            return psu_labels[best];
+            """,
+        )
+        fig.add_layout(
+            LinearAxis(
+                y_range_name="default",
+                axis_label="PSU",
+                ticker=FixedTicker(ticks=ec_ticks),
+                formatter=formatter,
+            ),
+            "right",
+        )
 
     return hook

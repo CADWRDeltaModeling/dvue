@@ -500,6 +500,51 @@ class TimeSeriesDataUIManager(DataUIManager):
         """
         return None
 
+    # Universal linear / affine unit conversions: y_to = factor * y_from + offset.
+    # Covers all physical conversions that appear across the supported app stack.
+    # EC ↔ PSU is intentionally absent (non-linear; handled by reference lines).
+    _UNIVERSAL_LINEAR_CONVERSIONS = {
+        # Length
+        ("feet",   "meters"):    (0.3048,          0),
+        ("meters", "feet"):      (3.28084,          0),
+        ("ft",     "meters"):    (0.3048,          0),
+        ("meters", "ft"):        (3.28084,          0),
+        # Flow
+        ("cfs",    "m^3/s"):     (1 / 35.3147,     0),
+        ("m^3/s",  "cfs"):       (35.3147,          0),
+        ("ft^3/s", "m^3/s"):    (1 / 35.3147,     0),
+        ("m^3/s",  "ft^3/s"):   (35.3147,          0),
+        # Temperature — all common spellings used across app managers
+        ("deg_c",  "deg_f"):     (1.8,              32),
+        ("deg_f",  "deg_c"):     (5 / 9,  -32 * 5 / 9),
+        ("deg c",  "deg f"):     (1.8,              32),
+        ("deg f",  "deg c"):     (5 / 9,  -32 * 5 / 9),
+        ("degc",   "degf"):      (1.8,              32),
+        ("degf",   "degc"):      (5 / 9,  -32 * 5 / 9),
+        ("deg_c",  "deg f"):     (1.8,              32),
+        ("deg f",  "deg_c"):     (5 / 9,  -32 * 5 / 9),
+        ("deg_c",  "degf"):      (1.8,              32),
+        ("degf",   "deg_c"):     (5 / 9,  -32 * 5 / 9),
+    }
+
+    def get_unit_conversion_linear(self, from_unit: str, to_unit: str):
+        """Return ``(factor, offset)`` for the affine mapping
+        ``to_unit = factor * from_unit + offset``, or ``None``.
+
+        Used by :class:`TimeSeriesPlotAction` to align dual y-axes so that
+        the same physical value sits at the same height on both axes.
+        Only linear / affine conversions can be correctly aligned this way;
+        non-linear conversions (e.g. EC ↔ PSU) return ``None``.
+
+        Subclasses can override to add domain-specific conversions, but the
+        default implementation already covers all standard physical pairs
+        (length, flow, temperature) used across the supported application
+        stack.
+        """
+        return self._UNIVERSAL_LINEAR_CONVERSIONS.get(
+            (from_unit.lower(), to_unit.lower())
+        )
+
     def get_data_for_time_range(self, r, time_range):
         raise NotImplementedError("Method get_data_for_time_range not implemented")
 
@@ -2167,19 +2212,52 @@ class TimeSeriesPlotAction(PlotAction):
                         result = result * other
                     all_styled.append(result)
 
-            # Bokeh hook: runs after the figure is fully rendered and directly
-            # sets Range1d start/end on the primary y_range (left axis) and
-            # any extra_y_ranges (right axis / additional axes).  This is more
-            # reliable than per-element ylim opts, which HoloViews can override
-            # during its own range-computation pass.
-            #
-            # In HoloViews multi_y: first vdim → y_range (left);
-            # subsequent vdims → extra_y_ranges keyed by vdim name.
-            # Capture loop values via default args to avoid closure issues.
+            # --- Align dual y-axes for linear unit conversions ---
+            # When a linear formula exists between the two units, compute a
+            # single shared physical range and express it in each unit so that
+            # the same y-position represents the same physical value on both
+            # axes (e.g. 1 m aligns with 3.28 ft, 10°C aligns with 50°F).
+            _hook_conv = None      # (factor, offset): primary → secondary
+            _secondary_vdim = None
+            if len(unit_keys) == 2:
+                conv = manager.get_unit_conversion_linear(
+                    str(unit_keys[0]), str(unit_keys[1])
+                )
+                if conv is not None:
+                    _f, _o = conv
+                    _v0 = _sanitize_vdim(str(unit_keys[0]))
+                    _v1 = _sanitize_vdim(str(unit_keys[1]))
+                    _ylim0 = _ylims_per_vdim.get(_v0)
+                    _ylim1 = _ylims_per_vdim.get(_v1)
+                    if (_ylim0 and _ylim1
+                            and None not in _ylim0 and None not in _ylim1):
+                        lo0, hi0 = _ylim0
+                        lo1, hi1 = _ylim1
+                        # Convert secondary range into primary-unit coordinates
+                        lo1_p = (lo1 - _o) / _f
+                        hi1_p = (hi1 - _o) / _f
+                        # Combined physical range with 5 % padding
+                        clo = min(lo0, lo1_p)
+                        chi = max(hi0, hi1_p)
+                        _span = chi - clo
+                        _pad = _span * 0.05 if _span > 0 else 1.0
+                        lo_p = clo - _pad
+                        hi_p = chi + _pad
+                        # Update ylims to aligned values
+                        _ylims_per_vdim[_v0] = (lo_p, hi_p)
+                        _ylims_per_vdim[_v1] = (_f * lo_p + _o, _f * hi_p + _o)
+                        _hook_conv = (_f, _o)
+                        _secondary_vdim = _v1
+
+            # Bokeh hook: set aligned ranges and add one-way CustomJS so the
+            # secondary axis tracks the primary when the user pans or zooms.
+            # Capture all loop values via default args (closure-safety).
             def _dual_axis_range_hook(
                 plot, element,
                 _primary=_primary_vdim,
                 _ylims=dict(_ylims_per_vdim),
+                _conv=_hook_conv,
+                _sec=_secondary_vdim,
             ):
                 y_range = plot.handles.get("y_range")
                 extra_y_ranges = plot.handles.get("extra_y_ranges", {})
@@ -2193,6 +2271,25 @@ class TimeSeriesPlotAction(PlotAction):
                     elif vname in extra_y_ranges:
                         extra_y_ranges[vname].start = ylim[0]
                         extra_y_ranges[vname].end = ylim[1]
+                # One-way CustomJS: when the primary axis is panned or zoomed
+                # the secondary updates immediately so both axes stay aligned.
+                if _conv is not None and _sec is not None and y_range is not None:
+                    sec_range = extra_y_ranges.get(_sec)
+                    if sec_range is not None:
+                        factor, offset = _conv
+                        try:
+                            from bokeh.models import CustomJS
+                            cb = CustomJS(
+                                args=dict(sec=sec_range, f=factor, o=offset),
+                                code=(
+                                    "sec.start = cb_obj.start * f + o; "
+                                    "sec.end   = cb_obj.end   * f + o;"
+                                ),
+                            )
+                            y_range.js_on_change("start", cb)
+                            y_range.js_on_change("end",   cb)
+                        except Exception:
+                            pass
 
             overlays.append(
                 hv.Overlay(all_styled)
