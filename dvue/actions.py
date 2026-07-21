@@ -249,6 +249,8 @@ class TabulateAction(PlotAction):
             combined,
             show_index=False,
             sizing_mode="stretch_both",
+            pagination="local",
+            page_size=10000,
         )
         tab.editors = {col: None for col in combined.columns}  # make all columns read-only
         return tab
