@@ -1476,9 +1476,9 @@ class DataUI(param.Parameterized):
             header_filters=self._build_header_filters(self.use_regex_filter),
             sorters=list(old.sorters or []),
             pagination="local",
-            page_size=1000,
+            page_size=100,
             configuration={
-                "headerFilterLiveFilterDelay": 600,
+                "headerFilterLiveFilterDelay": 300,
                 "columnDefaults": {"tooltip": True},
             },
         )
@@ -1564,9 +1564,9 @@ class DataUI(param.Parameterized):
             sizing_mode="stretch_width",
             header_filters=self._build_header_filters(self.use_regex_filter),
             pagination="local",
-            page_size=1000,
+            page_size=100,
             configuration={
-                "headerFilterLiveFilterDelay": 600,
+                "headerFilterLiveFilterDelay": 300,
                 "columnDefaults": {"tooltip": True},
             },
         )
@@ -2354,9 +2354,9 @@ class DataUI(param.Parameterized):
             show_index=False,
             sizing_mode="stretch_width",
             pagination="local",
-            page_size=1000,
+            page_size=100,
             configuration={
-                "headerFilterLiveFilterDelay": 600,
+                "headerFilterLiveFilterDelay": 300,
                 "columnDefaults": {"tooltip": True},
             },
         )
