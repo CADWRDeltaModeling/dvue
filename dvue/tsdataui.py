@@ -472,7 +472,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         dict or None
             ``{"label": str, "js_code": str}`` where *label* is the
             secondary axis title and *js_code* is a one-liner Bokeh
-            ``FuncTickFormatter`` body (receives ``tick`` as the primary
+            ``CustomJSTickFormatter`` body (receives ``tick`` as the primary
             axis value, must ``return`` a string).  Return ``None`` to
             suppress the secondary axis (default).
         """
@@ -2061,11 +2061,17 @@ class TimeSeriesPlotAction(PlotAction):
                 def _secondary_axis_hook(
                     plot, element, _spec=secondary_spec
                 ):
-                    from bokeh.models import LinearAxis, FuncTickFormatter
+                    try:
+                        from bokeh.models import LinearAxis, CustomJSTickFormatter as _TickFormatter
+                    except ImportError:
+                        try:
+                            from bokeh.models import LinearAxis, FuncTickFormatter as _TickFormatter
+                        except ImportError:
+                            return
                     fig = plot.handles.get("plot")
                     if fig is None:
                         return
-                    formatter = FuncTickFormatter(
+                    formatter = _TickFormatter(
                         code=f"return ({_spec['js_code']});"
                     )
                     fig.add_layout(
