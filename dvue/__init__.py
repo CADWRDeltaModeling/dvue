@@ -2,7 +2,24 @@
 dvue - Data Visualization and UI components
 """
 
+import os
+
 __version__ = "0.1.0"
+
+# Disable PROJ's on-demand network grid downloads (cdn.proj.org). Recent
+# PROJ/pyproj versions may fetch high-accuracy datum-shift grids (e.g.
+# us_noaa_cnhpgn.tif) over the network when reprojecting CRSs for map
+# rendering. Behind corporate proxies/firewalls this can fail with a
+# certificate revocation check error (pyproj.exceptions.ProjError) and crash
+# the UI. Map visualizations here do not need that level of geodetic
+# accuracy, so force offline/local grids only. Must run before cartopy/pyproj
+# are imported below.
+os.environ.setdefault("PROJ_NETWORK", "OFF")
+try:
+    import pyproj
+    pyproj.network.set_network_enabled(False)
+except Exception:
+    pass
 
 from .dataui import DataProvider, DataUIManager
 from .actions import (
