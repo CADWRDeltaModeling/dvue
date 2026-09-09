@@ -697,7 +697,9 @@ class DataUI(param.Parameterized):
         self._dfcat_before_map_filter = None
 
         if isinstance(self._dfcat, gpd.GeoDataFrame):
-            self._tmap = gv.tile_sources.CartoLight()
+            from .tile_sources import get_carto_tile_source
+
+            self._tmap = get_carto_tile_source()
             _bg_layer = self._dataui_manager.get_background_map_layer()
             if _bg_layer is not None:
                 self._tmap = self._tmap * _bg_layer

@@ -34,6 +34,7 @@ from bokeh.plotting import figure as bk_figure
 from .reader import (SlicingReader, BufferedSlicingReader,
                      StreamingTransformedSlicingReader, TransformSpec,
                      RawSequentialBuffer, ResamplingSlicingReader)
+from ..tile_sources import get_carto_tile_url, CARTO_ATTRIBUTION
 
 # ---------------------------------------------------------------------------
 # Curated colormaps (subset that works well with numeric data on maps)
@@ -77,8 +78,8 @@ CURATED_COLORMAPS_WITH_SEP: list = [
 # is always created within an active Bokeh document context)
 # ---------------------------------------------------------------------------
 
-_CARTO_LIGHT_URL = "https://basemaps.cartocdn.com/light_all/{Z}/{X}/{Y}.png"
-_CARTO_LIGHT_ATTR = "© CARTO / © OpenStreetMap contributors"
+_CARTO_LIGHT_URL = get_carto_tile_url("light_all")
+_CARTO_LIGHT_ATTR = CARTO_ATTRIBUTION
 
 # ---------------------------------------------------------------------------
 # Internal helpers
