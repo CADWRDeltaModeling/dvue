@@ -55,6 +55,12 @@ def _sanitize_vdim(label: str) -> str:
         s = f"v_{s}"
     return s
 
+
+_SECONDARY_AXIS_TICK_JS = """
+const rounded = Math.round(tick * 100) / 100;
+return Number.isInteger(rounded) ? rounded.toString() : rounded.toFixed(2);
+"""
+
 def get_color_dataframe(stations, color_cycle=hv.Cycle()):
     """
     Create a dataframe with station names and colors
@@ -2072,7 +2078,10 @@ class TimeSeriesPlotAction(PlotAction):
                     if fig is None:
                         return
                     formatter = _TickFormatter(
-                        code=f"return ({_spec['js_code']});"
+                        code=(
+                            f"const tick = ({_spec['js_code']});\n"
+                            f"{_SECONDARY_AXIS_TICK_JS}"
+                        )
                     )
                     fig.add_layout(
                         LinearAxis(
@@ -2267,6 +2276,21 @@ class TimeSeriesPlotAction(PlotAction):
             ):
                 y_range = plot.handles.get("y_range")
                 extra_y_ranges = plot.handles.get("extra_y_ranges", {})
+                fig = plot.handles.get("plot")
+                if fig is not None:
+                    try:
+                        from bokeh.models import CustomJSTickFormatter as _TickFormatter
+                    except ImportError:
+                        try:
+                            from bokeh.models import FuncTickFormatter as _TickFormatter
+                        except ImportError:
+                            _TickFormatter = None
+                    if _TickFormatter is not None:
+                        for axis in fig.yaxis:
+                            if axis.y_range_name != "default":
+                                axis.formatter = _TickFormatter(
+                                    code=_SECONDARY_AXIS_TICK_JS
+                                )
                 for vname, ylim in _ylims.items():
                     if ylim[0] is None:
                         continue

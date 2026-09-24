@@ -881,6 +881,18 @@ class _PlotActionManager(_StubManager):
         return self._test_catalog.get(row["name"])
 
 
+class _DualAxisPlotActionManager(_PlotActionManager):
+    def get_convertible_unit_groups(self):
+        return [{"feet", "meters"}]
+
+
+class _ReferenceAxisPlotActionManager(_PlotActionManager):
+    def get_secondary_axis_spec(self, unit):
+        if unit == "feet":
+            return {"label": "meters", "js_code": "tick * 0.3048"}
+        return None
+
+
 def _build_plot_catalog(names, unit="cfs"):
     """Build a minimal catalog with station/variable attributes."""
     reader_map = {}
@@ -967,6 +979,55 @@ class TestPlotActionRender:
         refs_and_data = list(action.get_refs_and_data(df, mgr))
         result = action.render(df, refs_and_data, mgr)
         assert len(result) == 2
+
+    def test_dual_axis_secondary_ticks_round_to_two_decimals(self):
+        import holoviews as hv
+        from dvue.tsdataui import TimeSeriesPlotAction
+
+        catalog = DataCatalog(primary_key=["station", "variable"])
+        for station, unit in [("STA_A", "feet"), ("STA_B", "meters")]:
+            catalog.add(DataReference(
+                reader=InMemoryDataReferenceReader(_make_ts()),
+                name=f"{station}_flow",
+                station=station,
+                variable="flow",
+                unit=unit,
+            ))
+        manager = _DualAxisPlotActionManager(catalog, {})
+        manager.time_range = (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02"))
+        data_frame = manager.get_data_catalog()
+        action = TimeSeriesPlotAction()
+        result = action.render(
+            data_frame,
+            list(action.get_refs_and_data(data_frame, manager)),
+            manager,
+        )
+
+        plot = hv.renderer("bokeh").get_plot(result[0])
+        secondary_axes = [axis for axis in plot.state.yaxis if axis.y_range_name != "default"]
+        assert secondary_axes
+        assert "Math.round(tick * 100) / 100" in secondary_axes[0].formatter.code
+
+    def test_reference_axis_ticks_round_converted_values_to_two_decimals(self):
+        import holoviews as hv
+        from dvue.tsdataui import TimeSeriesPlotAction
+
+        catalog = _build_plot_catalog(["STA_A/flow"], unit="feet")
+        manager = _ReferenceAxisPlotActionManager(catalog, {})
+        manager.time_range = (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02"))
+        data_frame = manager.get_data_catalog()
+        action = TimeSeriesPlotAction()
+        result = action.render(
+            data_frame,
+            list(action.get_refs_and_data(data_frame, manager)),
+            manager,
+        )
+
+        plot = hv.renderer("bokeh").get_plot(result[0])
+        secondary_axes = [axis for axis in plot.state.yaxis if axis.y_range_name == "default"][1:]
+        assert secondary_axes
+        assert "tick * 0.3048" in secondary_axes[0].formatter.code
+        assert "Math.round(tick * 100) / 100" in secondary_axes[0].formatter.code
 
     def test_curve_label_matches_station(self):
         """Curve label should contain the station name."""
