@@ -2078,8 +2078,12 @@ class TimeSeriesPlotAction(PlotAction):
                     if fig is None:
                         return
                     formatter = _TickFormatter(
+                        # Reassign (not redeclare) `tick` -- CustomJSTickFormatter
+                        # already injects it as a parameter; `const tick = ...`
+                        # throws "Identifier 'tick' has already been declared"
+                        # and breaks the whole plot render.
                         code=(
-                            f"const tick = ({_spec['js_code']});\n"
+                            f"tick = ({_spec['js_code']});\n"
                             f"{_SECONDARY_AXIS_TICK_JS}"
                         )
                     )

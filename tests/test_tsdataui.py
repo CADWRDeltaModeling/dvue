@@ -1026,8 +1026,15 @@ class TestPlotActionRender:
         plot = hv.renderer("bokeh").get_plot(result[0])
         secondary_axes = [axis for axis in plot.state.yaxis if axis.y_range_name == "default"][1:]
         assert secondary_axes
-        assert "tick * 0.3048" in secondary_axes[0].formatter.code
-        assert "Math.round(tick * 100) / 100" in secondary_axes[0].formatter.code
+        code = secondary_axes[0].formatter.code
+        assert "tick * 0.3048" in code
+        assert "Math.round(tick * 100) / 100" in code
+        # Regression: CustomJSTickFormatter already injects `tick` as a
+        # parameter; redeclaring it with `const`/`let` throws
+        # "Identifier 'tick' has already been declared" in the browser and
+        # blanks the whole plot (see reference-axis blank-plot bug).
+        assert "const tick" not in code
+        assert "let tick" not in code
 
     def test_curve_label_matches_station(self):
         """Curve label should contain the station name."""
