@@ -340,6 +340,11 @@ def serve_session_app(
     import re as _re
     app_key = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "app"
 
+    # Bokeh's default session_token_expiration (300s) expires the reconnect
+    # token after a few minutes idle, so the browser's automatic reconnect
+    # fails permanently with "Token is expired" until the page is reloaded.
+    pn_serve_kwargs.setdefault("session_token_expiration", 2_592_000)
+
     pn.serve(
         {app_key: make_app},
         port=port,
