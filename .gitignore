@@ -71,3 +71,4 @@ cache.db
 .cache-ds/
 .session_cache/
 .github/skills/
+cache_continuous/

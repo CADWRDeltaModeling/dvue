@@ -31,7 +31,9 @@ class PlotAction:
         efficiently.  Rows whose manager has no
         :class:`~dvue.catalog.DataCatalog` (``get_data_reference`` raises
         :exc:`NotImplementedError`) yield ``(row, None, None)`` instead
-        of propagating the error.
+        of propagating the error.  Any other per-row failure (e.g. a bad
+        or missing file for one series) is logged and also yields
+        ``(row, None, None)`` rather than aborting the remaining rows.
         """
         time_range = getattr(manager, "time_range", None)
         for _, row in df.iterrows():
@@ -40,6 +42,10 @@ class PlotAction:
                 data = ref.getData(time_range=time_range)
                 yield row, ref, data
             except NotImplementedError:
+                yield row, None, None
+            except Exception as e:
+                name = row.get("name", row.get("station_name", "?")) if hasattr(row, "get") else "?"
+                logger.warning("Failed to load data for %s: %s", name, e)
                 yield row, None, None
 
     def get_tab_label(self, tab_count: int) -> str:
@@ -106,6 +112,7 @@ class PlotAction:
         def _worker():
             try:
                 refs_and_data = []
+                load_errors = []
                 for i, (_, row) in enumerate(dfselected.iterrows()):
                     name = row.get("name", row.get("station_name", str(i)))
                     # schedule per-item progress update
@@ -123,11 +130,22 @@ class PlotAction:
                         refs_and_data.append((row, ref, data))
                     except NotImplementedError:
                         refs_and_data.append((row, None, None))
+                    except Exception as e:
+                        # Skip this item but keep loading the rest — a single
+                        # bad series should not abort the whole selection.
+                        logger.warning("Failed to load data for %s: %s", name, e)
+                        load_errors.append(f"{name}: {e}")
+                        refs_and_data.append((row, None, None))
 
                 doc.add_next_tick_callback(
                     lambda: dataui.set_progress(85, "Rendering plot…")
                 )
                 plot_panel = self.render(dfselected, refs_and_data, manager)
+
+                if load_errors:
+                    doc.add_next_tick_callback(
+                        lambda errs=load_errors: self._notify_partial_errors(errs)
+                    )
 
                 def _update_display():
                     if len(dataui._display_panel.objects) > 0 and isinstance(
@@ -190,6 +208,23 @@ class PlotAction:
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _notify_partial_errors(self, load_errors, max_shown=5):
+        """Show a transient top-right toast summarising per-item load failures.
+
+        Successful items still render normally; this only surfaces the
+        failures that were skipped, so a single bad series does not abort
+        the whole selection.
+        """
+        if pn.state.notifications is None:
+            logger.error("Failed to load %d item(s): %s", len(load_errors), load_errors)
+            return
+        shown = load_errors[:max_shown]
+        extra = len(load_errors) - len(shown)
+        msg = f"Failed to load {len(load_errors)} item(s):\n" + "\n".join(shown)
+        if extra > 0:
+            msg += f"\n… and {extra} more"
+        pn.state.notifications.warning(msg, duration=8000)
 
     async def _hide_progress_after_delay(self, dataui):
         """Hide the progress bar and status label after a short delay."""

@@ -938,6 +938,138 @@ def _render_action(names, shared_axes=True, unit="cfs"):
     return action.render(df, refs_and_data, mgr)
 
 
+# ---------------------------------------------------------------------------
+# Tests — partial-failure handling (one bad series must not abort the rest)
+# ---------------------------------------------------------------------------
+
+
+def _failing_reader():
+    """Reader whose load() always raises, to simulate one bad series."""
+    from dvue.catalog import CallableDataReferenceReader
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    return CallableDataReferenceReader(_boom)
+
+
+class _FakeDisplayPanel:
+    def __init__(self):
+        self.loading = False
+        self.objects = []
+
+
+class _FakeDisplayTable:
+    def __init__(self, value, selection):
+        self.value = value
+        self.selection = selection
+
+
+class _FakeDataUI:
+    """Minimal stand-in for DataUI used by PlotAction.callback in tests."""
+
+    def __init__(self, dfcat, selection, manager):
+        self.display_table = _FakeDisplayTable(dfcat, selection)
+        self._dfcat = dfcat
+        self._dataui_manager = manager
+        self._display_panel = _FakeDisplayPanel()
+        self._tab_count = 0
+
+    def set_progress(self, pct, msg):
+        pass
+
+    def hide_progress(self):
+        pass
+
+
+class _SyncThread:
+    """Stand-in for threading.Thread that runs target() immediately, synchronously."""
+
+    def __init__(self, target=None, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+class _RecordingNotifications:
+    def __init__(self):
+        self.warnings = []
+        self.errors = []
+
+    def warning(self, msg, duration=None):
+        self.warnings.append(msg)
+
+    def error(self, msg, duration=None):
+        self.errors.append(msg)
+
+
+class _ImmediateDoc:
+    def add_next_tick_callback(self, fn):
+        fn()
+
+
+class TestPlotActionPartialFailure:
+    """A single bad reference must not abort loading/rendering of the rest."""
+
+    def _build_mixed_catalog(self):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(reader=InMemoryDataReferenceReader(_make_ts()), name="good_0"))
+        cat.add(DataReference(reader=_failing_reader(), name="bad_1"))
+        cat.add(DataReference(reader=InMemoryDataReferenceReader(_make_ts()), name="good_2"))
+        return cat
+
+    def test_get_refs_and_data_skips_failing_row_continues(self):
+        """get_refs_and_data() must yield (row, None, None) for a failing row
+        and keep yielding the remaining good rows rather than raising."""
+        from dvue.actions import PlotAction
+
+        cat = self._build_mixed_catalog()
+        mgr = _PlotActionManager(cat, {})
+        df = mgr.get_data_catalog()
+
+        results = list(PlotAction().get_refs_and_data(df, mgr))
+
+        assert len(results) == 3
+        has_data = [data is not None for (_row, _ref, data) in results]
+        assert has_data == [True, False, True]
+
+    def test_callback_renders_good_items_and_notifies_on_partial_failure(self):
+        """PlotAction.callback: good rows still render; the failure is
+        collated into a single transient notification instead of aborting."""
+        import dvue.actions as actions_mod
+        from dvue.actions import TabulateAction
+        from unittest.mock import patch
+        import asyncio
+
+        cat = self._build_mixed_catalog()
+        mgr = _PlotActionManager(cat, {})
+        dfcat = mgr.get_data_catalog()
+        fake_dataui = _FakeDataUI(dfcat, selection=[0, 1, 2], manager=mgr)
+
+        notifications = _RecordingNotifications()
+
+        async def _invoke():
+            TabulateAction().callback(None, fake_dataui)
+
+        with patch.object(actions_mod.threading, "Thread", _SyncThread), \
+                patch("panel.state") as mock_state:
+            mock_state.curdoc = _ImmediateDoc()
+            mock_state.notifications = notifications
+            asyncio.run(_invoke())
+
+        # The good rows still produced a rendered tab.
+        assert len(fake_dataui._display_panel.objects) == 1
+        tabs = fake_dataui._display_panel.objects[0]
+        assert len(tabs) == 1
+
+        # The failure was collated into one warning notification, not an abort.
+        assert len(notifications.warnings) == 1
+        assert "bad_1" in notifications.warnings[0]
+        assert "boom" in notifications.warnings[0]
+        assert notifications.errors == []
+
+
 class TestPlotActionRender:
     """Smoke and correctness tests for TimeSeriesPlotAction.render()."""
 
