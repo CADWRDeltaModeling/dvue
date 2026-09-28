@@ -1070,6 +1070,78 @@ class TestPlotActionPartialFailure:
         assert notifications.errors == []
 
 
+class TestGetDataPartialFailure:
+    """TimeSeriesDataUIManager.get_data() must keep yielding after one bad row."""
+
+    def test_yields_none_for_failing_row_keeps_alignment(self):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(reader=InMemoryDataReferenceReader(_make_ts()), name="good_0"))
+        cat.add(DataReference(reader=_failing_reader(), name="bad_1"))
+        cat.add(DataReference(reader=InMemoryDataReferenceReader(_make_ts()), name="good_2"))
+
+        mgr = _PlotActionManager(cat, {})
+        df = mgr.get_data_catalog()
+
+        results = list(mgr.get_data(df))
+
+        assert len(results) == 3
+        assert results[0] is not None
+        assert results[1] is None
+        assert results[2] is not None
+
+
+class _FakeDisplayTableWithSelectedDF(_FakeDisplayTable):
+    def __init__(self, value, selection, selected_dataframe):
+        super().__init__(value, selection)
+        self.selected_dataframe = selected_dataframe
+
+
+class TestDownloadDataActionPartialFailure:
+    """A single bad series must not abort the whole CSV download."""
+
+    def _build_mixed_catalog(self):
+        cat = DataCatalog(primary_key=["name"])
+        cat.add(DataReference(reader=InMemoryDataReferenceReader(_make_ts()), name="good_0"))
+        cat.add(DataReference(reader=_failing_reader(), name="bad_1"))
+        cat.add(DataReference(reader=InMemoryDataReferenceReader(_make_ts()), name="good_2"))
+        return cat
+
+    def test_download_succeeds_with_good_series_and_notifies_skipped(self):
+        from dvue.actions import DownloadDataAction
+        from unittest.mock import patch
+        import asyncio
+
+        cat = self._build_mixed_catalog()
+        mgr = _PlotActionManager(cat, {})
+        dfcat = mgr.get_data_catalog()
+        fake_dataui = _FakeDataUI(dfcat, selection=[0, 1, 2], manager=mgr)
+        fake_dataui.display_table = _FakeDisplayTableWithSelectedDF(
+            dfcat, [0, 1, 2], dfcat.copy()
+        )
+
+        notifications = _RecordingNotifications()
+        result_holder = {}
+
+        async def _invoke():
+            result_holder["result"] = DownloadDataAction().callback(None, fake_dataui)
+
+        with patch("panel.state") as mock_state:
+            mock_state.curdoc = _ImmediateDoc()
+            mock_state.notifications = notifications
+            asyncio.run(_invoke())
+
+        result = result_holder["result"]
+        assert result is not None
+        csv_text = result.read()
+        header = csv_text.splitlines()[0]
+        # Only the two good series' columns are present (both named 'value').
+        assert header.count("value") == 2
+
+        assert len(notifications.warnings) == 1
+        assert "bad_1" in notifications.warnings[0]
+        assert notifications.errors == []
+
+
 class TestPlotActionRender:
     """Smoke and correctness tests for TimeSeriesPlotAction.render()."""
 

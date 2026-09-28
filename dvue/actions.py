@@ -501,9 +501,20 @@ class DownloadDataAction:
                 lambda: dataui.set_progress(30, "Loading data…")
             )
             time_range = getattr(dataui._dataui_manager, "time_range", None)
-            dfdata = pd.concat(
-                [df for df in dataui._dataui_manager.get_data(dfselected, time_range=time_range)], axis=1
-            )
+            names = list(dfselected["name"]) if "name" in dfselected.columns else list(dfselected.index)
+            loaded = list(dataui._dataui_manager.get_data(dfselected, time_range=time_range))
+            frames = []
+            load_errors = []
+            for name, frame in zip(names, loaded):
+                if frame is None:
+                    load_errors.append(str(name))
+                else:
+                    frames.append(frame)
+
+            if not frames:
+                raise ValueError("No series could be loaded for download.")
+
+            dfdata = pd.concat(frames, axis=1)
             doc.add_next_tick_callback(
                 lambda: dataui.set_progress(80, "Serialising to CSV…")
             )
@@ -513,6 +524,10 @@ class DownloadDataAction:
             doc.add_next_tick_callback(
                 lambda: dataui.set_progress(100, "Ready")
             )
+            if load_errors:
+                doc.add_next_tick_callback(
+                    lambda errs=load_errors: self._notify_partial_errors(errs)
+                )
             return sio
         except Exception as e:
             logger.error("Error downloading data: %s", e)
@@ -524,6 +539,23 @@ class DownloadDataAction:
             doc.add_next_tick_callback(
                 lambda: asyncio.create_task(_hide_after_delay(dataui))
             )
+
+    def _notify_partial_errors(self, load_errors, max_shown=5):
+        """Show a transient top-right toast summarising per-item load failures.
+
+        Successful series are still downloaded; this only surfaces the
+        failures that were skipped, so a single bad series does not abort
+        the whole download.
+        """
+        if pn.state.notifications is None:
+            logger.error("Failed to load %d item(s): %s", len(load_errors), load_errors)
+            return
+        shown = load_errors[:max_shown]
+        extra = len(load_errors) - len(shown)
+        msg = f"Skipped {len(load_errors)} item(s) in download:\n" + "\n".join(shown)
+        if extra > 0:
+            msg += f"\n… and {extra} more"
+        pn.state.notifications.warning(msg, duration=8000)
 
 
 async def _hide_after_delay(dataui):

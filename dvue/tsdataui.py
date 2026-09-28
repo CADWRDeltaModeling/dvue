@@ -1197,13 +1197,20 @@ class TimeSeriesDataUIManager(DataUIManager):
 
         # Process each row, updating progress as we go
         for i, (_, r) in enumerate(df.iterrows()):
-            if use_catalog:
-                data = self.get_data_reference(r).getData(time_range=effective_time_range)
-            else:
-                data, _, _ = self.get_data_for_time_range(r, effective_time_range)
+            try:
+                if use_catalog:
+                    data = self.get_data_reference(r).getData(time_range=effective_time_range)
+                else:
+                    data, _, _ = self.get_data_for_time_range(r, effective_time_range)
 
-            if self.convert_units:
-                data = self.apply_unit_conversion(data)
+                if self.convert_units:
+                    data = self.apply_unit_conversion(data)
+            except Exception as e:
+                # A single bad series must not abort loading of the rest —
+                # yield None so callers can skip it while keeping row alignment.
+                name = r.get("name", r.get("station_name", "?")) if hasattr(r, "get") else "?"
+                logger.warning("get_data: failed to load row %s: %s", name, e)
+                data = None
 
             # Update progress - scale from 0 to 50%
             if dataui:
