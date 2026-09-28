@@ -349,7 +349,14 @@ def serve_session_app(
         {app_key: make_app},
         port=port,
         show=True,
-        unused_session_lifetime_milliseconds=2_592_000_000,
+        # Bounded: cookie-less requests (health checks, crawlers) each spin
+        # up a fresh registry entry that never reconnects. Letting these
+        # accumulate for days leaks memory until the process is OOM-killed,
+        # dropping every real user's connection at once. The in-memory
+        # `_registry` above (keyed by user_id) is what gives real users
+        # cross-reload continuity, so Bokeh's raw Document does not need a
+        # long lifetime.
+        unused_session_lifetime_milliseconds=1_800_000,
         **pn_serve_kwargs,
     )
 
