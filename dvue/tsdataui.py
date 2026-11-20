@@ -1,4 +1,5 @@
 from .utils import get_unique_short_names
+from . import mui
 from .dataui import DataUIManager, full_stack
 from .actions import PlotAction
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ import panel as pn
 import colorcet as cc
 from holoviews.plotting.util import process_cmap
 
-pn.extension("tabulator", notifications=True, design="native")
+pn.extension("tabulator", notifications=True, design="material")
 #
 LINE_DASH_MAP = ["solid", "dashed", "dotted", "dotdash", "dashdot"]
 #
@@ -674,7 +675,7 @@ class TimeSeriesDataUIManager(DataUIManager):
                         "No catalog attached — nothing to clear.", duration=3000
                     )
 
-        clear_cache_btn = pn.widgets.Button(
+        clear_cache_btn = mui.Button(
             name="Clear Cache", button_type="light", icon="trash", sizing_mode="stretch_width",
         )
         clear_cache_btn.on_click(_clear_cache_cb)
@@ -1012,7 +1013,7 @@ class TimeSeriesDataUIManager(DataUIManager):
         else:
             from .actions import TransformToCatalogAction
             xform_action = TransformToCatalogAction()
-            xform_btn = pn.widgets.Button(
+            xform_btn = mui.Button(
                 name="Transform → MathRef",
                 button_type="success",
                 icon="transform",

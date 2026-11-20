@@ -45,6 +45,8 @@ from uuid import uuid4
 import pandas as pd
 import panel as pn
 
+from . import mui
+
 logger = logging.getLogger(__name__)
 
 _handler_installed = False  # guard against double-patching
@@ -528,10 +530,10 @@ def serve_desktop_app(
             + "\n".join(f"- `{p}`" for p in paths),
             sizing_mode="stretch_width",
         )
-        add_btn = pn.widgets.Button(
+        add_btn = mui.Button(
             name="Add", button_type="success", icon="folder-plus", width=120
         )
-        cancel_btn = pn.widgets.Button(
+        cancel_btn = mui.Button(
             name="Cancel", button_type="light", width=100
         )
         status = pn.pane.Markdown("", sizing_mode="stretch_width")
@@ -737,8 +739,8 @@ def make_reset_session_button(
     button_type: str = "warning",
     on_reset=None,
     **kwargs,
-) -> "pn.widgets.Button":
-    """Create a Panel button that resets the persistent user-session cookie.
+) -> "mui.Button":
+    """Create a button that resets the persistent user-session cookie.
 
     Clicking the button:
 
@@ -772,11 +774,11 @@ def make_reset_session_button(
             completes the old entry will remain until the server restarts or
             the cache TTL expires.
     **kwargs
-        Extra keyword arguments forwarded verbatim to ``pn.widgets.Button``.
+        Extra keyword arguments forwarded verbatim to :class:`dvue.mui.Button`.
 
     Returns
     -------
-    pn.widgets.Button
+    dvue.mui.Button
 
     Examples
     --------
@@ -791,7 +793,7 @@ def make_reset_session_button(
             on_reset=lambda: _APP_REGISTRY.pop(reg_key, None)
         )
     """
-    btn = pn.widgets.Button(name=label, button_type=button_type, **kwargs)
+    btn = mui.Button(name=label, button_type=button_type, **kwargs)
 
     # Client-side: expire the cookie immediately then reload.
     btn.js_on_click(
@@ -922,7 +924,7 @@ class SessionManager:
 
     # ── Reset button ──────────────────────────────────────────────────────────
 
-    def make_reset_button(self, reg_key: str = "", **kwargs) -> "pn.widgets.Button":
+    def make_reset_button(self, reg_key: str = "", **kwargs) -> "mui.Button":
         """Return a reset-session button bound to this manager.
 
         Clicking the button evicts *reg_key* from the in-memory registry,

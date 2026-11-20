@@ -319,62 +319,48 @@ Both fixes and their regression tests live in
 
 ---
 
-## 12. Serving a dvue App — VanillaTemplate Gotchas
+## 12. Serving a dvue App — `pmui.Page` Pattern
 
-### Use VanillaTemplate, not FastListTemplate, as the outer served template
+### `create_view()` returns a `pmui.Page`
 
-`FastListTemplate.main` wraps each item in a Bootstrap `<li>` with a fixed height, which
-collapses the `GridStack` so the data table and display panel disappear.  `VanillaTemplate`
-renders `main` items full-width without that wrapping.
+`DataUI.create_view()` (and `create_mobile_view()` / `create_responsive_view()`) return
+a `panel_material_ui.Page`.  Serve it directly with `.servable()` / `.show()`.  To
+serve a shell immediately and build the `DataUI` in `pn.state.onload`, make the outer
+page a `pmui.Page` and move the built page's `sidebar`, `main` and `header` into it —
+see `session-management.md` for the complete `make_app()` reference implementation.
 
-`create_view()` returns a `FastListTemplate` (correct for standalone use / notebook).  When
-embedding inside an outer served template, transplant sidebar and main content out of the
-inner `FastListTemplate` into a `VanillaTemplate`, then clear the inner template so Panel
-doesn't try to serve the same Bokeh models from two documents.
+`Page.sidebar`, `.main` and `.header` are plain lists: assign a new list rather than
+mutating in place.  The About / Disclaimer `pmui.Dialog` lives in the built page's
+`main` (`DataUI.add_header_buttons(page)` adds it to a page you own), so there is no
+`open_modal()` or `modal` slot.
 
-### `template.servable()` must be called synchronously in `make_app()`
+### `page.servable()` must be called synchronously in `make_app()`
 
 `make_app()` is the per-session callable passed to `pn.serve()`.  Without a synchronous
-`template.servable()` call in `make_app()`, the Bokeh document is never registered and the
+`page.servable()` call in `make_app()`, the Bokeh document is never registered and the
 browser receives an empty page — even if `_load_app` runs and builds everything correctly.
 
 ```python
 def make_app():
     ...
     pn.state.onload(_load_app)  # deferred heavy work
-    template.servable()          # ← must be here, not only inside onload
+    page.servable()              # ← must be here, not only inside onload
 ```
 
-### VanillaTemplate DOM Placeholder Rule (header and modal)
+### Buttons: `dvue.mui.Button` accepts the classic Panel arguments
 
-`VanillaTemplate`'s Jinja HTML embeds a Bokeh root `<div>` for every item in
-`template.header` and `template.modal` **at the time `.servable()` is called**.
-Items appended to those lists *after* `.servable()` (including inside
-`pn.state.onload`) have no DOM placeholder and silently fail to render.
+dvue's buttons are `dvue.mui.Button`, a `pmui.Button` that still accepts `name`,
+`button_type`, `button_style` and tabler icon names (`"chart-line"`), translating them
+to Material labels, colours, variants and icons.  Action dictionaries returned by
+`get_data_actions()` therefore keep using `button_type` and tabler icon names.  Code
+that finds buttons with `isinstance(x, pn.widgets.Button)` must also accept
+`pmui.Button`.
 
-**Pattern:** create `pn.Row()` / `pn.Column()` container objects *before* the
-template, pass them at construction or append them before `.servable()`, then
-update their `.objects` inside `_load_app`:
+### `pn.extension(design=...)`
 
-```python
-header_row = pn.Row(sizing_mode="fixed")       # ← before VanillaTemplate()
-modal_pane = pn.Column(sizing_mode="stretch_width")
-
-template = pn.template.VanillaTemplate(..., header=[header_row])
-template.modal.append(modal_pane)               # ← before .servable()
-
-def _load_app():
-    # ✅ update container contents — root already has a DOM slot
-    modal_pane.objects = [ui.get_about_text()]
-    header_row.append(about_btn)
-    # ❌ never do this — destroys the pre-rendered modal root permanently
-    # template.modal.clear()
-```
-
-`template.modal.clear()` after `.servable()` destroys the pre-rendered root; all
-subsequent `template.open_modal()` calls open an empty dialog.
-
-See `session-management.md` for the complete `make_app()` reference implementation.
+Use `design="material"` in apps that render a `DataUI`.  The design is global state:
+a later `pn.extension(design="native")` (for example at import of another module)
+overrides it, so re-assert `design="material"` after pre-importing such modules.
 
 ---
 

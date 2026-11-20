@@ -204,9 +204,11 @@ removes a useful feature.
 
 ## Disclaimer and About Buttons — Header Modal, Not Action Row
 
-`disclaimer_text` (when non-empty) adds a sidebar card automatically.  For a modal
-Disclaimer button in the page header, wire it via the pre-rendered `header_row` /
-`modal_pane` pattern described in `session-management.md`.
+`disclaimer_text` (when non-empty) adds a sidebar card automatically.  The page header
+gets About and Disclaimer buttons from `DataUI.create_view()` automatically (they open a
+shared `pmui.Dialog` inside the page's `main`).  When embedding a `DataUI` in your own
+`pmui.Page`, move the built page's `header` and `main` into it, or call
+`ui.add_header_buttons(page)` — see `session-management.md`.
 
 **Do not** add a Disclaimer action to `get_data_actions()` — that puts it in the
 action row next to Plot/Tabulate, which is the wrong affordance for a legal notice:
@@ -245,7 +247,7 @@ code — delete it.
 - [ ] Primary key values used as station identifiers start with a letter (e.g. `"STA1"` not `"1"`) — values starting with a digit get a `_` prefix in auto-derived names
 - [ ] Do **not** set `show_math_ref_editor = False` unless intentionally disabling
 - [ ] If using session persistence: `show_reset_session_button = True` + `session_cookie_name` matches `install_session_handler(cookie_name=...)`
-- [ ] Disclaimer/About wired via pre-rendered `header_row` / `modal_pane` — not via `get_data_actions()`
+- [ ] Disclaimer/About come from `create_view()` (header buttons + shared `pmui.Dialog`) — not via `get_data_actions()`
 - [ ] Pure `return super().get_data_actions()` override deleted
 
 ## Finding Old API Usage (grep patterns)

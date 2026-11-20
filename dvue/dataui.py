@@ -21,12 +21,14 @@ import geoviews as gv
 gv.extension("bokeh")
 import param
 import panel as pn
+import panel_material_ui as pmui
 from panel.io import location
 
-pn.extension("tabulator", notifications=True, design="native")
+pn.extension("tabulator", notifications=True, design="material")
 pn.extension("gridstack")  # for GridStack layout
 #
 from . import fullscreen
+from . import mui
 from .actions import (
     PlotAction,
     TabulateAction,
@@ -68,16 +70,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
-# Responsive CSS injected into FastListTemplate
+# Responsive CSS added to pn.config.raw_css (pmui.Page handles the responsive
+# sidebar itself, so only the action-bar wrapping rule is needed)
 # ---------------------------------------------------------------------------
 _RESPONSIVE_CSS = """
-/* Tablet: narrower sidebar */
-@media (max-width: 1024px) {
-    #sidebar {
-        width: 330px !important;
-        min-width: 280px !important;
-    }
-}
 /* Wrap action buttons on narrow screens */
 .action-bar-row {
     display: flex;
@@ -101,6 +97,8 @@ _MOBILE_CSS = """
 }
 """
 
+if _RESPONSIVE_CSS not in pn.config.raw_css:
+    pn.config.raw_css.append(_RESPONSIVE_CSS)
 
 class DataProvider(param.Parameterized):
     """Data-access base class for DataUI.
@@ -1392,7 +1390,7 @@ class DataUI(param.Parameterized):
 
                 button.on_click(create_menu_handler(action))
             else:
-                button = pn.widgets.Button(
+                button = mui.Button(
                     name=action["name"],
                     button_type=action["button_type"],
                     icon=action["icon"],
@@ -1814,44 +1812,79 @@ class DataUI(param.Parameterized):
         """)
         return pn.pane.Markdown(text, sizing_mode="stretch_width")
 
-    def create_about_button(self, template):
-        about_btn = pn.widgets.Button(name="About App", button_type="primary", icon="info-circle")
+    def _get_modal(self):
+        """Return the shared :class:`pmui.Dialog` used for About / Disclaimer."""
+        modal = getattr(self, "_modal", None)
+        if modal is None:
+            modal = pmui.Dialog(
+                title="About",
+                width_option="md",
+                sizing_mode="stretch_width",
+                show_close_button=True,
+                close_on_click=True,
+            )
+            self._modal = modal
+        return modal
 
-        def about_callback(event):
+    def _open_modal(self, template, content, title):
+        """Show *content* in a modal.
+
+        Classic Panel templates (``open_modal``) are still honoured so that
+        downstream apps embedding DataUI in a ``VanillaTemplate`` keep working;
+        everything else uses the shared :class:`pmui.Dialog`.
+        """
+        if template is not None and hasattr(template, "open_modal"):
+            template.modal.clear()
+            template.modal.append(content)
             template.open_modal()
+            return
+        modal = self._get_modal()
+        modal.title = title
+        modal.objects = [content]
+        modal.open = True
 
-        about_btn.on_click(about_callback)
+    def create_about_button(self, template=None):
+        about_btn = pmui.Button(
+            label="About App", color="primary", variant="contained", icon="info"
+        )
+        about_btn.on_click(
+            lambda event: self._open_modal(template, self.get_about_text(), "")
+        )
         return about_btn
 
     def create_disclaimer_button(self, template, disclaimer_modal_content):
-        """Return a button that swaps the modal to the disclaimer text and opens it."""
-        disclaimer_btn = pn.widgets.Button(
-            name="Disclaimer", button_type="light", icon="alert-circle"
+        """Return a button that shows the disclaimer text in the modal."""
+        disclaimer_btn = pmui.Button(
+            label="Disclaimer", color="light", variant="outlined", icon="warning"
         )
-
-        def disclaimer_callback(event):
-            template.modal.clear()
-            template.modal.append(disclaimer_modal_content)
-            template.open_modal()
-
-        disclaimer_btn.on_click(disclaimer_callback)
+        disclaimer_btn.on_click(
+            lambda event: self._open_modal(template, disclaimer_modal_content, "Disclaimer")
+        )
         return disclaimer_btn
 
     def add_header_buttons(self, template):
         """Add About (and optionally Disclaimer) buttons to *template*'s header.
 
         Use this when DataUI is embedded inside an outer template that supplies
-        its own header — the buttons will close over the correct *template* so
-        modals open on the servable outer template rather than the inner one
-        returned by :meth:`create_view`.
+        its own header.  *template* may be a :class:`pmui.Page` (the shared
+        dialog is added to its ``main``) or a classic Panel template (the modal
+        content is placed in ``template.modal`` as before).
         """
         about_button = self.create_about_button(template)
+        buttons = []
         disclaimer_content = self._dataui_manager.get_sidebar_disclaimer()
         if disclaimer_content is not None:
-            disclaimer_button = self.create_disclaimer_button(template, disclaimer_content)
-            template.header.append(disclaimer_button)
-        template.header.append(about_button)
-        template.modal.append(self.get_about_text())
+            buttons.append(self.create_disclaimer_button(template, disclaimer_content))
+        buttons.append(about_button)
+        if hasattr(template, "open_modal"):
+            for button in buttons:
+                template.header.append(button)
+            template.modal.append(self.get_about_text())
+        else:
+            template.header = [*template.header, *buttons]
+            modal = self._get_modal()
+            if modal not in template.main:
+                template.main = [*template.main, modal]
 
     def _create_main_view(self):
         """Create the main view content based on the current view_type"""
@@ -2078,6 +2111,7 @@ class DataUI(param.Parameterized):
                 self._nav_radio.value = cap
 
     def create_view(self, title="Data User Interface"):
+        self._modal = None  # fresh dialog per view
         main_panel = self.create_data_table(self._dfcat)
 
         # Create progress bar
@@ -2217,7 +2251,7 @@ class DataUI(param.Parameterized):
             )
 
             # Create a button to show map in display panel
-            map_display_btn = pn.widgets.Button(
+            map_display_btn = mui.Button(
                 name="Show Map in Display", button_type="primary", icon="map", width=150
             )
             map_display_btn.on_click(self.show_map_in_display_panel)
@@ -2298,29 +2332,22 @@ class DataUI(param.Parameterized):
             sizing_mode="stretch_both",
         )
 
-        template = pn.template.FastListTemplate(
+        # About / Disclaimer buttons live in the header (visible in standalone
+        # use); both open the shared dialog, which is rendered inside ``main``.
+        header = []
+        disclaimer_text = self._dataui_manager.get_sidebar_disclaimer()
+        if disclaimer_text is not None:
+            header.append(self.create_disclaimer_button(None, disclaimer_text))
+        header.append(self.create_about_button())
+
+        template = pmui.Page(
             title=title,
             sidebar=[sidebar_view],
             sidebar_width=450,
-            header_background="lightgray",
-            meta_viewport="width=device-width, initial-scale=1",
-            raw_css=[_RESPONSIVE_CSS],
+            main=[self._main_view, self._get_modal()],
+            header=header,
         )
-
-        # About button only in the header (visible in standalone use).
-        about_button = self.create_about_button(template)
-        disclaimer_text = self._dataui_manager.get_sidebar_disclaimer()
-        if disclaimer_text is not None:
-            disclaimer_button = self.create_disclaimer_button(template, disclaimer_text)
-            template.header.append(disclaimer_button)
-        template.header.append(about_button)
-        template.main.append(self._main_view)
-
-        # Adding about button
-        template.modal.append(self.get_about_text())
-        # sidebar_view.append(self.create_about_button(template))
         self._template = template
-
         # finally sync location views
         self.setup_location_sync()
         # Sync all params (manager transforms + DataUI view) with URL query string
@@ -2338,7 +2365,7 @@ class DataUI(param.Parameterized):
     def create_mobile_view(self, title="Data User Interface"):
         """Create a mobile-optimized view with stacked vertical layout.
 
-        Returns a :class:`~panel.template.FastListTemplate` with a condensed
+        Returns a :class:`pmui.Page` with a condensed
         table, compact action bar, and vertically stacked plot display.
         The sidebar (accessible via hamburger menu) contains the map toggle
         and advanced options.
@@ -2524,20 +2551,17 @@ class DataUI(param.Parameterized):
             )
         )
 
-        template = pn.template.FastListTemplate(
+        if _MOBILE_CSS not in pn.config.raw_css:
+            pn.config.raw_css.append(_MOBILE_CSS)
+        self._modal = None
+        template = pmui.Page(
             title=title,
             sidebar=sidebar_items,
             sidebar_width=300,
-            collapsed_sidebar=True,
-            header_background="lightgray",
-            meta_viewport="width=device-width, initial-scale=1",
-            raw_css=[_MOBILE_CSS],
+            sidebar_open=False,
+            main=[*main_items, self._get_modal()],
+            header=[self.create_about_button()],
         )
-
-        template.main.extend(main_items)
-        about_button = self.create_about_button(template)
-        template.header.append(about_button)
-        template.modal.append(self.get_about_text())
         self._template = template
         return template
 
@@ -2562,13 +2586,8 @@ class DataUI(param.Parameterized):
             sizing_mode="stretch_both",
         )
 
-        # Placeholder template — will be replaced
-        template = pn.template.FastListTemplate(
-            title=title,
-            meta_viewport="width=device-width, initial-scale=1",
-            header_background="lightgray",
-        )
-        template.main.append(container)
+        # Placeholder page — its contents are replaced in _on_load
+        template = pmui.Page(title=title, main=[container])
 
         dataui = self
 
@@ -2595,18 +2614,15 @@ class DataUI(param.Parameterized):
                     "window.location.reload();}"
                     "</script>"
                 )
-                t.header.append(pn.pane.HTML(_detect_js, width=0, height=0))
+                t.header = [*t.header, pn.pane.HTML(_detect_js, width=0, height=0)]
 
-            # Re-parent into the outer template
+            # Re-parent the built page's contents (including the shared dialog
+            # inside ``main``) into the outer page.
             container.objects = list(t.main)
-            template.sidebar[:] = list(t.sidebar)
-            template.modal[:] = list(t.modal)
-            for obj in t.header:
-                template.header.append(obj)
-            # Copy template styling
+            template.sidebar = list(t.sidebar)
+            template.header = list(t.header)
             template.sidebar_width = t.sidebar_width
-            if hasattr(t, 'collapsed_sidebar'):
-                template.collapsed_sidebar = t.collapsed_sidebar
+            template.sidebar_open = t.sidebar_open
 
         pn.state.onload(_on_load)
         self._template = template

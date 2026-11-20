@@ -612,7 +612,8 @@ class TestTransformToCatalogActionExpressionBuilder:
             if found is None:
                 found = []
             import panel as pn
-            if isinstance(obj, (pn.widgets.Button, pn.widgets.MenuButton)):
+            import panel_material_ui as pmui
+            if isinstance(obj, (pn.widgets.Button, pn.widgets.MenuButton, pmui.Button)):
                 found.append(obj.name)
             if hasattr(obj, "objects"):
                 for child in obj.objects:

@@ -1,0 +1,125 @@
+"""Tests for the pmui.Page based DataUI views and the shared modal dialog."""
+
+import pandas as pd
+import panel as pn
+import panel_material_ui as pmui
+import pytest
+
+from dvue import dataui
+from dvue.catalog import DataCatalog, DataReference, InMemoryDataReferenceReader
+from dvue.tsdataui import TimeSeriesDataUIManager
+
+
+class _Manager(TimeSeriesDataUIManager):
+    def __init__(self, disclaimer=None, **kwargs):
+        reader = InMemoryDataReferenceReader(pd.DataFrame({"value": [1.0, 2.0]}))
+        cat = DataCatalog(primary_key=["name"])
+        for i in range(2):
+            cat.add(DataReference(reader=reader, name=f"ref_{i}", B=f"STA{i}", C="EC"))
+        self._test_catalog = cat
+        self._disclaimer = disclaimer
+        super().__init__(**kwargs)
+
+    @property
+    def data_catalog(self):
+        return self._test_catalog
+
+    def _get_table_column_width_map(self):
+        return {"B": "50%", "C": "50%"}
+
+    def get_table_filters(self):
+        return {}
+
+    def get_tooltips(self):
+        return []
+
+    def get_map_color_columns(self):
+        return ["C"]
+
+    def get_map_marker_columns(self):
+        return ["C"]
+
+    def get_name_to_color(self):
+        return {}
+
+    def get_name_to_marker(self):
+        return {}
+
+    def get_time_range(self, dfcat):
+        return (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-12-31"))
+
+    def build_station_name(self, r):
+        return str(r.get("B", "unknown"))
+
+    def get_sidebar_disclaimer(self):
+        return self._disclaimer
+
+
+def _button(items, label):
+    return next(b for b in items if getattr(b, "label", None) == label)
+
+
+class TestCreateView:
+    def test_returns_page_with_dialog_and_about_button(self):
+        ui = dataui.DataUI(_Manager())
+        page = ui.create_view(title="My App")
+        assert isinstance(page, pmui.Page)
+        assert page.title == "My App"
+        assert any(isinstance(m, pmui.Dialog) for m in page.main)
+        _button(page.header, "About App")
+        assert all(getattr(h, "label", None) != "Disclaimer" for h in page.header)
+
+    def test_disclaimer_button_only_when_manager_provides_text(self):
+        ui = dataui.DataUI(_Manager(disclaimer="Be careful"))
+        page = ui.create_view()
+        _button(page.header, "Disclaimer")
+
+    def test_header_buttons_open_dialog_with_matching_content(self):
+        ui = dataui.DataUI(_Manager(disclaimer="Be careful"))
+        page = ui.create_view()
+        modal = next(m for m in page.main if isinstance(m, pmui.Dialog))
+
+        _button(page.header, "Disclaimer").clicks += 1
+        assert modal.open
+        assert modal.title == "Disclaimer"
+        assert modal.objects[0].object == "Be careful"
+
+        modal.open = False
+        _button(page.header, "About App").clicks += 1
+        assert modal.open
+        assert "About" in modal.objects[0].object
+
+    def test_dialog_can_be_dismissed(self):
+        modal = dataui.DataUI(_Manager()).create_view().main[-1]
+        assert isinstance(modal, pmui.Dialog)
+        assert modal.show_close_button
+        assert modal.close_on_click
+
+    def test_mobile_view_is_page_with_collapsed_sidebar(self):
+        ui = dataui.DataUI(_Manager())
+        page = ui.create_mobile_view()
+        assert isinstance(page, pmui.Page)
+        assert page.sidebar_open is False
+        assert any(isinstance(m, pmui.Dialog) for m in page.main)
+
+
+class TestAddHeaderButtons:
+    def test_page_gets_header_buttons_and_dialog(self):
+        ui = dataui.DataUI(_Manager(disclaimer="Be careful"))
+        outer = pmui.Page(title="outer", main=["x"])
+        ui.add_header_buttons(outer)
+        _button(outer.header, "About App")
+        _button(outer.header, "Disclaimer")
+        assert sum(isinstance(m, pmui.Dialog) for m in outer.main) == 1
+        ui.add_header_buttons(outer)
+        assert sum(isinstance(m, pmui.Dialog) for m in outer.main) == 1
+
+    def test_classic_template_keeps_modal_workflow(self):
+        ui = dataui.DataUI(_Manager())
+        tmpl = pn.template.VanillaTemplate(title="legacy")
+        opened = []
+        tmpl.open_modal = lambda: opened.append(True)
+        ui.add_header_buttons(tmpl)
+        assert len(tmpl.modal) == 1
+        _button(tmpl.header, "About App").clicks += 1
+        assert opened

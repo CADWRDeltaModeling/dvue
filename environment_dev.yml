@@ -21,7 +21,8 @@ dependencies:
   - hvplot
   - networkx
   # for ui
-  - panel
+  - panel>=1.10
+  - panel-material-ui>=0.16
   # for caching
   - diskcache
   # for dev

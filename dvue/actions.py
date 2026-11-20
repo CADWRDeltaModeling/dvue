@@ -10,6 +10,7 @@ import pandas as pd
 from io import StringIO
 import logging
 from .utils import full_stack
+from . import mui
 
 logger = logging.getLogger(__name__)
 
@@ -1276,7 +1277,7 @@ class SourceCompareAction:
             value="Diff",
             button_type="default",
         )
-        create_btn = pn.widgets.Button(
+        create_btn = mui.Button(
             name="Create",
             button_type="success",
             icon="arrows-collapse",
@@ -1421,7 +1422,7 @@ class AddSourceFilesAction:
             placeholder="Enter absolute path to a supported file…",
             sizing_mode="stretch_width",
         )
-        add_btn = pn.widgets.Button(
+        add_btn = mui.Button(
             name="Add",
             button_type="success",
             icon="folder-plus",
@@ -1490,7 +1491,7 @@ class AddSourceFilesAction:
         input_row = pn.Row(path_input, add_btn, sizing_mode="stretch_width")
 
         if _tkinter_available:
-            browse_btn = pn.widgets.Button(
+            browse_btn = mui.Button(
                 name="Browse…",
                 button_type="light",
                 icon="folder-open",

@@ -32,6 +32,8 @@ import pandas as pd
 import param
 import panel as pn
 
+from . import mui
+
 logger = logging.getLogger(__name__)
 
 
@@ -428,7 +430,7 @@ def open_view_editor(dataui: Any, mgr: "ViewsManager") -> None:
         count_md.object = f"**{len(_working)} refs** in this view"
 
     # ── Remove selected ──────────────────────────────────────────────────────
-    remove_btn = pn.widgets.Button(
+    remove_btn = mui.Button(
         name="Remove Selected",
         button_type="danger",
         icon="trash",
@@ -453,7 +455,7 @@ def open_view_editor(dataui: Any, mgr: "ViewsManager") -> None:
     remove_btn.on_click(_on_remove)
 
     # ── Clear all ────────────────────────────────────────────────────────────
-    clear_btn = pn.widgets.Button(
+    clear_btn = mui.Button(
         name="Clear All",
         button_type="light",
         icon="x",
@@ -469,7 +471,7 @@ def open_view_editor(dataui: Any, mgr: "ViewsManager") -> None:
     clear_btn.on_click(_on_clear)
 
     # ── Add from main table selection ────────────────────────────────────────
-    add_sel_btn = pn.widgets.Button(
+    add_sel_btn = mui.Button(
         name="Add Selected Rows",
         button_type="primary",
         icon="plus",
@@ -500,7 +502,7 @@ def open_view_editor(dataui: Any, mgr: "ViewsManager") -> None:
     add_sel_btn.on_click(_on_add_selected)
 
     # ── Add via header filters ───────────────────────────────────────────────
-    add_filt_btn = pn.widgets.Button(
+    add_filt_btn = mui.Button(
         name="Add All Filtered",
         button_type="default",
         icon="filter",
@@ -563,14 +565,14 @@ def open_view_editor(dataui: Any, mgr: "ViewsManager") -> None:
     add_filt_btn.on_click(_on_add_filtered)
 
     # ── Save / Cancel ────────────────────────────────────────────────────────
-    save_btn = pn.widgets.Button(
+    save_btn = mui.Button(
         name="Save View",
         button_type="success",
         icon="device-floppy",
         width=120,
         margin=(2, 4, 2, 0),
     )
-    cancel_btn = pn.widgets.Button(
+    cancel_btn = mui.Button(
         name="Discard",
         button_type="light",
         width=100,
@@ -675,7 +677,7 @@ def create_views_tab(dataui: Any) -> pn.Column:
         sizing_mode="stretch_width",
         margin=(2, 0, 4, 0),
     )
-    add_view_btn = pn.widgets.Button(
+    add_view_btn = mui.Button(
         name="+",
         width=34,
         button_type="success",
@@ -704,10 +706,10 @@ def create_views_tab(dataui: Any) -> pn.Column:
         sizing_mode="stretch_width",
         margin=(2, 0, 4, 0),
     )
-    apply_btn = pn.widgets.Button(
+    apply_btn = mui.Button(
         name="Apply", button_type="primary", width=80, margin=(2, 4, 2, 0)
     )
-    delete_btn = pn.widgets.Button(
+    delete_btn = mui.Button(
         name="Delete", button_type="danger", width=80, margin=(2, 0, 2, 4)
     )
     editor_section = pn.Column(
@@ -738,14 +740,14 @@ def create_views_tab(dataui: Any) -> pn.Column:
         sizing_mode="stretch_width",
         margin=(2, 0, 4, 0),
     )
-    from_selection_btn = pn.widgets.Button(
+    from_selection_btn = mui.Button(
         name="From Selection",
         button_type="default",
         icon="list-check",
         sizing_mode="stretch_width",
         margin=(2, 2, 2, 0),
     )
-    from_filters_btn = pn.widgets.Button(
+    from_filters_btn = mui.Button(
         name="From Table Filters",
         button_type="default",
         icon="filter",
@@ -773,7 +775,7 @@ def create_views_tab(dataui: Any) -> pn.Column:
         sizing_mode="stretch_width",
         margin=(2, 0, 4, 0),
     )
-    add_to_view_btn = pn.widgets.Button(
+    add_to_view_btn = mui.Button(
         name="Add Selected to View",
         button_type="primary",
         icon="plus",
@@ -805,7 +807,7 @@ def create_views_tab(dataui: Any) -> pn.Column:
         sizing_mode="stretch_width",
         margin=(2, 0, 4, 0),
     )
-    upload_btn = pn.widgets.Button(
+    upload_btn = mui.Button(
         name="Load YAML",
         button_type="primary",
         icon="file-import",
@@ -1110,7 +1112,7 @@ def create_views_tab(dataui: Any) -> pn.Column:
     mgr.param.watch(_on_active_view_change, "active_view")
 
     # ── View Editor button ────────────────────────────────────────────────────
-    edit_view_btn = pn.widgets.Button(
+    edit_view_btn = mui.Button(
         name="Edit View…",
         button_type="default",
         icon="edit",

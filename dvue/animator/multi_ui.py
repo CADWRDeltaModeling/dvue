@@ -38,6 +38,8 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure as bk_figure
 
+from .. import mui
+
 from .reader import SlicingReader, DiffSlicingReader, BufferedSlicingReader, RawSequentialBuffer, \
     ResamplingSlicingReader
 from .ui import (
@@ -736,7 +738,7 @@ class MultiGeoAnimatorManager(pn.viewable.Viewer):
             placeholder="/path/to/config.yml",
             sizing_mode="stretch_width",
         )
-        self._save_config_btn = pn.widgets.Button(
+        self._save_config_btn = mui.Button(
             name="Save config to YAML",
             button_type="primary",
             sizing_mode="stretch_width",

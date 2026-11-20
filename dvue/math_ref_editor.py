@@ -28,6 +28,8 @@ from typing import Any, Dict, Optional
 
 import panel as pn
 
+from . import mui
+
 logger = logging.getLogger(__name__)
 
 
@@ -210,7 +212,7 @@ class MathRefEditorAction:
             sizing_mode="stretch_width",
             margin=(2, 0, 4, 0),
         )
-        upload_btn = pn.widgets.Button(
+        upload_btn = mui.Button(
             name="Load YAML",
             button_type="primary",
             icon="file-import",
@@ -476,7 +478,7 @@ class MathRefEditorAction:
                 alias = _vi.value.strip()
                 if not alias:
                     continue
-                _btn = pn.widgets.Button(
+                _btn = mui.Button(
                     name=alias,
                     button_type="light",
                     width=max(50, len(alias) * 9),
@@ -495,7 +497,7 @@ class MathRefEditorAction:
             alias_hint_row.objects = btns
 
         # ── Copy Attributes button ────────────────────────────────────────────
-        copy_attrs_btn = pn.widgets.Button(
+        copy_attrs_btn = mui.Button(
             name="Copy from selection",
             button_type="light",
             icon="clipboard-copy",
@@ -554,7 +556,7 @@ class MathRefEditorAction:
             pn.pane.HTML("", width=36),
             margin=(2, 0, 0, 0),
         )
-        add_var_btn = pn.widgets.Button(
+        add_var_btn = mui.Button(
             name="+ Add variable",
             button_type="default",
             icon="plus",
@@ -621,7 +623,7 @@ class MathRefEditorAction:
             )
 
             # ▶ per-row Test button
-            _test_row_btn = pn.widgets.Button(
+            _test_row_btn = mui.Button(
                 name="▶",
                 button_type="light",
                 width=32,
@@ -629,7 +631,7 @@ class MathRefEditorAction:
                 margin=(4, 2, 4, 2),
             )
 
-            _rm_btn = pn.widgets.Button(
+            _rm_btn = mui.Button(
                 name="✕",
                 button_type="light",
                 width=32,
@@ -776,7 +778,7 @@ class MathRefEditorAction:
 
         status_md = pn.pane.Markdown("", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
         test_result_md = pn.pane.Markdown("", sizing_mode="stretch_width")
-        test_btn = pn.widgets.Button(
+        test_btn = mui.Button(
             name="Test",
             button_type="light",
             icon="player-play",
@@ -784,14 +786,14 @@ class MathRefEditorAction:
             height=28,
             margin=(0, 4, 0, 0),
         )
-        save_btn = pn.widgets.Button(
+        save_btn = mui.Button(
             name="Save",
             button_type="success",
             icon="device-floppy",
             height=32,
             margin=(0, 4, 0, 0),
         )
-        cancel_btn = pn.widgets.Button(
+        cancel_btn = mui.Button(
             name="Cancel",
             button_type="default",
             icon="x",

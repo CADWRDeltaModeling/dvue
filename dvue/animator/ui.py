@@ -34,6 +34,7 @@ from bokeh.plotting import figure as bk_figure
 from .reader import (SlicingReader, BufferedSlicingReader,
                      StreamingTransformedSlicingReader, TransformSpec,
                      RawSequentialBuffer, ResamplingSlicingReader)
+from .. import mui
 from ..tile_sources import get_carto_tile_url, CARTO_ATTRIBUTION
 
 # ---------------------------------------------------------------------------
@@ -1104,7 +1105,7 @@ class GeoAnimatorManager(pn.viewable.Viewer):
             placeholder="/path/to/config.yml",
             sizing_mode="stretch_width",
         )
-        self._save_config_btn = pn.widgets.Button(
+        self._save_config_btn = mui.Button(
             name="Save config to YAML",
             button_type="primary",
             sizing_mode="stretch_width",
