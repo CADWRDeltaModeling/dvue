@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Disclaimer modals are a shared `pmui.Dialog` placed in the page's `main`
   area; `DataUI.add_header_buttons()` accepts either a `Page` or a classic
   Panel template.
-- Requires `panel>=1.10`, `panel-material-ui>=0.16.7` and `bokeh>=3.10`.
+- Requires `panel>=1.10`, `panel-material-ui>=0.16.6` and `bokeh>=3.10`.
 - dvue's own buttons are now `dvue.mui.Button`, a `pmui.Button` that still
   accepts the classic arguments (`name`, `button_type`, `button_style`, tabler
   icon names such as `"chart-line"`) and translates them to Material labels,
