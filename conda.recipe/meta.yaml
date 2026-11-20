@@ -28,12 +28,12 @@ requirements:
     - python
     - pip
     {% for dep in pyproject['build-system']['requires'] %}
-    - {{ dep.lower() }}
+    - {{ dep.lower() | replace('[toml]', '') }}
     {% endfor %}
   run:
     - python
     {% for dep in project['dependencies'] %}
-    - {{ dep.lower() }}
+    - {{ dep.lower() | replace('[toml]', '') }}
     {% endfor %}
 
 
