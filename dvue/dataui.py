@@ -428,8 +428,10 @@ class DataUIManager(DataProvider):
         }
 
     def get_hidden_table_columns(self, df: pd.DataFrame | None = None) -> list[str]:
-        """Return columns that should be hidden when the table first renders."""
-        return []
+        """Return schema columns that should be hidden when the table first renders."""
+        if df is None:
+            return list(self.get_table_schema().get("hidden_by_default", []))
+        return list(self.get_table_schema(df).get("hidden_by_default", []))
 
     def get_table_column_width_map(self) -> dict:
         """Return a dict mapping column names to width strings (e.g. ``'10%'``).
@@ -1572,7 +1574,10 @@ class DataUI(param.Parameterized):
         )
 
         self._display_panel = pn.Row(sizing_mode="stretch_both")
-        self._action_panel = pn.Row()
+        self._action_panel = pn.Row(
+            sizing_mode="stretch_width",
+            css_classes=["action-bar-row"],
+        )
         self._tab_count = 0
         actions = self._dataui_manager.get_data_actions()
         self._registered_actions = actions  # saved for _setup_action_sidebars
@@ -2007,9 +2012,8 @@ class DataUI(param.Parameterized):
             # Create a copy of the map for the display panel
             map_display = pn.Column(
                 self._tmap * self._map_function,
-                min_width=800,
                 min_height=600,
-                sizing_mode="stretch_both",
+                sizing_mode="stretch_width",
             )
 
             # Show 90% progress
@@ -2286,7 +2290,11 @@ class DataUI(param.Parameterized):
             _ctrl_tabs.append(("Map", map_view))
             _ctrl_tabs.append(("Table", table_options))
             _ctrl_tabs.append(("Views", create_views_tab(self)))
-            self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
+            initial_tab = next(
+                (index for index, (label, _) in enumerate(_ctrl_tabs) if label == "Map"),
+                0,
+            )
+            self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=initial_tab)
             sidebar_view = pn.Column(
                 self._sidebar_tabs,
                 self.progress_bar,
@@ -2303,7 +2311,11 @@ class DataUI(param.Parameterized):
                 _ctrl_tabs = []
             _ctrl_tabs.append(("Table", table_options))
             _ctrl_tabs.append(("Views", create_views_tab(self)))
-            self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=0)
+            initial_tab = next(
+                (index for index, (label, _) in enumerate(_ctrl_tabs) if label == "Table"),
+                0,
+            )
+            self._sidebar_tabs = pn.Tabs(*_ctrl_tabs, active=initial_tab)
             sidebar_view = pn.Column(
                 self._sidebar_tabs,
                 self.progress_bar,
@@ -2343,7 +2355,8 @@ class DataUI(param.Parameterized):
         template = pmui.Page(
             title=title,
             sidebar=[sidebar_view],
-            sidebar_width=450,
+            sidebar_width=320,
+            sidebar_variant="auto",
             main=[self._main_view, self._get_modal()],
             header=header,
         )

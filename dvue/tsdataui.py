@@ -683,45 +683,92 @@ class TimeSeriesDataUIManager(DataUIManager):
         # ── Direct widget creation (no pn.Param wrapper, eliminates extra padding) ──
         _M = (1, 3, 1, 0)  # tight uniform margin for all widgets
         fill_gap_w = pn.widgets.IntInput.from_param(
-            self.param.fill_gap, name="", width=60, margin=_M)
+            self.param.fill_gap, name="Gap limit",
+            description="Maximum number of consecutive missing values to interpolate.",
+            width=75, margin=_M)
         time_shift_w = pn.widgets.TextInput.from_param(
-            self.param.time_shift, name="", placeholder="e.g. -1H, 15min", width=100, margin=_M)
+            self.param.time_shift, name="Time shift",
+            description="Pandas offset string; positive shifts forward, negative backward, e.g. -1H or 15min.",
+            placeholder="e.g. -1H", width=110, margin=_M)
         clip_lower_w = pn.widgets.FloatInput.from_param(
-            self.param.clip_lower, name="", placeholder="min", width=70, margin=_M)
+            self.param.clip_lower, name="Lower bound",
+            description="Values below this threshold are removed. Leave blank for no lower bound.",
+            placeholder="none", width=90, margin=_M)
         clip_upper_w = pn.widgets.FloatInput.from_param(
-            self.param.clip_upper, name="", placeholder="max", width=70, margin=_M)
+            self.param.clip_upper, name="Upper bound",
+            description="Values above this threshold are removed. Leave blank for no upper bound.",
+            placeholder="none", width=90, margin=_M)
         resample_period_w = pn.widgets.TextInput.from_param(
-            self.param.resample_period, name="", placeholder="e.g. 1D", width=80, margin=_M)
+            self.param.resample_period, name="Interval",
+            description="Pandas resampling offset, e.g. 1D, 1H, or 15min.",
+            placeholder="e.g. 1D", width=95, margin=_M)
         resample_agg_w = pn.widgets.Select.from_param(
-            self.param.resample_agg, name="", width=80, margin=_M)
+            self.param.resample_agg, name="Aggregation",
+            description="Statistic computed within each resampling interval.",
+            width=95, margin=_M)
         resample_fill_w = pn.widgets.Select.from_param(
-            self.param.resample_fill, name="", width=80, margin=_M)
+            self.param.resample_fill, name="Fill gaps",
+            description="Fill method for newly created intervals during upsampling.",
+            width=110, margin=_M)
         tidal_w = pn.widgets.Checkbox.from_param(
             self.param.do_tidal_filter, name="Tidal filter",
             disabled=not _VTOOLS_AVAILABLE, margin=_M)
         tidal_period_w = pn.widgets.TextInput.from_param(
-            self.param.tidal_filter_period, name="", placeholder="e.g. 40H", width=60, margin=_M)
+            self.param.tidal_filter_period, name="Cutoff",
+            description="Tidal-filter cutoff period as a pandas offset, e.g. 40H.",
+            placeholder="e.g. 40H", width=80, margin=_M)
         rolling_window_w = pn.widgets.TextInput.from_param(
-            self.param.rolling_window, name="", placeholder="e.g. 24H", width=80, margin=_M)
+            self.param.rolling_window, name="Window",
+            description="Rolling window as an observation count or pandas offset, e.g. 24H or 7D.",
+            placeholder="e.g. 24H", width=95, margin=_M)
         rolling_agg_w = pn.widgets.Select.from_param(
-            self.param.rolling_agg, name="", width=80, margin=_M)
+            self.param.rolling_agg, name="Aggregation",
+            description="Statistic computed over each rolling window.",
+            width=95, margin=_M)
         rolling_min_periods_w = pn.widgets.IntInput.from_param(
-            self.param.rolling_min_periods, name="", width=50, margin=_M)
+            self.param.rolling_min_periods, name="Min points",
+            description="Minimum number of valid observations needed for a rolling result.",
+            width=80, margin=_M)
         do_diff_w = pn.widgets.Checkbox.from_param(
-            self.param.do_diff, name="Diff", margin=_M)
+            self.param.do_diff, name="Difference",
+            margin=_M)
         diff_n_w = pn.widgets.IntInput.from_param(
-            self.param.diff_periods, name="", width=50, margin=_M)
+            self.param.diff_periods, name="Lag",
+            description="Number of observation periods to use when differencing.",
+            width=65, margin=_M)
         cumsum_w = pn.widgets.Checkbox.from_param(
-            self.param.do_cumsum, name="Cumsum", margin=_M)
+            self.param.do_cumsum, name="Cumulative sum",
+            margin=_M)
         scale_w = pn.widgets.FloatInput.from_param(
-            self.param.scale_factor, name="", width=80, margin=_M)
+            self.param.scale_factor, name="Scale",
+            description="Multiply every value by this factor.",
+            width=90, margin=_M)
         offset_w = pn.widgets.FloatInput.from_param(
-            self.param.offset_value, name="", width=80, margin=_M)
+            self.param.offset_value, name="Offset",
+            description="Add this constant after scaling, for example for a datum shift.",
+            width=90, margin=_M)
         sensible_w = pn.widgets.Checkbox.from_param(
-            self.param.sensible_range_yaxis, name="Sensible", margin=_M)
+            self.param.sensible_range_yaxis, name="Limit y-range",
+            margin=_M)
         pct_range_w = pn.widgets.RangeSlider.from_param(
-            self.param.sensible_percentile_range, name="",
+            self.param.sensible_percentile_range, name="Y percentile range",
             sizing_mode="stretch_width", margin=_M)
+
+        tidal_tip = pn.widgets.TooltipIcon(
+            value="Apply a cosine-Lanczos tidal filter; requires sub-daily data."
+        )
+        diff_tip = pn.widgets.TooltipIcon(
+            value="Subtract the value from the selected lag period."
+        )
+        cumsum_tip = pn.widgets.TooltipIcon(
+            value="Replace values with their running cumulative sum."
+        )
+        sensible_tip = pn.widgets.TooltipIcon(
+            value="Use percentile bounds to reduce the influence of outliers on plot axes."
+        )
+        pct_tip = pn.widgets.TooltipIcon(
+            value="Lower and upper quantiles used when the y-range is limited."
+        )
 
         # ── Section header: left accent bar + bold label ──────────────────
         def _section(title):
@@ -813,126 +860,71 @@ class TimeSeriesDataUIManager(DataUIManager):
         # ── Build Transform tab ──────────────────────────────────────────────
         convert_units_w = pn.widgets.Checkbox.from_param(
             self.param.convert_units, name="Convert units", margin=_M)
+        convert_units_tip = pn.widgets.TooltipIcon(
+            value="Apply the manager's domain-specific unit conversion."
+        )
 
         units_section = [
             _section("\u24ea Units"),
-            pn.Row(convert_units_w, align="center"),
+            pn.Row(convert_units_w, convert_units_tip, align="center"),
         ] if self.show_convert_units else []
 
         transform_widgets = pn.Column(
             *units_section,
             # ── \u2460 Data Prep \u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014
-            _section("\u2460 Data Prep"),
-            pn.Row(
-                pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Gap fill limit</span>",
-                    align=("start", "center"), margin=(0, 6, 0, 6),
-                ),
-                fill_gap_w,
-                align="center",
-            ),
-            pn.Row(
-                pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Time shift</span>",
-                    align=("start", "center"), margin=(0, 6, 0, 6),
-                ),
-                time_shift_w,
-                align="center",
+            pn.Card(
+                pn.Row(fill_gap_w, time_shift_w, align="start"),
+                title="Data Prep",
+                collapsed=True,
+                sizing_mode="stretch_width",
             ),
             # ── ② Screen / Clip ——————————————————————————————————
-            _section("② Screen / Clip"),
-            pn.pane.HTML(
-                "<div style='font-size:10px;color:#888;font-style:italic;"
-                "margin:0 0 4px 6px'>Set bounds to screen out outliers. Leave blank for no limit.</div>",
-                sizing_mode="stretch_width", margin=(0, 0, 0, 0),
-            ),
-            pn.Row(
-                clip_lower_w,
-                pn.pane.HTML(
-                    "<span style='font-size:10px;color:#999;align-self:center'>lower</span>",
-                    align=("start", "center"),
-                ),
-                clip_upper_w,
-                pn.pane.HTML(
-                    "<span style='font-size:10px;color:#999;align-self:center'>upper</span>",
-                    align=("start", "center"),
-                ),
-                align="center",
+            pn.Card(
+                pn.Row(clip_lower_w, clip_upper_w, align="start"),
+                title="Clip",
+                collapsed=True,
+                sizing_mode="stretch_width",
             ),
             # ── ③ Smooth ————————————————————————————————————————
-            _section("③ Smooth"),
-            pn.pane.HTML(
-                "<div style='font-size:10px;color:#888;font-style:italic;"
-                "margin:0 0 4px 6px'>Tidal filter runs <b>before</b> Resample"
-                " (requires sub-daily data); Rolling runs <b>after</b>.</div>",
-                sizing_mode="stretch_width", margin=(0, 0, 0, 0),
-            ),
-            pn.Row(
-                tidal_w,
-                tidal_period_w,
-                pn.pane.HTML(
-                    "<span style='font-size:10px;color:#999;align-self:center'>"
-                    "cutoff</span>",
-                    align=("start", "center"),
+            pn.Card(
+                pn.Row(tidal_w, tidal_tip, tidal_period_w, align="start"),
+                pn.Row(
+                    rolling_window_w,
+                    rolling_agg_w,
+                    rolling_min_periods_w,
+                    align="start",
                 ),
-                align="center",
+                smooth_warning,
+                title="Filter / Smooth",
+                collapsed=True,
+                sizing_mode="stretch_width",
             ),
-            pn.layout.Divider(margin=(4, 0, 4, 0)),
-            pn.Row(
-                rolling_window_w, rolling_agg_w,
-                pn.pane.HTML(
-                    "<span style='font-size:10px;color:#999;align-self:center'>"
-                    "window · agg</span>",
-                    align=("start", "center"),
-                ),
-                align="center",
-            ),
-            pn.Row(
-                pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Min periods</span>",
-                    align=("start", "center"), margin=(0, 6, 0, 6),
-                ),
-                rolling_min_periods_w,
-                align="center",
-            ),
-            smooth_warning,
             # ── ④ Resample —————————————————————————————————————
-            _section("④ Resample"),
-            pn.Row(
-                resample_period_w, resample_agg_w,
-                pn.pane.HTML(
-                    "<span style='font-size:10px;color:#999;align-self:center'>"
-                    "period · agg</span>",
-                    align=("start", "center"),
+            pn.Card(
+                pn.Row(
+                    resample_period_w,
+                    resample_agg_w,
+                    resample_fill_w,
+                    align="start",
                 ),
-                align="center",
-            ),
-            pn.Row(
-                resample_fill_w,
-                pn.pane.HTML(
-                    "<span style='font-size:10px;color:#999;align-self:center'>"
-                    "fill (upsampling)</span>",
-                    align=("start", "center"),
-                ),
-                align="center",
+                title="Resample",
+                collapsed=True,
+                sizing_mode="stretch_width",
             ),
             # ── ⑤ Diff / Cumsum ————————————————————————————————
-            _section("⑤ Diff / Cumsum"),
-            pn.Row(do_diff_w, diff_n_w, cumsum_w, align="center"),
-            # ── ⑥ Arithmetic ————————————————————————————————————
-            _section("⑥ Arithmetic"),
-            pn.Row(
-                pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Scale ×</span>",
-                    align=("start", "center"), margin=(0, 6, 0, 6),
+            pn.Card(
+                pn.Row(
+                    do_diff_w,
+                    diff_tip,
+                    diff_n_w,
+                    cumsum_w,
+                    cumsum_tip,
+                    align="start",
                 ),
-                scale_w,
-                pn.pane.HTML(
-                    "<span style='font-size:11px;color:#666'>Offset +</span>",
-                    align=("start", "center"), margin=(0, 6, 0, 6),
-                ),
-                offset_w,
-                align="center",
+                pn.Row(scale_w, offset_w, align="start"),
+                title="Arithmetic",
+                collapsed=True,
+                sizing_mode="stretch_width",
             ),
             # ── Expression preview + Save ──────────────────────────────────
             expr_section,
@@ -949,7 +941,7 @@ class TimeSeriesDataUIManager(DataUIManager):
             control_widgets,
             pn.layout.Divider(margin=(8, 0, 4, 0)),
             _section("Display"),
-            pn.Row(sensible_w, pct_range_w,
+            pn.Row(sensible_w, sensible_tip, pct_range_w, pct_tip,
                    align="center", sizing_mode="stretch_width"),
             *(
                 [

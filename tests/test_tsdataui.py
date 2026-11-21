@@ -624,6 +624,43 @@ class TestTransformToCatalogActionExpressionBuilder:
             f"No Transform→Ref button found in Transform tab. Buttons found: {btn_names}"
         )
 
+    def test_transform_controls_are_labeled_described_and_grouped(self):
+        import panel as pn
+
+        mgr = _manager_with_defaults()
+        widget_tabs = mgr.get_widgets()
+        transform_tab = widget_tabs["Transform"]
+        cards = []
+        controls = []
+        tooltips = []
+
+        def _visit(obj):
+            if isinstance(obj, pn.Card):
+                cards.append(obj)
+            if isinstance(obj, pn.widgets.Widget) and not isinstance(obj, pn.widgets.Button):
+                controls.append(obj)
+            if isinstance(obj, pn.widgets.TooltipIcon):
+                tooltips.append(obj)
+            for child in getattr(obj, "objects", []):
+                _visit(child)
+
+        _visit(transform_tab)
+        card_titles = {card.title for card in cards}
+        assert {"Data Prep", "Clip", "Filter / Smooth", "Resample", "Arithmetic"} <= card_titles
+        assert all(card.collapsible for card in cards)
+        transform_controls = [
+            widget for widget in controls
+            if not isinstance(widget, pn.widgets.TooltipIcon) and widget.name
+        ]
+        assert len(transform_controls) >= 18
+        assert all(widget.name.strip() for widget in transform_controls)
+        assert len(tooltips) >= 3
+        time_tooltips = [
+            obj
+            for obj in widget_tabs["Time"].select(pn.widgets.TooltipIcon)
+        ]
+        assert len(time_tooltips) >= 2
+
 
 # ---------------------------------------------------------------------------
 # Tests — TransformToCatalogAction attribute inheritance

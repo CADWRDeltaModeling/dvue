@@ -68,6 +68,9 @@ class TestCreateView:
         assert any(isinstance(m, pmui.Dialog) for m in page.main)
         _button(page.header, "About App")
         assert all(getattr(h, "label", None) != "Disclaimer" for h in page.header)
+        assert page.sidebar_variant == "auto"
+        assert page.sidebar_width == 320
+        assert ui._sidebar_tabs.active == 3
 
     def test_disclaimer_button_only_when_manager_provides_text(self):
         ui = dataui.DataUI(_Manager(disclaimer="Be careful"))
@@ -101,6 +104,13 @@ class TestCreateView:
         assert isinstance(page, pmui.Page)
         assert page.sidebar_open is False
         assert any(isinstance(m, pmui.Dialog) for m in page.main)
+
+    def test_empty_state_contains_guided_steps(self):
+        message = _Manager().get_no_selection_message()
+        assert "Start here" in message
+        assert "Find a station" in message
+        assert "Select one or more rows" in message
+        assert "Click Plot" in message
 
 
 class TestAddHeaderButtons:
