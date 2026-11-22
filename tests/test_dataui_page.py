@@ -148,6 +148,7 @@ class TestCreateView:
         assert isinstance(tabs, pn.Tabs)
         assert tabs._names == ["Interactive Map"]
         assert tabs.active == 0
+        assert isinstance(ui._main_map_pane, pn.pane.HoloViews)
         assert not any(
             isinstance(obj, pn.pane.HTML)
             and "Start here" in obj.object

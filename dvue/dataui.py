@@ -1133,6 +1133,13 @@ class DataUI(param.Parameterized):
                     hooks=[self._make_initial_extent_hook(initial_extent)],
                 )
             self._map_features = self._map_features.opts(**map_opts)
+        main_map_pane = getattr(self, "_main_map_pane", None)
+        if main_map_pane is not None:
+            base_map = self._apply_initial_map_extent(self._tmap)
+            main_map_pane.object = self._apply_initial_map_extent(
+                base_map * self._map_features
+            )
+            self._main_station_select.source = self._map_features
         return self._map_features
 
     # ------------------------------------------------------------------
@@ -2125,12 +2132,16 @@ class DataUI(param.Parameterized):
 
         base_map = self._apply_initial_map_extent(self._tmap)
         map_object = self._apply_initial_map_extent(
-            base_map * self._map_function
+            base_map * self._map_features
         )
-        map_display = pn.Column(
+        map_display = pn.pane.HoloViews(
             map_object,
             sizing_mode="stretch_both",
-            min_height=400,
+        )
+        self._main_map_pane = map_display
+        self._main_station_select = streams.Selection1D(source=self._map_features)
+        self._main_station_select.param.watch_values(
+            self.select_data_catalog, "index"
         )
         if isinstance(tabs, pn.Tabs):
             tabs.insert(0, ("Interactive Map", map_display))
