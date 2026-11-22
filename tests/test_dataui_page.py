@@ -4,6 +4,7 @@ import pandas as pd
 import panel as pn
 import panel_material_ui as pmui
 import pytest
+from bokeh.models import Range1d
 from bokeh.plotting import figure
 from shapely.geometry import Point
 
@@ -156,6 +157,7 @@ class TestCreateView:
         hook(fake_plot, None)
         assert rendered_figure.x_range.start == pytest.approx(projected[0])
         assert rendered_figure.y_range.end == pytest.approx(projected[3])
+        assert isinstance(rendered_figure.x_range, Range1d)
         rendered_figure.x_range.start = 123
         hook(fake_plot, None)
         assert rendered_figure.x_range.start == 123

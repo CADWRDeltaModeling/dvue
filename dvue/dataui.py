@@ -39,6 +39,7 @@ from .actions import (
 )
 
 from bokeh.models import HoverTool
+from bokeh.models import Range1d
 from bokeh.core.enums import MarkerType
 
 import logging
@@ -765,10 +766,8 @@ class DataUI(param.Parameterized):
             if figure is None or figure in self._extent_applied_figures:
                 return
             self._extent_applied_figures.add(figure)
-            figure.x_range.start = xmin
-            figure.x_range.end = xmax
-            figure.y_range.start = ymin
-            figure.y_range.end = ymax
+            figure.x_range = Range1d(start=xmin, end=xmax)
+            figure.y_range = Range1d(start=ymin, end=ymax)
 
         return _force_initial_extent
 
