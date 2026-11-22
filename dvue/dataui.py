@@ -2093,8 +2093,9 @@ class DataUI(param.Parameterized):
                     tabs.active = index
                     return
 
+        base_map = self._apply_initial_map_extent(self._tmap)
         map_object = self._apply_initial_map_extent(
-            self._tmap * self._map_function
+            base_map * self._map_function
         )
         map_display = pn.Column(
             map_object,
@@ -2344,8 +2345,9 @@ class DataUI(param.Parameterized):
             )
             map_display_btn.on_click(self.show_map_in_display_panel)
 
+            base_map = self._apply_initial_map_extent(self._tmap)
             map_object = self._apply_initial_map_extent(
-                self._tmap * self._map_function
+                base_map * self._map_function
             )
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
