@@ -128,7 +128,10 @@ class TestCreateView:
         assert "Click Plot" in message
 
     def test_map_is_default_display_tab_when_geometry_exists(self):
-        ui = dataui.DataUI(_Manager(with_map=True))
+        ui = dataui.DataUI(
+            _Manager(with_map=True),
+            initial_map_extent=(-122.65, 37.55, -121.15, 38.75),
+        )
         ui.create_view()
 
         tabs = ui._display_panel.objects[0]
@@ -140,6 +143,9 @@ class TestCreateView:
             and "Start here" in obj.object
             for obj in ui._display_panel.objects
         )
+        projected = ui._project_initial_map_extent()
+        assert projected[0] < projected[2]
+        assert projected[1] < projected[3]
 
 
 class TestAddHeaderButtons:

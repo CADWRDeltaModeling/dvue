@@ -677,9 +677,17 @@ class DataUI(param.Parameterized):
     _map_sel_proxy = param.List(default=[], precedence=-1)
     _map_filter_proxy = param.Integer(default=0, precedence=-1)
 
-    def __init__(self, dataui_manager, crs=ccrs.PlateCarree(), station_id_column=None, **kwargs):
+    def __init__(
+        self,
+        dataui_manager,
+        crs=ccrs.PlateCarree(),
+        station_id_column=None,
+        initial_map_extent=None,
+        **kwargs,
+    ):
         self._crs = crs
         self._station_id_column = station_id_column
+        self._initial_map_extent = initial_map_extent
         super().__init__(**kwargs)
         self._dataui_manager = dataui_manager
         self._dataui_manager._dataui = self  # insert a reference to self in the dataui_manager for progress bar updates for example
@@ -710,6 +718,16 @@ class DataUI(param.Parameterized):
                 self._station_select = streams.Selection1D(source=self._map_features)
         else:
             warnings.warn("No geolocation data found in catalog. Not displaying map of stations.")
+
+    def _project_initial_map_extent(self):
+        """Return the configured lon/lat extent in map display coordinates."""
+        if self._initial_map_extent is None:
+            return None
+        return gv.util.project_extents(
+            self._initial_map_extent,
+            ccrs.PlateCarree(),
+            ccrs.GOOGLE_MERCATOR,
+        )
 
     def _get_map_catalog(self):
         if (
@@ -1017,10 +1035,15 @@ class DataUI(param.Parameterized):
             else:
                 self._map_features = self._map_features.opts(marker="circle")
         with param.discard_events(self._station_select):
-            self._map_features = self._map_features.opts(
+            map_opts = dict(
                 default_span=map_default_span,  # for max zoom this is the default span in meters
                 selected=current_selection,
             )
+            initial_extent = self._project_initial_map_extent()
+            if initial_extent is not None:
+                xmin, ymin, xmax, ymax = initial_extent
+                map_opts.update(xlim=(xmin, xmax), ylim=(ymin, ymax))
+            self._map_features = self._map_features.opts(**map_opts)
         return self._map_features
 
     # ------------------------------------------------------------------
