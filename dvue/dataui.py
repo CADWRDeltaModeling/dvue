@@ -757,8 +757,8 @@ class DataUI(param.Parameterized):
             ylim=(ymin, ymax),
             apply_ranges=False,
             backend_opts={
-                "x_range": Range1d(start=xmin, end=xmax),
-                "y_range": Range1d(start=ymin, end=ymax),
+                "plot.x_range": Range1d(start=xmin, end=xmax),
+                "plot.y_range": Range1d(start=ymin, end=ymax),
             },
             hooks=[self._make_initial_extent_hook(initial_extent)],
         )
@@ -1117,8 +1117,8 @@ class DataUI(param.Parameterized):
                     ylim=(ymin, ymax),
                     apply_ranges=False,
                     backend_opts={
-                        "x_range": Range1d(start=xmin, end=xmax),
-                        "y_range": Range1d(start=ymin, end=ymax),
+                        "plot.x_range": Range1d(start=xmin, end=xmax),
+                        "plot.y_range": Range1d(start=ymin, end=ymax),
                     },
                     hooks=[self._make_initial_extent_hook(initial_extent)],
                 )
