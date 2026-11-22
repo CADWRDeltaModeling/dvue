@@ -2002,45 +2002,43 @@ class DataUI(param.Parameterized):
                         sizing_mode="stretch_both", dynamic=True)
             ]
 
+    def _ensure_map_display_tab(self) -> None:
+        """Ensure the station map is present as the active display tab."""
+        tabs = self._display_panel.objects[0] if self._display_panel.objects else None
+        if isinstance(tabs, pn.Tabs):
+            for index, tab_name in enumerate(tabs._names):
+                if tab_name == "Interactive Map":
+                    tabs.active = index
+                    return
+
+        map_display = pn.Column(
+            self._tmap * self._map_function,
+            sizing_mode="stretch_both",
+            min_height=400,
+        )
+        if isinstance(tabs, pn.Tabs):
+            tabs.insert(0, ("Interactive Map", map_display))
+            tabs.active = 0
+        else:
+            self._tab_count = 0
+            self._display_panel.objects = [
+                pn.Tabs(
+                    ("Interactive Map", map_display),
+                    closable=True,
+                    sizing_mode="stretch_both",
+                    dynamic=True,
+                )
+            ]
+
     def show_map_in_display_panel(self, event):
-        """Display the map in the display panel area as a closable tab"""
+        """Display or focus the map in the main display panel."""
         try:
             # Set progress indicator while loading the map
             self._display_panel.loading = True
             self.set_progress(-1)  # Start indeterminate progress
 
-            # Create a copy of the map for the display panel
-            map_display = pn.Column(
-                self._tmap * self._map_function,
-                min_height=600,
-                sizing_mode="stretch_width",
-            )
-
-            # Show 90% progress
             self.set_progress(90)
-
-            # Check if there are already tabs in the display panel
-            if len(self._display_panel.objects) > 0 and isinstance(
-                self._display_panel.objects[0], pn.Tabs
-            ):
-                # Add to existing tabs
-                tabs = self._display_panel.objects[0]
-                self._tab_count += 1
-                tabs.append((f"Interactive Map {self._tab_count}", map_display))
-                tabs.active = len(tabs) - 1  # Activate the new tab
-            else:
-                # Create a new tabs panel
-                self._tab_count = 1
-                self._display_panel.objects = [
-                    pn.Tabs(
-                        (f"Interactive Map {self._tab_count}", map_display),
-                        closable=True,
-                        sizing_mode="stretch_both",
-                        dynamic=True,
-                    )
-                ]
-
-            # Complete the progress
+            self._ensure_map_display_tab()
             self.set_progress(100)
         except Exception as e:
             stack_str = full_stack()
@@ -2234,6 +2232,7 @@ class DataUI(param.Parameterized):
             self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream])
             self._station_select.source = self._map_function
             self._station_select.param.watch_values(self.select_data_catalog, "index")
+            self._ensure_map_display_tab()
 
             # Wire table events → proxies (gated by map_filters_table mode)
             def _on_tbl_selection(event):

@@ -4,6 +4,7 @@ import pandas as pd
 import panel as pn
 import panel_material_ui as pmui
 import pytest
+from shapely.geometry import Point
 
 from dvue import dataui
 from dvue.catalog import DataCatalog, DataReference, InMemoryDataReferenceReader
@@ -11,11 +12,25 @@ from dvue.tsdataui import TimeSeriesDataUIManager
 
 
 class _Manager(TimeSeriesDataUIManager):
-    def __init__(self, disclaimer=None, **kwargs):
+    def __init__(self, disclaimer=None, with_map=False, **kwargs):
         reader = InMemoryDataReferenceReader(pd.DataFrame({"value": [1.0, 2.0]}))
-        cat = DataCatalog(primary_key=["name"])
+        cat = DataCatalog(
+            primary_key=["name"],
+            crs="EPSG:4326" if with_map else None,
+        )
         for i in range(2):
-            cat.add(DataReference(reader=reader, name=f"ref_{i}", B=f"STA{i}", C="EC"))
+            attrs = {}
+            if with_map:
+                attrs["geometry"] = Point(-121.0 + i * 0.1, 38.0)
+            cat.add(
+                DataReference(
+                    reader=reader,
+                    name=f"ref_{i}",
+                    B=f"STA{i}",
+                    C="EC",
+                    **attrs,
+                )
+            )
         self._test_catalog = cat
         self._disclaimer = disclaimer
         super().__init__(**kwargs)
@@ -111,6 +126,20 @@ class TestCreateView:
         assert "Find a station" in message
         assert "Select one or more rows" in message
         assert "Click Plot" in message
+
+    def test_map_is_default_display_tab_when_geometry_exists(self):
+        ui = dataui.DataUI(_Manager(with_map=True))
+        ui.create_view()
+
+        tabs = ui._display_panel.objects[0]
+        assert isinstance(tabs, pn.Tabs)
+        assert tabs._names == ["Interactive Map"]
+        assert tabs.active == 0
+        assert not any(
+            isinstance(obj, pn.pane.HTML)
+            and "Start here" in obj.object
+            for obj in ui._display_panel.objects
+        )
 
 
 class TestAddHeaderButtons:
