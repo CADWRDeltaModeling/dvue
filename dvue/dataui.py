@@ -39,8 +39,7 @@ from .actions import (
     DownloadDataCatalogAction,
 )
 
-from bokeh.models import HoverTool
-from bokeh.models import Range1d
+from bokeh.models import CustomJS, HoverTool, Range1d
 from bokeh.core.enums import MarkerType
 
 import logging
@@ -2121,8 +2120,37 @@ class DataUI(param.Parameterized):
         initial_extent = self._project_initial_map_extent()
         if initial_extent is not None:
             xmin, ymin, xmax, ymax = initial_extent
-            figure.x_range = Range1d(start=xmin, end=xmax)
-            figure.y_range = Range1d(start=ymin, end=ymax)
+            x_range = Range1d(start=xmin, end=xmax)
+            y_range = Range1d(start=ymin, end=ymax)
+            figure.x_range = x_range
+            figure.y_range = y_range
+            settle_code = CustomJS(
+                args=dict(
+                    x_range=x_range,
+                    y_range=y_range,
+                    xmin=xmin,
+                    xmax=xmax,
+                    ymin=ymin,
+                    ymax=ymax,
+                ),
+                code="""
+                    const key = "dvue_map_settle_" + x_range.id;
+                    const now = performance.now();
+                    if (!window[key]) window[key] = now + 8000;
+                    if (now > window[key]) return;
+                    if ((x_range.end - x_range.start) > 300000 ||
+                        (y_range.end - y_range.start) > 300000) {
+                        x_range.start = xmin;
+                        x_range.end = xmax;
+                        y_range.start = ymin;
+                        y_range.end = ymax;
+                    }
+                """,
+            )
+            x_range.js_on_change("start", settle_code)
+            x_range.js_on_change("end", settle_code)
+            y_range.js_on_change("start", settle_code)
+            y_range.js_on_change("end", settle_code)
         return figure
 
     def _ensure_map_display_tab(self) -> None:
