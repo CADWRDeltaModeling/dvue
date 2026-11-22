@@ -1,6 +1,7 @@
 # organize imports by category
 import warnings
 import weakref
+import asyncio
 
 warnings.filterwarnings("ignore")
 #
@@ -786,6 +787,13 @@ class DataUI(param.Parameterized):
             _set_fixed_ranges()
             if figure.document is not None:
                 figure.document.add_next_tick_callback(_set_fixed_ranges)
+
+                async def _settle_ranges(document=figure.document):
+                    for delay in (0.25, 0.5, 0.75, 1.5):
+                        await asyncio.sleep(delay)
+                        document.add_next_tick_callback(_set_fixed_ranges)
+
+                asyncio.create_task(_settle_ranges())
 
         return _force_initial_extent
 
