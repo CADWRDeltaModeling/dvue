@@ -136,18 +136,13 @@ class TestCreateView:
             initial_map_extent=(-122.65, 37.55, -121.15, 38.75),
         )
         ui.create_view()
-        outside = gpd.GeoDataFrame(
-            {"name": ["inside", "outside"]},
-            geometry=[Point(-121.5, 38.0), Point(-123.5, 39.5)],
-            crs="EPSG:4326",
-        )
-        regional = ui._filter_map_catalog_to_initial_extent(outside)
-        assert regional["name"].tolist() == ["inside"]
 
         tabs = ui._display_panel.objects[0]
         assert isinstance(tabs, pn.Tabs)
         assert tabs._names == ["Interactive Map"]
         assert tabs.active == 0
+        assert len(ui._dfmapcat) == 2
+        assert len(ui._map_source_df) == 2
         assert isinstance(ui._main_map_pane, pn.pane.HoloViews)
         assert not any(
             isinstance(obj, pn.pane.HTML)

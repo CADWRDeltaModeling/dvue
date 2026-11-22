@@ -707,7 +707,6 @@ class DataUI(param.Parameterized):
         self._dfmapcat = self._get_map_catalog()
         self._map_filter_station_ids = None
         self._dfcat_before_map_filter = None
-        self._dfmapcat = self._filter_map_catalog_to_initial_extent(self._dfmapcat)
 
         if isinstance(self._dfcat, gpd.GeoDataFrame):
             from .tile_sources import get_carto_tile_source
@@ -756,6 +755,7 @@ class DataUI(param.Parameterized):
         extent_opts = dict(
             xlim=(xmin, xmax),
             ylim=(ymin, ymax),
+            apply_ranges=False,
             backend_opts={
                 "x_range": Range1d(start=xmin, end=xmax),
                 "y_range": Range1d(start=ymin, end=ymax),
@@ -813,18 +813,6 @@ class DataUI(param.Parameterized):
         else:
             dfx = self._dfcat
         return dfx
-
-    def _filter_map_catalog_to_initial_extent(self, df):
-        """Restrict displayed map features to the configured regional extent."""
-        if self._initial_map_extent is None or not isinstance(df, gpd.GeoDataFrame):
-            return df
-        west, south, east, north = self._initial_map_extent
-        geographic = df.to_crs("EPSG:4326")
-        mask = (
-            geographic.geometry.x.between(min(west, east), max(west, east))
-            & geographic.geometry.y.between(min(south, north), max(south, north))
-        )
-        return df.loc[mask].copy()
 
     def build_map_of_features(
         self,
@@ -1086,7 +1074,6 @@ class DataUI(param.Parameterized):
             str_stack = full_stack()
             logger.error(str_stack)
             notifications.error(f"Error while fetching data for {str_stack}", duration=0)
-        current_view = self._filter_map_catalog_to_initial_extent(current_view)
         # Pass values directly to build_map_of_features instead of assigning to self params,
         # which would fire param events on the same params pn.bind is watching and create a
         # reactive cycle that Panel would suppress.
@@ -1126,6 +1113,7 @@ class DataUI(param.Parameterized):
                 map_opts.update(
                     xlim=(xmin, xmax),
                     ylim=(ymin, ymax),
+                    apply_ranges=False,
                     backend_opts={
                         "x_range": Range1d(start=xmin, end=xmax),
                         "y_range": Range1d(start=ymin, end=ymax),
