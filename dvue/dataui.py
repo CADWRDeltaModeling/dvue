@@ -762,6 +762,8 @@ class DataUI(param.Parameterized):
             },
             hooks=[self._make_initial_extent_hook(initial_extent)],
         )
+        if isinstance(map_object, (hv.Overlay, hv.DynamicMap)):
+            extent_opts["framewise"] = False
         apply_opts = getattr(map_object, "apply", None)
         if apply_opts is not None:
             try:

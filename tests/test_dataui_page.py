@@ -2,6 +2,7 @@
 
 import pandas as pd
 import geopandas as gpd
+import holoviews as hv
 import panel as pn
 import panel_material_ui as pmui
 import pytest
@@ -144,6 +145,8 @@ class TestCreateView:
         assert len(ui._dfmapcat) == 2
         assert len(ui._map_source_df) == 2
         assert isinstance(ui._main_map_pane, pn.pane.HoloViews)
+        plot = hv.renderer("bokeh").get_plot(ui._main_map_pane.object)
+        assert plot.state.x_range.end - plot.state.x_range.start < 300_000
         assert not any(
             isinstance(obj, pn.pane.HTML)
             and "Start here" in obj.object
@@ -154,7 +157,7 @@ class TestCreateView:
         assert projected[1] < projected[3]
         assert projected[2] - projected[0] < 150_000
         assert projected[3] - projected[1] > 150_000
-        assert not ui._extent_applied_figures
+        assert ui._extent_applied_figures
         rendered_figure = figure()
         hook = ui._make_initial_extent_hook(projected)
         fake_plot = type("Plot", (), {"handles": {"plot": rendered_figure}})()
