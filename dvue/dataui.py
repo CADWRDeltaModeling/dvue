@@ -773,8 +773,14 @@ class DataUI(param.Parameterized):
             if figure is None or figure in self._extent_applied_figures:
                 return
             self._extent_applied_figures.add(figure)
-            figure.x_range = Range1d(start=xmin, end=xmax)
-            figure.y_range = Range1d(start=ymin, end=ymax)
+
+            def _set_fixed_ranges():
+                figure.x_range = Range1d(start=xmin, end=xmax)
+                figure.y_range = Range1d(start=ymin, end=ymax)
+
+            _set_fixed_ranges()
+            if figure.document is not None:
+                figure.document.add_next_tick_callback(_set_fixed_ranges)
 
         return _force_initial_extent
 
