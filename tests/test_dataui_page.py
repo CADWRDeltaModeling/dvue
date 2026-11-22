@@ -144,9 +144,8 @@ class TestCreateView:
         assert tabs.active == 0
         assert len(ui._dfmapcat) == 2
         assert len(ui._map_source_df) == 2
-        assert isinstance(ui._main_map_pane, pn.pane.HoloViews)
-        plot = hv.renderer("bokeh").get_plot(ui._main_map_pane.object)
-        assert plot.state.x_range.end - plot.state.x_range.start < 300_000
+        assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
+        assert ui._main_map_pane.object.x_range.end - ui._main_map_pane.object.x_range.start < 300_000
         assert not any(
             isinstance(obj, pn.pane.HTML)
             and "Start here" in obj.object
@@ -157,11 +156,11 @@ class TestCreateView:
         assert projected[1] < projected[3]
         assert projected[2] - projected[0] < 150_000
         assert projected[3] - projected[1] > 150_000
-        assert ui._extent_applied_figures
         rendered_figure = figure()
         hook = ui._make_initial_extent_hook(projected)
         fake_plot = type("Plot", (), {"handles": {"plot": rendered_figure}})()
         hook(fake_plot, None)
+        assert ui._extent_applied_figures
         assert rendered_figure.x_range.start == pytest.approx(projected[0])
         assert rendered_figure.y_range.end == pytest.approx(projected[3])
         assert isinstance(rendered_figure.x_range, Range1d)

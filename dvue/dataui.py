@@ -909,6 +909,7 @@ class DataUI(param.Parameterized):
                         if dfpts[c].dtype != object
                         or dfpts[c].map(lambda v: isinstance(v, (str, type(None)))).all()
                     ]
+
                     dfpts = dfpts[scalar_cols]
                     self._map_features = gv.Points(dfpts, kdims=["__x__", "__y__"], crs=_pts_crs)
                     self._map_source_df = dfpts  # one row per feature
@@ -1125,9 +1126,8 @@ class DataUI(param.Parameterized):
             self._map_features = self._map_features.opts(**map_opts)
         main_map_pane = getattr(self, "_main_map_pane", None)
         if main_map_pane is not None:
-            base_map = self._apply_initial_map_extent(self._tmap)
-            main_map_pane.object = self._apply_initial_map_extent(
-                base_map * self._map_features
+            main_map_pane.object = self._render_main_map_figure(
+                self._tmap * self._map_features
             )
             self._main_station_select.source = self._map_features
         return self._map_features
@@ -2111,6 +2111,17 @@ class DataUI(param.Parameterized):
                         sizing_mode="stretch_both", dynamic=True)
             ]
 
+    def _render_main_map_figure(self, map_object):
+        """Render the central map and install fixed initial Bokeh ranges."""
+        self._main_map_plot = hv.renderer("bokeh").get_plot(map_object)
+        figure = self._main_map_plot.state
+        initial_extent = self._project_initial_map_extent()
+        if initial_extent is not None:
+            xmin, ymin, xmax, ymax = initial_extent
+            figure.x_range = Range1d(start=xmin, end=xmax)
+            figure.y_range = Range1d(start=ymin, end=ymax)
+        return figure
+
     def _ensure_map_display_tab(self) -> None:
         """Ensure the station map is present as the active display tab."""
         tabs = self._display_panel.objects[0] if self._display_panel.objects else None
@@ -2120,12 +2131,11 @@ class DataUI(param.Parameterized):
                     tabs.active = index
                     return
 
-        base_map = self._apply_initial_map_extent(self._tmap)
-        map_object = self._apply_initial_map_extent(
-            base_map * self._map_features
+        map_figure = self._render_main_map_figure(
+            self._tmap * self._map_features
         )
-        map_display = pn.pane.HoloViews(
-            map_object,
+        map_display = pn.pane.Bokeh(
+            map_figure,
             sizing_mode="stretch_both",
             min_height=400,
         )
