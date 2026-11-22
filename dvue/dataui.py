@@ -750,6 +750,15 @@ class DataUI(param.Parameterized):
         if initial_extent is None:
             return map_object
         xmin, ymin, xmax, ymax = initial_extent
+        return map_object.opts(
+            xlim=(xmin, xmax),
+            ylim=(ymin, ymax),
+            hooks=[self._make_initial_extent_hook(initial_extent)],
+        )
+
+    def _make_initial_extent_hook(self, initial_extent):
+        """Build a one-shot hook for a rendered Bokeh map figure."""
+        xmin, ymin, xmax, ymax = initial_extent
 
         def _force_initial_extent(plot, element):
             figure = plot.handles.get("plot")
@@ -761,11 +770,7 @@ class DataUI(param.Parameterized):
             figure.y_range.start = ymin
             figure.y_range.end = ymax
 
-        return map_object.opts(
-            xlim=(xmin, xmax),
-            ylim=(ymin, ymax),
-            hooks=[_force_initial_extent],
-        )
+        return _force_initial_extent
 
     def _get_map_catalog(self):
         if (
@@ -1077,6 +1082,14 @@ class DataUI(param.Parameterized):
                 default_span=map_default_span,  # for max zoom this is the default span in meters
                 selected=current_selection,
             )
+            initial_extent = self._project_initial_map_extent()
+            if initial_extent is not None:
+                xmin, ymin, xmax, ymax = initial_extent
+                map_opts.update(
+                    xlim=(xmin, xmax),
+                    ylim=(ymin, ymax),
+                    hooks=[self._make_initial_extent_hook(initial_extent)],
+                )
             self._map_features = self._map_features.opts(**map_opts)
         return self._map_features
 

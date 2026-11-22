@@ -4,6 +4,7 @@ import pandas as pd
 import panel as pn
 import panel_material_ui as pmui
 import pytest
+from bokeh.plotting import figure
 from shapely.geometry import Point
 
 from dvue import dataui
@@ -149,6 +150,15 @@ class TestCreateView:
         assert projected[2] - projected[0] < 150_000
         assert projected[3] - projected[1] > 150_000
         assert not ui._extent_applied_figures
+        rendered_figure = figure()
+        hook = ui._make_initial_extent_hook(projected)
+        fake_plot = type("Plot", (), {"handles": {"plot": rendered_figure}})()
+        hook(fake_plot, None)
+        assert rendered_figure.x_range.start == pytest.approx(projected[0])
+        assert rendered_figure.y_range.end == pytest.approx(projected[3])
+        rendered_figure.x_range.start = 123
+        hook(fake_plot, None)
+        assert rendered_figure.x_range.start == 123
 
 
 class TestAddHeaderButtons:
