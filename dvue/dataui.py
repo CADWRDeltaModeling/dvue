@@ -751,11 +751,18 @@ class DataUI(param.Parameterized):
         if initial_extent is None:
             return map_object
         xmin, ymin, xmax, ymax = initial_extent
-        return map_object.opts(
+        extent_opts = dict(
             xlim=(xmin, xmax),
             ylim=(ymin, ymax),
             hooks=[self._make_initial_extent_hook(initial_extent)],
         )
+        apply_opts = getattr(map_object, "apply", None)
+        if apply_opts is not None:
+            try:
+                return apply_opts.opts(**extent_opts)
+            except Exception:
+                logger.debug("Dynamic map extent opts failed; using static opts")
+        return map_object.opts(**extent_opts)
 
     def _make_initial_extent_hook(self, initial_extent):
         """Build a one-shot hook for a rendered Bokeh map figure."""
