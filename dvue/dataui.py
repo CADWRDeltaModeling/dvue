@@ -2114,6 +2114,9 @@ class DataUI(param.Parameterized):
     def _render_main_map_figure(self, map_object):
         """Render the central map and install fixed initial Bokeh ranges."""
         self._main_map_plot = hv.renderer("bokeh").get_plot(map_object)
+        self._main_map_plot.apply_ranges = False
+        for subplot in getattr(self._main_map_plot, "subplots", {}).values():
+            subplot.apply_ranges = False
         figure = self._main_map_plot.state
         initial_extent = self._project_initial_map_extent()
         if initial_extent is not None:

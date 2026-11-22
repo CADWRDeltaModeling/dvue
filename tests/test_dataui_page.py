@@ -145,6 +145,8 @@ class TestCreateView:
         assert len(ui._dfmapcat) == 2
         assert len(ui._map_source_df) == 2
         assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
+        assert ui._main_map_plot.apply_ranges is False
+        assert all(not subplot.apply_ranges for subplot in ui._main_map_plot.subplots.values())
         assert ui._main_map_pane.object.x_range.end - ui._main_map_pane.object.x_range.start < 300_000
         assert not any(
             isinstance(obj, pn.pane.HTML)
