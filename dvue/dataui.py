@@ -1,5 +1,6 @@
 # organize imports by category
 import warnings
+import weakref
 
 warnings.filterwarnings("ignore")
 #
@@ -688,6 +689,7 @@ class DataUI(param.Parameterized):
         self._crs = crs
         self._station_id_column = station_id_column
         self._initial_map_extent = initial_map_extent
+        self._extent_applied_figures = weakref.WeakSet()
         super().__init__(**kwargs)
         self._dataui_manager = dataui_manager
         self._dataui_manager._dataui = self  # insert a reference to self in the dataui_manager for progress bar updates for example
@@ -748,7 +750,22 @@ class DataUI(param.Parameterized):
         if initial_extent is None:
             return map_object
         xmin, ymin, xmax, ymax = initial_extent
-        return map_object.opts(xlim=(xmin, xmax), ylim=(ymin, ymax))
+
+        def _force_initial_extent(plot, element):
+            figure = plot.handles.get("plot")
+            if figure is None or figure in self._extent_applied_figures:
+                return
+            self._extent_applied_figures.add(figure)
+            figure.x_range.start = xmin
+            figure.x_range.end = xmax
+            figure.y_range.start = ymin
+            figure.y_range.end = ymax
+
+        return map_object.opts(
+            xlim=(xmin, xmax),
+            ylim=(ymin, ymax),
+            hooks=[_force_initial_extent],
+        )
 
     def _get_map_catalog(self):
         if (

@@ -148,6 +148,7 @@ class TestCreateView:
         assert projected[1] < projected[3]
         assert projected[2] - projected[0] < 150_000
         assert projected[3] - projected[1] > 150_000
+        assert not ui._extent_applied_figures
 
 
 class TestAddHeaderButtons:
