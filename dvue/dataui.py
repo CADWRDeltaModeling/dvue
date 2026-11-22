@@ -720,14 +720,35 @@ class DataUI(param.Parameterized):
             warnings.warn("No geolocation data found in catalog. Not displaying map of stations.")
 
     def _project_initial_map_extent(self):
-        """Return the configured lon/lat extent in map display coordinates."""
+        """Return configured lat/lon bounds projected for the rendered basemap.
+
+        Latitude defines the vertical extent. Longitude is centered at the
+        requested midpoint; its span is reduced to avoid a statewide view on
+        wide or narrow screens.
+        """
         if self._initial_map_extent is None:
             return None
+        west, south, east, north = self._initial_map_extent
+        center_lon = (west + east) / 2
+        longitude_half_span = min((east - west) / 2, 0.6)
         return gv.util.project_extents(
-            self._initial_map_extent,
+            (
+                center_lon - longitude_half_span,
+                south,
+                center_lon + longitude_half_span,
+                north,
+            ),
             ccrs.PlateCarree(),
             ccrs.GOOGLE_MERCATOR,
         )
+
+    def _apply_initial_map_extent(self, map_object):
+        """Apply initial ranges to the complete tile-and-points overlay."""
+        initial_extent = self._project_initial_map_extent()
+        if initial_extent is None:
+            return map_object
+        xmin, ymin, xmax, ymax = initial_extent
+        return map_object.opts(xlim=(xmin, xmax), ylim=(ymin, ymax))
 
     def _get_map_catalog(self):
         if (
@@ -1039,10 +1060,6 @@ class DataUI(param.Parameterized):
                 default_span=map_default_span,  # for max zoom this is the default span in meters
                 selected=current_selection,
             )
-            initial_extent = self._project_initial_map_extent()
-            if initial_extent is not None:
-                xmin, ymin, xmax, ymax = initial_extent
-                map_opts.update(xlim=(xmin, xmax), ylim=(ymin, ymax))
             self._map_features = self._map_features.opts(**map_opts)
         return self._map_features
 
@@ -2034,8 +2051,11 @@ class DataUI(param.Parameterized):
                     tabs.active = index
                     return
 
+        map_object = self._apply_initial_map_extent(
+            self._tmap * self._map_function
+        )
         map_display = pn.Column(
-            self._tmap * self._map_function,
+            map_object,
             sizing_mode="stretch_both",
             min_height=400,
         )
@@ -2282,11 +2302,14 @@ class DataUI(param.Parameterized):
             )
             map_display_btn.on_click(self.show_map_in_display_panel)
 
+            map_object = self._apply_initial_map_extent(
+                self._tmap * self._map_function
+            )
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
                 # Map pane: fixed portion of the sidebar height.
                 pn.Column(
-                    self._tmap * self._map_function,
+                    map_object,
                     sizing_mode="stretch_width",
                     min_height=250,
                     height=350,

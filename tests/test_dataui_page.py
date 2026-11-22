@@ -146,6 +146,8 @@ class TestCreateView:
         projected = ui._project_initial_map_extent()
         assert projected[0] < projected[2]
         assert projected[1] < projected[3]
+        assert projected[2] - projected[0] < 150_000
+        assert projected[3] - projected[1] > 150_000
 
 
 class TestAddHeaderButtons:
