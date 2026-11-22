@@ -2137,6 +2137,7 @@ class DataUI(param.Parameterized):
         map_display = pn.pane.HoloViews(
             map_object,
             sizing_mode="stretch_both",
+            min_height=400,
         )
         self._main_map_pane = map_display
         self._main_station_select = streams.Selection1D(source=self._map_features)
