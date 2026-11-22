@@ -754,6 +754,10 @@ class DataUI(param.Parameterized):
         extent_opts = dict(
             xlim=(xmin, xmax),
             ylim=(ymin, ymax),
+            backend_opts={
+                "x_range": Range1d(start=xmin, end=xmax),
+                "y_range": Range1d(start=ymin, end=ymax),
+            },
             hooks=[self._make_initial_extent_hook(initial_extent)],
         )
         apply_opts = getattr(map_object, "apply", None)
@@ -1100,6 +1104,10 @@ class DataUI(param.Parameterized):
                 map_opts.update(
                     xlim=(xmin, xmax),
                     ylim=(ymin, ymax),
+                    backend_opts={
+                        "x_range": Range1d(start=xmin, end=xmax),
+                        "y_range": Range1d(start=ymin, end=ymax),
+                    },
                     hooks=[self._make_initial_extent_hook(initial_extent)],
                 )
             self._map_features = self._map_features.opts(**map_opts)
