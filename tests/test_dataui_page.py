@@ -145,8 +145,8 @@ class TestCreateView:
         assert len(ui._dfmapcat) == 2
         assert len(ui._map_source_df) == 2
         assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
-        assert ui._main_map_pane.sizing_mode == "stretch_both"
-        assert ui._main_map_pane.object.sizing_mode == "stretch_both"
+        assert ui._main_map_pane.sizing_mode == "scale_width"
+        assert ui._main_map_pane.object.sizing_mode == "scale_width"
         assert ui._main_map_pane.object.match_aspect is False
         assert ui._main_map_pane.object.aspect_ratio is None
         assert ui._main_map_plot.apply_ranges is False
