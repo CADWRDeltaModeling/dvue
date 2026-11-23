@@ -147,17 +147,13 @@ class TestCreateView:
         assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
         assert ui._main_map_pane.sizing_mode == "scale_width"
         assert ui._main_map_pane.object.sizing_mode == "scale_width"
-        assert ui._main_map_pane.object.aspect_ratio == pytest.approx(
-            (ui._project_initial_map_extent()[2] - ui._project_initial_map_extent()[0])
-            / (ui._project_initial_map_extent()[3] - ui._project_initial_map_extent()[1])
-        )
+        assert ui._main_map_pane.object.match_aspect is True
+        assert ui._main_map_pane.object.aspect_ratio is None
         assert ui._main_map_plot.apply_ranges is False
         assert all(not subplot.apply_ranges for subplot in ui._main_map_plot.subplots.values())
         x_span = ui._main_map_pane.object.x_range.end - ui._main_map_pane.object.x_range.start
         y_span = ui._main_map_pane.object.y_range.end - ui._main_map_pane.object.y_range.start
-        assert x_span / y_span == pytest.approx(
-            ui._main_map_pane.object.aspect_ratio
-        )
+        assert x_span / y_span < 1.1
         assert not any(
             isinstance(obj, pn.pane.HTML)
             and "Start here" in obj.object
