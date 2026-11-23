@@ -88,7 +88,7 @@ class TestCreateView:
         _button(page.header, "About App")
         assert all(getattr(h, "label", None) != "Disclaimer" for h in page.header)
         assert page.sidebar_variant == "auto"
-        assert page.sidebar_width == 320
+        assert page.sidebar_width == 400
         assert ui._sidebar_tabs.active == 3
 
     def test_disclaimer_button_only_when_manager_provides_text(self):

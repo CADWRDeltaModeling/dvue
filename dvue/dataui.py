@@ -2536,7 +2536,7 @@ class DataUI(param.Parameterized):
         template = pmui.Page(
             title=title,
             sidebar=[sidebar_view],
-            sidebar_width=320,
+            sidebar_width=400,
             sidebar_variant="auto",
             main=[self._main_view, self._get_modal()],
             header=header,
