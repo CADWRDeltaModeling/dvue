@@ -147,7 +147,7 @@ class TestCreateView:
         assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
         assert ui._main_map_pane.sizing_mode == "scale_width"
         assert ui._main_map_pane.object.sizing_mode == "scale_width"
-        assert ui._main_map_pane.object.match_aspect is True
+        assert ui._main_map_pane.object.match_aspect is False
         assert ui._main_map_pane.object.aspect_ratio is None
         assert ui._main_map_plot.apply_ranges is False
         assert all(not subplot.apply_ranges for subplot in ui._main_map_plot.subplots.values())

@@ -2139,8 +2139,7 @@ class DataUI(param.Parameterized):
                     const now = performance.now();
                     if (!window[key]) window[key] = now + 8000;
                     if (now > window[key]) return;
-                    if ((x_range.end - x_range.start) > 300000 ||
-                        (y_range.end - y_range.start) > 300000) {
+                    if ((y_range.end - y_range.start) > 300000) {
                         x_range.start = xmin;
                         x_range.end = xmax;
                         y_range.start = ymin;
@@ -2153,7 +2152,27 @@ class DataUI(param.Parameterized):
             y_range.js_on_change("start", settle_code)
             y_range.js_on_change("end", settle_code)
             figure.sizing_mode = "scale_width"
-            figure.match_aspect = True
+            fit_code = CustomJS(
+                args=dict(
+                    figure=figure,
+                    x_range=x_range,
+                    y_range=y_range,
+                    xmin=xmin,
+                    xmax=xmax,
+                ),
+                code="""
+                    const width = figure.inner_width;
+                    const height = figure.inner_height;
+                    if (!(width > 0) || !(height > 0)) return;
+                    const center = (xmin + xmax) / 2;
+                    const half_width = (y_range.end - y_range.start) *
+                        width / height / 2;
+                    x_range.start = center - half_width;
+                    x_range.end = center + half_width;
+                """,
+            )
+            figure.js_on_change("inner_width", fit_code)
+            figure.js_on_change("inner_height", fit_code)
         self._attach_main_map_selection(figure)
         return figure
 
