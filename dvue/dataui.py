@@ -732,17 +732,14 @@ class DataUI(param.Parameterized):
             return None
         west, south, east, north = self._initial_map_extent
         center_lon = (west + east) / 2
-        longitude_half_span = min((east - west) / 2, 0.6)
-        return gv.util.project_extents(
-            (
-                center_lon - longitude_half_span,
-                south,
-                center_lon + longitude_half_span,
-                north,
-            ),
+        projected = gv.util.project_extents(
+            (center_lon, south, center_lon, north),
             ccrs.PlateCarree(),
             ccrs.GOOGLE_MERCATOR,
         )
+        center_x, ymin, _, ymax = projected
+        half_width = (ymax - ymin) * 3.1 / 2
+        return center_x - half_width, ymin, center_x + half_width, ymax
 
     def _apply_initial_map_extent(self, map_object):
         """Apply initial ranges to the complete tile-and-points overlay."""
