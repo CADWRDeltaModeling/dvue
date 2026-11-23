@@ -2151,7 +2151,7 @@ class DataUI(param.Parameterized):
             x_range.js_on_change("end", settle_code)
             y_range.js_on_change("start", settle_code)
             y_range.js_on_change("end", settle_code)
-            figure.sizing_mode = "scale_width"
+            figure.sizing_mode = "stretch_both"
             fit_code = CustomJS(
                 args=dict(
                     figure=figure,
@@ -2209,8 +2209,7 @@ class DataUI(param.Parameterized):
         )
         map_display = pn.pane.Bokeh(
             map_figure,
-            sizing_mode="scale_width",
-            min_height=400,
+            sizing_mode="stretch_both",
         )
         self._main_map_pane = map_display
         if isinstance(tabs, pn.Tabs):
