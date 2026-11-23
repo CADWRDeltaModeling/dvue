@@ -148,7 +148,7 @@ class TestCreateView:
         assert ui._main_map_pane.sizing_mode == "scale_width"
         assert ui._main_map_pane.object.sizing_mode == "scale_width"
         assert ui._main_map_pane.object.match_aspect is False
-        assert ui._main_map_pane.object.aspect_ratio is None
+        assert ui._main_map_pane.object.aspect_ratio == pytest.approx(3.1)
         assert ui._main_map_plot.apply_ranges is False
         assert all(not subplot.apply_ranges for subplot in ui._main_map_plot.subplots.values())
         x_span = ui._main_map_pane.object.x_range.end - ui._main_map_pane.object.x_range.start

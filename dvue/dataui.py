@@ -2152,6 +2152,7 @@ class DataUI(param.Parameterized):
             y_range.js_on_change("start", settle_code)
             y_range.js_on_change("end", settle_code)
             figure.sizing_mode = "scale_width"
+            figure.aspect_ratio = 3.1
             fit_code = CustomJS(
                 args=dict(
                     figure=figure,
