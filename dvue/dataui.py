@@ -2104,6 +2104,15 @@ class DataUI(param.Parameterized):
 
     def _render_main_map_figure(self, map_object):
         """Render the central map and install fixed initial Bokeh ranges."""
+        main_station_select = getattr(self, "_main_station_select", None)
+        if main_station_select is None:
+            main_station_select = streams.Selection1D(source=self._map_features)
+            main_station_select.param.watch_values(
+                self.select_data_catalog, "index"
+            )
+            self._main_station_select = main_station_select
+        else:
+            main_station_select.source = self._map_features
         self._main_map_plot = hv.renderer("bokeh").get_plot(map_object)
         self._main_map_plot.apply_ranges = False
         for subplot in getattr(self._main_map_plot, "subplots", {}).values():
@@ -2143,6 +2152,8 @@ class DataUI(param.Parameterized):
             x_range.js_on_change("end", settle_code)
             y_range.js_on_change("start", settle_code)
             y_range.js_on_change("end", settle_code)
+            figure.sizing_mode = "scale_width"
+            figure.aspect_ratio = (xmax - xmin) / (ymax - ymin)
         return figure
 
     def _ensure_map_display_tab(self) -> None:
@@ -2159,14 +2170,10 @@ class DataUI(param.Parameterized):
         )
         map_display = pn.pane.Bokeh(
             map_figure,
-            sizing_mode="stretch_both",
+            sizing_mode="scale_width",
             min_height=400,
         )
         self._main_map_pane = map_display
-        self._main_station_select = streams.Selection1D(source=self._map_features)
-        self._main_station_select.param.watch_values(
-            self.select_data_catalog, "index"
-        )
         if isinstance(tabs, pn.Tabs):
             tabs.insert(0, ("Interactive Map", map_display))
             tabs.active = 0

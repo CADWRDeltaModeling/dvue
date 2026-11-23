@@ -145,6 +145,9 @@ class TestCreateView:
         assert len(ui._dfmapcat) == 2
         assert len(ui._map_source_df) == 2
         assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
+        assert ui._main_map_pane.sizing_mode == "scale_width"
+        assert ui._main_map_pane.object.sizing_mode == "scale_width"
+        assert ui._main_map_pane.object.aspect_ratio > 0
         assert ui._main_map_plot.apply_ranges is False
         assert all(not subplot.apply_ranges for subplot in ui._main_map_plot.subplots.values())
         assert ui._main_map_pane.object.x_range.end - ui._main_map_pane.object.x_range.start < 300_000
@@ -169,6 +172,19 @@ class TestCreateView:
         rendered_figure.x_range.start = 123
         hook(fake_plot, None)
         assert rendered_figure.x_range.start == 123
+
+    def test_main_map_selection_filters_table(self):
+        ui = dataui.DataUI(
+            _Manager(with_map=True),
+            station_id_column="B",
+            initial_map_extent=(-122.65, 37.55, -121.15, 38.75),
+        )
+        ui.create_view()
+
+        ui._main_station_select.event(index=[0])
+
+        assert ui._map_filter_station_ids == {"STA0"}
+        assert ui.display_table.value["B"].tolist() == ["STA0"]
 
 
 class TestAddHeaderButtons:
