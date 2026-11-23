@@ -2154,7 +2154,27 @@ class DataUI(param.Parameterized):
             y_range.js_on_change("end", settle_code)
             figure.sizing_mode = "scale_width"
             figure.aspect_ratio = (xmax - xmin) / (ymax - ymin)
+        self._attach_main_map_selection(figure)
         return figure
+
+    def _attach_main_map_selection(self, figure):
+        """Forward direct Bokeh glyph selections to the table filter logic."""
+        self._main_bokeh_selection_callbacks = []
+        id_col = self._station_id_column
+        if not id_col:
+            return
+        for renderer in figure.renderers:
+            source = getattr(renderer, "data_source", None)
+            if source is None or id_col not in getattr(source, "data", {}):
+                continue
+
+            def _selected(attr, old, new, selection=source.selected):
+                indices = list(new or selection.indices or [])
+                if indices:
+                    self.select_data_catalog(indices)
+
+            self._main_bokeh_selection_callbacks.append(_selected)
+            source.selected.on_change("indices", _selected)
 
     def _ensure_map_display_tab(self) -> None:
         """Ensure the station map is present as the active display tab."""

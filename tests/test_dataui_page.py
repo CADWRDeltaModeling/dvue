@@ -186,6 +186,22 @@ class TestCreateView:
         assert ui._map_filter_station_ids == {"STA0"}
         assert ui.display_table.value["B"].tolist() == ["STA0"]
 
+        ui._clear_map_filter()
+        main_figure = ui._main_map_pane.object
+        station_source = next(
+            renderer.data_source
+            for renderer in main_figure.renderers
+            if "B" in getattr(getattr(renderer, "data_source", None), "data", {})
+        )
+        ui._main_bokeh_selection_callbacks[-1](
+            "indices",
+            [],
+            [1],
+            station_source.selected,
+        )
+        assert ui._map_filter_station_ids == {"STA1"}
+        assert ui.display_table.value["B"].tolist() == ["STA1"]
+
 
 class TestAddHeaderButtons:
     def test_page_gets_header_buttons_and_dialog(self):
