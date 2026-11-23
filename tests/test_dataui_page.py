@@ -147,12 +147,17 @@ class TestCreateView:
         assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
         assert ui._main_map_pane.sizing_mode == "scale_width"
         assert ui._main_map_pane.object.sizing_mode == "scale_width"
-        assert ui._main_map_pane.object.aspect_ratio == pytest.approx(3.1)
+        assert ui._main_map_pane.object.aspect_ratio == pytest.approx(
+            (ui._project_initial_map_extent()[2] - ui._project_initial_map_extent()[0])
+            / (ui._project_initial_map_extent()[3] - ui._project_initial_map_extent()[1])
+        )
         assert ui._main_map_plot.apply_ranges is False
         assert all(not subplot.apply_ranges for subplot in ui._main_map_plot.subplots.values())
         x_span = ui._main_map_pane.object.x_range.end - ui._main_map_pane.object.x_range.start
         y_span = ui._main_map_pane.object.y_range.end - ui._main_map_pane.object.y_range.start
-        assert x_span / y_span == pytest.approx(3.1)
+        assert x_span / y_span == pytest.approx(
+            ui._main_map_pane.object.aspect_ratio
+        )
         assert not any(
             isinstance(obj, pn.pane.HTML)
             and "Start here" in obj.object
@@ -162,7 +167,7 @@ class TestCreateView:
         assert projected[0] < projected[2]
         assert projected[1] < projected[3]
         assert projected[3] - projected[1] > 150_000
-        assert (projected[2] - projected[0]) / (projected[3] - projected[1]) == pytest.approx(3.1)
+        assert (projected[2] - projected[0]) / (projected[3] - projected[1]) < 1.1
         rendered_figure = figure()
         hook = ui._make_initial_extent_hook(projected)
         fake_plot = type("Plot", (), {"handles": {"plot": rendered_figure}})()

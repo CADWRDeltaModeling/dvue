@@ -725,21 +725,24 @@ class DataUI(param.Parameterized):
         """Return configured lat/lon bounds projected for the rendered basemap.
 
         Latitude defines the vertical extent. Longitude is centered at the
-        requested midpoint; its span is reduced to avoid a statewide view on
-        wide or narrow screens.
+        requested midpoint and capped narrowly enough to focus on the Delta
+        without changing the map projection's aspect ratio.
         """
         if self._initial_map_extent is None:
             return None
         west, south, east, north = self._initial_map_extent
         center_lon = (west + east) / 2
-        projected = gv.util.project_extents(
-            (center_lon, south, center_lon, north),
+        longitude_half_span = min((east - west) / 2, 0.6)
+        return gv.util.project_extents(
+            (
+                center_lon - longitude_half_span,
+                south,
+                center_lon + longitude_half_span,
+                north,
+            ),
             ccrs.PlateCarree(),
             ccrs.GOOGLE_MERCATOR,
         )
-        center_x, ymin, _, ymax = projected
-        half_width = (ymax - ymin) * 3.1 / 2
-        return center_x - half_width, ymin, center_x + half_width, ymax
 
     def _apply_initial_map_extent(self, map_object):
         """Apply initial ranges to the complete tile-and-points overlay."""
@@ -2150,7 +2153,7 @@ class DataUI(param.Parameterized):
             y_range.js_on_change("start", settle_code)
             y_range.js_on_change("end", settle_code)
             figure.sizing_mode = "scale_width"
-            figure.aspect_ratio = 3.1
+            figure.aspect_ratio = (xmax - xmin) / (ymax - ymin)
         self._attach_main_map_selection(figure)
         return figure
 
