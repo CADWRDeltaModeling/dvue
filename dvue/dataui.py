@@ -831,12 +831,6 @@ class DataUI(param.Parameterized):
         # this is useful when we have multiple rows per station
         hover = HoverTool(tooltips=tooltips)
 
-        # Pre-compute categorical colors as a concrete column BEFORE building the
-        # GeoViews element.  Bokeh 3.9+ strictly validates DataSpec properties
-        # (fill_color, line_color) and rejects HoloViews dim().categorize()
-        # objects.  A plain string field-reference ("_dvue_color") is always
-        # accepted by Bokeh.
-        _COLOR_COL = "_dvue_color"
         color_dict = None
         column_color = "Category10"  # default; re-resolved below if show_color_by
         if show_color_by:
@@ -851,10 +845,6 @@ class DataUI(param.Parameterized):
             elif isinstance(column_color, list):
                 unique_vals = list(dfmap[color_by].unique()) if color_by in dfmap.columns else []
                 color_dict = {v: column_color[i % len(column_color)] for i, v in enumerate(unique_vals)}
-            if color_dict is not None:
-                dfmap = dfmap.copy()
-                dfmap[_COLOR_COL] = dfmap[color_by].map(lambda v: color_dict.get(v, "blue"))
-
         # check if the dfmap is a geodataframe
         try:
             if isinstance(dfmap, gpd.GeoDataFrame):
@@ -922,16 +912,22 @@ class DataUI(param.Parameterized):
             )
         if show_color_by:
             if color_dict is not None:
-                # Use pre-computed color column — Bokeh 3.9+ accepts a plain field
-                # reference; dim().categorize() is rejected by strict DataSpec validation.
                 if isinstance(self._map_features, gv.Points):
-                    self._map_features = self._map_features.opts(color=_COLOR_COL)
+                    self._map_features = self._map_features.opts(
+                        color=dim(color_by), cmap=color_dict
+                    )
                 elif isinstance(self._map_features, gv.Path):
-                    self._map_features = self._map_features.opts(line_color=_COLOR_COL)
+                    self._map_features = self._map_features.opts(
+                        line_color=dim(color_by), cmap=color_dict
+                    )
                 elif isinstance(self._map_features, gv.Polygons):
-                    self._map_features = self._map_features.opts(fill_color=_COLOR_COL)
+                    self._map_features = self._map_features.opts(
+                        fill_color=dim(color_by), cmap=color_dict
+                    )
                 else:
-                    self._map_features = self._map_features.opts(color=_COLOR_COL)
+                    self._map_features = self._map_features.opts(
+                        color=dim(color_by), cmap=color_dict
+                    )
             else:
                 # Named colormap string (e.g. "Category10", "Viridis") — HoloViews
                 # routes this through a proper Bokeh ColorMapper, which is accepted.
@@ -1121,6 +1117,12 @@ class DataUI(param.Parameterized):
                 self._tmap * self._map_features
             )
             self._main_station_select.source = self._map_features
+        for pane_name in ("_sidebar_map_pane", "_mobile_map_pane"):
+            map_pane = getattr(self, pane_name, None)
+            if map_pane is not None:
+                map_pane.object = self._render_main_map_figure(
+                    self._tmap * self._map_features
+                )
         return self._map_features
 
     # ------------------------------------------------------------------
@@ -2376,33 +2378,6 @@ class DataUI(param.Parameterized):
                 sizing_mode="stretch_width",
                 margin=(4, 4, 4, 4),
             )
-            # Use HoloViews streams.Params instead of pn.bind so that ALL param
-            # changes (including color/marker category) are routed through
-            # HoloViews' own rendering pipeline.  pn.bind only triggers a Panel
-            # pane swap; it does NOT instruct Bokeh to recreate the
-            # CategoricalColorMapper/marker glyph, so color/marker opts changes
-            # appear to have no effect.  streams.Params guarantees a full
-            # HoloViews renderer refresh on every param change.
-            _self_stream = streams.Params(
-                parameterized=self,
-                parameters=[
-                    "show_map_colors",
-                    "map_color_category",
-                    "show_map_markers",
-                    "map_marker_category",
-                    "query",
-                    "map_default_span",
-                    "map_non_selection_alpha",
-                    "map_point_size",
-                    "_map_sel_proxy",
-                    "_map_filter_proxy",
-                ],
-            )
-            # _table_stream is replaced by proxy params above.
-            # The proxies are only updated when map_filters_table=False, so the
-            # DynamicMap never rebuilds (and never fires a spurious Selection1D)
-            # while the map-filter mode is active.
-
             def _map_callback(
                 show_map_colors,
                 map_color_category,
@@ -2427,9 +2402,37 @@ class DataUI(param.Parameterized):
                     map_point_size=map_point_size,
                 )
 
-            self._map_function = hv.DynamicMap(_map_callback, streams=[_self_stream])
-            self._station_select.source = self._map_function
+            self._station_select.source = self._map_features
             self._station_select.param.watch_values(self.select_data_catalog, "index")
+            map_parameter_names = [
+                "show_map_colors",
+                "map_color_category",
+                "show_map_markers",
+                "map_marker_category",
+                "query",
+                "map_default_span",
+                "map_non_selection_alpha",
+                "map_point_size",
+                "_map_sel_proxy",
+                "_map_filter_proxy",
+            ]
+
+            def _on_map_parameter_change(event):
+                _map_callback(
+                    self.show_map_colors,
+                    self.map_color_category,
+                    self.show_map_markers,
+                    self.map_marker_category,
+                    self.query,
+                    self.map_default_span,
+                    self.map_non_selection_alpha,
+                    self.map_point_size,
+                    self._map_sel_proxy,
+                    self._map_filter_proxy,
+                )
+
+            for parameter_name in map_parameter_names:
+                self.param.watch(_on_map_parameter_change, parameter_name)
             self._ensure_map_display_tab()
 
             # Wire table events → proxies (gated by map_filters_table mode)
@@ -2458,14 +2461,20 @@ class DataUI(param.Parameterized):
             map_display_btn.on_click(self.show_map_in_display_panel)
 
             base_map = self._apply_initial_map_extent(self._tmap)
-            map_object = self._apply_initial_map_extent(
-                base_map * self._map_function
+            sidebar_map_figure = self._render_main_map_figure(
+                base_map * self._map_features
+            )
+            self._sidebar_map_pane = pn.pane.Bokeh(
+                sidebar_map_figure,
+                sizing_mode="stretch_width",
+                min_height=250,
+                height=350,
             )
             map_view = pn.Column(
                 pn.Row(map_display_btn, pn.layout.HSpacer(), map_tooltip),
                 # Map pane: fixed portion of the sidebar height.
                 pn.Column(
-                    map_object,
+                    self._sidebar_map_pane,
                     sizing_mode="stretch_width",
                     min_height=250,
                     height=350,
@@ -2675,23 +2684,6 @@ class DataUI(param.Parameterized):
         # --- Sidebar (hamburger on mobile) ---
         sidebar_items = []
         if hasattr(self, "_map_features"):
-            # Rebuild map streams for mobile
-            _self_stream = streams.Params(
-                parameterized=self,
-                parameters=[
-                    "show_map_colors",
-                    "map_color_category",
-                    "show_map_markers",
-                    "map_marker_category",
-                    "query",
-                    "map_default_span",
-                    "map_non_selection_alpha",
-                    "map_point_size",
-                    "_map_sel_proxy",
-                    "_map_filter_proxy",
-                ],
-            )
-
             def _map_callback(
                 show_map_colors, map_color_category,
                 show_map_markers, map_marker_category,
@@ -2708,11 +2700,37 @@ class DataUI(param.Parameterized):
                     map_point_size=map_point_size,
                 )
 
-            self._map_function = hv.DynamicMap(
-                _map_callback, streams=[_self_stream]
-            )
-            self._station_select.source = self._map_function
+            self._station_select.source = self._map_features
             self._station_select.param.watch_values(self.select_data_catalog, "index")
+            map_parameter_names = [
+                "show_map_colors",
+                "map_color_category",
+                "show_map_markers",
+                "map_marker_category",
+                "query",
+                "map_default_span",
+                "map_non_selection_alpha",
+                "map_point_size",
+                "_map_sel_proxy",
+                "_map_filter_proxy",
+            ]
+
+            def _on_map_parameter_change(event):
+                _map_callback(
+                    self.show_map_colors,
+                    self.map_color_category,
+                    self.show_map_markers,
+                    self.map_marker_category,
+                    self.query,
+                    self.map_default_span,
+                    self.map_non_selection_alpha,
+                    self.map_point_size,
+                    self._map_sel_proxy,
+                    self._map_filter_proxy,
+                )
+
+            for parameter_name in map_parameter_names:
+                self.param.watch(_on_map_parameter_change, parameter_name)
 
             # Wire table events → proxies (gated by map_filters_table mode)
             def _on_tbl_selection(event):
@@ -2727,10 +2745,19 @@ class DataUI(param.Parameterized):
             self._register_table_watcher("filters", _on_tbl_filters)
             self.param.watch(self._on_map_filter_mode_changed, "map_filters_table")
 
+            self._mobile_map_pane = pn.pane.Bokeh(
+                self._render_main_map_figure(
+                    self._apply_initial_map_extent(
+                        self._tmap * self._map_features
+                    )
+                ),
+                sizing_mode="stretch_width",
+                height=350,
+            )
             # Touch-friendly map — tap only, no lasso/box
             map_card = pn.Card(
                 pn.Column(
-                    self._tmap * self._map_function,
+                    self._mobile_map_pane,
                     sizing_mode="stretch_width",
                     height=350,
                 ),

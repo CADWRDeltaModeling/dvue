@@ -176,6 +176,45 @@ class TestCreateView:
         hook(fake_plot, None)
         assert rendered_figure.x_range.start == 123
 
+    def test_map_uses_bokeh_panes_with_latest_holoviz_stack(self):
+        class ConcreteColorManager(_Manager):
+            def get_name_to_color(self):
+                return {"C": {"EC": "#1f77b4"}}
+
+        ui = dataui.DataUI(
+            ConcreteColorManager(with_map=True),
+            initial_map_extent=(-122.65, 37.55, -121.15, 38.75),
+        )
+        page = ui.create_view()
+
+        assert isinstance(ui._main_map_pane, pn.pane.Bokeh)
+        assert isinstance(ui._sidebar_map_pane, pn.pane.Bokeh)
+        assert not any(
+            isinstance(pane, pn.pane.HoloViews)
+            for pane in page.select(pn.pane.HoloViews)
+        )
+        scatter = next(
+            renderer.glyph
+            for renderer in ui._main_map_pane.object.renderers
+            if hasattr(getattr(renderer, "glyph", None), "fill_color")
+        )
+        assert scatter.fill_color.field == "color"
+        assert scatter.fill_color.transform is not None
+
+    def test_sidebar_map_updates_without_holoviews_dynamic_map(
+        self,
+    ):
+        ui = dataui.DataUI(
+            _Manager(with_map=True),
+            initial_map_extent=(-122.65, 37.55, -121.15, 38.75),
+        )
+        ui.create_view()
+        before = ui._sidebar_map_pane.object
+
+        ui.show_map_colors = False
+
+        assert ui._sidebar_map_pane.object is not before
+
     def test_main_map_selection_filters_table(self):
         ui = dataui.DataUI(
             _Manager(with_map=True),
