@@ -1,4 +1,4 @@
-import asyncio
+
 import os
 import threading
 
@@ -202,10 +202,7 @@ class PlotAction:
 
             finally:
                 doc.add_next_tick_callback(
-                    lambda: (
-                        setattr(dataui._display_panel, "loading", False),
-                        asyncio.create_task(self._hide_progress_after_delay(dataui)),
-                    )
+                    lambda: self._finish_progress_cleanup(doc, dataui)
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -227,10 +224,14 @@ class PlotAction:
             msg += f"\n… and {extra} more"
         pn.state.notifications.warning(msg, duration=8000)
 
-    async def _hide_progress_after_delay(self, dataui):
-        """Hide the progress bar and status label after a short delay."""
-        await asyncio.sleep(0.5)
-        dataui.hide_progress()
+    @staticmethod
+    def _finish_progress_cleanup(doc, dataui):
+        """Finish cleanup without requiring an active asyncio event loop."""
+        dataui._display_panel.loading = False
+        if hasattr(doc, "add_timeout_callback"):
+            doc.add_timeout_callback(dataui.hide_progress, 500)
+        else:
+            dataui.hide_progress()
 
 
 class TabulateAction(PlotAction):
@@ -462,18 +463,19 @@ class ReportAction:
 
             finally:
                 doc.add_next_tick_callback(
-                    lambda: (
-                        setattr(dataui._display_panel, "loading", False),
-                        asyncio.create_task(self._hide_progress_after_delay(dataui)),
-                    )
+                    lambda: self._finish_progress_cleanup(doc, dataui)
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    async def _hide_progress_after_delay(self, dataui):
-        """Hide the progress bar and status label after a short delay."""
-        await asyncio.sleep(0.5)
-        dataui.hide_progress()
+    @staticmethod
+    def _finish_progress_cleanup(doc, dataui):
+        """Finish cleanup without requiring an active asyncio event loop."""
+        dataui._display_panel.loading = False
+        if hasattr(doc, "add_timeout_callback"):
+            doc.add_timeout_callback(dataui.hide_progress, 500)
+        else:
+            dataui.hide_progress()
 
 
 class DownloadDataAction:
@@ -538,7 +540,11 @@ class DownloadDataAction:
         finally:
             dataui._display_panel.loading = False
             doc.add_next_tick_callback(
-                lambda: asyncio.create_task(_hide_after_delay(dataui))
+                lambda: (
+                    doc.add_timeout_callback(dataui.hide_progress, 500)
+                    if hasattr(doc, "add_timeout_callback")
+                    else dataui.hide_progress()
+                )
             )
 
     def _notify_partial_errors(self, load_errors, max_shown=5):
@@ -557,12 +563,6 @@ class DownloadDataAction:
         if extra > 0:
             msg += f"\n… and {extra} more"
         pn.state.notifications.warning(msg, duration=8000)
-
-
-async def _hide_after_delay(dataui):
-    """Hide progress bar and status label after a short completion pause."""
-    await asyncio.sleep(0.5)
-    dataui.hide_progress()
 
 
 class DownloadDataCatalogAction:
