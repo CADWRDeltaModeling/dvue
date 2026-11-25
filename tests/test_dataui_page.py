@@ -198,8 +198,7 @@ class TestCreateView:
             for renderer in ui._main_map_pane.object.renderers
             if hasattr(getattr(renderer, "glyph", None), "fill_color")
         )
-        assert scatter.fill_color.field == "color"
-        assert scatter.fill_color.transform is not None
+        assert scatter.fill_color.field.endswith("_dvue_color")
 
     def test_sidebar_map_updates_without_holoviews_dynamic_map(
         self,

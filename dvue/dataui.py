@@ -38,6 +38,7 @@ from .actions import (
     DownloadDataCatalogAction,
 )
 
+from bokeh.core.properties import field
 from bokeh.models import CustomJS, HoverTool, Range1d
 from bokeh.core.enums import MarkerType
 
@@ -833,6 +834,7 @@ class DataUI(param.Parameterized):
 
         color_dict = None
         column_color = "Category10"  # default; re-resolved below if show_color_by
+        color_column = None
         if show_color_by:
             name_to_color = self._dataui_manager.get_name_to_color()
             column_color = (
@@ -845,6 +847,34 @@ class DataUI(param.Parameterized):
             elif isinstance(column_color, list):
                 unique_vals = list(dfmap[color_by].unique()) if color_by in dfmap.columns else []
                 color_dict = {v: column_color[i % len(column_color)] for i, v in enumerate(unique_vals)}
+            elif isinstance(column_color, str) and color_by in dfmap.columns:
+                from holoviews.plotting.util import process_cmap
+
+                unique_vals = list(dfmap[color_by].dropna().unique())
+                try:
+                    ordered_vals = sorted(
+                        unique_vals,
+                        key=lambda value: (
+                            0,
+                            float(value),
+                            "",
+                        )
+                        if isinstance(value, (int, float))
+                        or str(value).replace(".", "", 1).isdigit()
+                        else (1, 0, str(value)),
+                    )
+                except Exception:
+                    ordered_vals = unique_vals
+                palette = process_cmap(
+                    column_color, max(1, len(ordered_vals))
+                )
+                color_dict = dict(zip(ordered_vals, palette))
+            if color_dict is not None and color_by in dfmap.columns:
+                color_column = "_dvue_color"
+                dfmap = dfmap.copy()
+                dfmap[color_column] = dfmap[color_by].map(
+                    lambda value: color_dict.get(value, "#808080")
+                )
         # check if the dfmap is a geodataframe
         try:
             if isinstance(dfmap, gpd.GeoDataFrame):
@@ -911,23 +941,19 @@ class DataUI(param.Parameterized):
                 crs=crs,
             )
         if show_color_by:
-            if color_dict is not None:
+            if color_column is not None:
                 if isinstance(self._map_features, gv.Points):
-                    self._map_features = self._map_features.opts(
-                        color=dim(color_by), cmap=color_dict
-                    )
+                    self._map_features = self._map_features.opts(color="blue")
                 elif isinstance(self._map_features, gv.Path):
                     self._map_features = self._map_features.opts(
-                        line_color=dim(color_by), cmap=color_dict
+                        line_color="blue"
                     )
                 elif isinstance(self._map_features, gv.Polygons):
                     self._map_features = self._map_features.opts(
-                        fill_color=dim(color_by), cmap=color_dict
+                        fill_color="blue"
                     )
                 else:
-                    self._map_features = self._map_features.opts(
-                        color=dim(color_by), cmap=color_dict
-                    )
+                    self._map_features = self._map_features.opts(color="blue")
             else:
                 # Named colormap string (e.g. "Category10", "Viridis") — HoloViews
                 # routes this through a proper Bokeh ColorMapper, which is accepted.
@@ -2120,6 +2146,27 @@ class DataUI(param.Parameterized):
         for subplot in getattr(self._main_map_plot, "subplots", {}).values():
             subplot.apply_ranges = False
         figure = self._main_map_plot.state
+        for renderer in figure.renderers:
+            glyph = getattr(renderer, "glyph", None)
+            source = getattr(renderer, "data_source", None)
+            if glyph is None or source is None:
+                continue
+            color_field = next(
+                (
+                    name
+                    for name in source.data
+                    if name == "_dvue_color"
+                    or name.endswith("__dvue_color")
+                ),
+                None,
+            )
+            if color_field is None:
+                continue
+            concrete_color = field(color_field)
+            if hasattr(glyph, "fill_color"):
+                glyph.fill_color = concrete_color
+            if hasattr(glyph, "line_color"):
+                glyph.line_color = concrete_color
         initial_extent = self._project_initial_map_extent()
         if initial_extent is not None:
             xmin, ymin, xmax, ymax = initial_extent
