@@ -913,14 +913,30 @@ class SessionManager:
 
     def load_state(self, user_id: str) -> dict:
         """Return the persisted state dict for *user_id*, or ``{}``."""
-        if self._session_cache and user_id:
-            return self._session_cache.get(user_id, default={})
+        if self._session_cache is not None and user_id:
+            try:
+                return self._session_cache.get(user_id, default={})
+            except Exception as exc:
+                logger.warning(
+                    "dvue.session_persistence: could not load state for %s; "
+                    "continuing without persisted state: %s",
+                    user_id[:8],
+                    exc,
+                )
         return {}
 
     def save_state(self, user_id: str, state: dict) -> None:
         """Persist *state* for *user_id* with the configured TTL."""
-        if self._session_cache and user_id:
-            self._session_cache.set(user_id, state, expire=self._ttl)
+        if self._session_cache is not None and user_id:
+            try:
+                self._session_cache.set(user_id, state, expire=self._ttl)
+            except Exception as exc:
+                logger.warning(
+                    "dvue.session_persistence: could not save state for %s; "
+                    "continuing in memory: %s",
+                    user_id[:8],
+                    exc,
+                )
 
     # ── Reset button ──────────────────────────────────────────────────────────
 

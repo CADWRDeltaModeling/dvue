@@ -8,7 +8,6 @@ These tests cover:
 - Result is appended as a new tab in the display panel
 """
 
-import asyncio
 import threading
 import pandas as pd
 import panel as pn
@@ -85,8 +84,6 @@ def _run_callback_synchronously(action, dataui, monkeypatch):
     Monkeypatches:
     - ``pn.state.curdoc``: replaced with a fake doc whose
       ``add_next_tick_callback`` calls the callback immediately.
-    - ``asyncio.create_task``: replaced with a no-op so the async progress
-      cleanup doesn't raise "no event loop" in tests.
     """
 
     class _FakeDoc:
@@ -94,14 +91,6 @@ def _run_callback_synchronously(action, dataui, monkeypatch):
             fn()
 
     monkeypatch.setattr(pn.state, "curdoc", _FakeDoc(), raising=False)
-
-    # Replace create_task with a no-op; close the coroutine to avoid the
-    # "coroutine was never awaited" RuntimeWarning.
-    def _noop_create_task(coro):
-        coro.close()
-        return None
-
-    monkeypatch.setattr(asyncio, "create_task", _noop_create_task, raising=False)
 
     # Track threads spawned by callback.
     spawned = []
