@@ -21,8 +21,8 @@ dependencies:
   - hvplot
   - networkx
   # for ui
-  - panel>=1.10
-  - panel-material-ui>=0.16
+  - panel>=1.11.1
+  - panel-material-ui>=0.17.0
   # for caching
   - diskcache
 # pip use the -e flag to install in editable mode as indicated below
